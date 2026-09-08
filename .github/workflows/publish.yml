@@ -1,0 +1,95 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release, e.g. v0.1.0"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: pypi
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install build
+      - run: python -m build
+      - name: Verify tag matches package
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          python - <<'PY'
+          import email, os, pathlib, sys, zipfile
+          expected = os.environ["TAG"].removeprefix("v")
+          wheel = next(pathlib.Path("dist").glob("*.whl"))
+          with zipfile.ZipFile(wheel) as archive:
+              path = next(name for name in archive.namelist() if name.endswith(".dist-info/METADATA"))
+              actual = email.message_from_bytes(archive.read(path))["Version"]
+          if expected != actual:
+              sys.exit(f"tag {expected} does not match built package version {actual}")
+          PY
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  release:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          fetch-depth: 0
+      - name: Resolve release range
+        id: release-range
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: scripts/release-range.sh "$TAG" "$GITHUB_OUTPUT"
+      - name: Resolve version
+        id: version
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.CHANGELOG_AWS_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+      - name: Render release notes
+        id: changelog
+        uses: outcomeci/spareparts-changelog@v0
+        with:
+          provider: anthropic
+          instructions: ${{ vars.CHANGELOG_INSTRUCTIONS }}
+          anthropic-api-key: ${{ secrets.ANTHROPIC_API_KEY }}
+          from: ${{ steps.release-range.outputs.from }}
+          to: ${{ steps.release-range.outputs.to }}
+          title: ${{ inputs.tag || github.ref_name }}
+          write-repository: "false"
+          publish-s3: "true"
+          s3-bucket: ${{ vars.CHANGELOG_S3_BUCKET }}
+          s3-key: releases/outcomeci-cli/${{ steps.version.outputs.version }}.md
+          s3-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+          publish-linkedin: "false"
+      - name: Create GitHub release
+        env:
+          RELEASE_NOTES: ${{ steps.changelog.outputs.markdown }}
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          test -n "$RELEASE_NOTES"
+          printf '%s\n' "$RELEASE_NOTES" > release-notes.md
+          gh release create "$TAG" --notes-file release-notes.md --verify-tag
