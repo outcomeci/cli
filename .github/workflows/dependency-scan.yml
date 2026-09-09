@@ -1,0 +1,23 @@
+name: Dependency scan
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+
+jobs:
+  audit:
+    name: pip-audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[test]' pip-audit
+      - run: pip-audit --skip-editable

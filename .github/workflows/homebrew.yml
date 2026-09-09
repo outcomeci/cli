@@ -1,0 +1,62 @@
+name: Update Homebrew tap
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Released tag to point the formula at, e.g. v0.1.0"
+        required: true
+        type: string
+
+jobs:
+  bump:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve version
+        id: version
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+      - name: Wait for PyPI sdist
+        id: pypi
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          for i in $(seq 1 30); do
+            JSON=$(curl -fsSL "https://pypi.org/pypi/outcomeci-cli/${VERSION}/json" || true)
+            URL=$(printf '%s' "$JSON" | jq -r '.urls[]? | select(.packagetype=="sdist") | .url')
+            SHA=$(printf '%s' "$JSON" | jq -r '.urls[]? | select(.packagetype=="sdist") | .digests.sha256')
+            if [ -n "$URL" ] && [ "$URL" != "null" ]; then break; fi
+            sleep 10
+          done
+          if [ -z "$URL" ] || [ "$URL" = "null" ]; then exit 1; fi
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+          echo "sha=$SHA" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          path: source
+      - uses: actions/checkout@v7
+        with:
+          repository: outcomeci/homebrew-tap
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: tap
+      - name: Update formula and resources
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          URL: ${{ steps.pypi.outputs.url }}
+          SHA: ${{ steps.pypi.outputs.sha }}
+        run: |
+          F=tap/Formula/outcomeci-cli.rb
+          mkdir -p tap/Formula
+          if [ ! -f "$F" ]; then cp source/packaging/outcomeci-cli.rb "$F"; fi
+          sed -i -E "s#^  url \".*\"#  url \"${URL}\"#" "$F"
+          sed -i -E "s#^  sha256 \".*\"#  sha256 \"${SHA}\"#" "$F"
+          python3 source/scripts/refresh-homebrew-resources.py "$F" "$VERSION"
+          git -C tap config user.name "github-actions[bot]"
+          git -C tap config user.email "github-actions[bot]@users.noreply.github.com"
+          if git -C tap diff --quiet; then exit 0; fi
+          git -C tap add Formula/outcomeci-cli.rb
+          git -C tap commit -m "outcomeci-cli ${VERSION}"
+          git -C tap push
