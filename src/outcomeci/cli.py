@@ -16,6 +16,8 @@ from .local import continue_run as continue_local_outcome
 from .local import start as start_local_outcome
 from .local import status as local_outcome_status
 from .local import validate_artifacts
+from .local import request_input as request_local_input
+from .local import respond as respond_local_outcome
 from .outcome import run as run_outcome
 from .process import ExecutionError
 from .repository import RepositoryError, initialize, update, validate
@@ -37,7 +39,7 @@ def parser() -> argparse.ArgumentParser:
         item = outcome_commands.add_parser(name)
         item.add_argument("config", nargs="?", type=Path, default=Path("outcome.yml"))
         if name == "compile":
-            item.add_argument("--phase", choices=("intake", "plan", "tasks", "implementation", "pr"))
+            item.add_argument("--phase")
             item.add_argument("--run")
             item.add_argument("--workspace", type=Path, default=Path.cwd())
     run = outcome_commands.add_parser("run")
@@ -72,6 +74,21 @@ def parser() -> argparse.ArgumentParser:
     advance_command.add_argument("--approve", action="store_true")
     advance_command.add_argument("--workspace", type=Path, default=Path.cwd())
     advance_command.add_argument("--config", type=Path)
+    request_command = outcome_commands.add_parser("request-input")
+    request_command.add_argument("interaction_id")
+    request_command.add_argument("--run", required=True)
+    request_command.add_argument("--workspace", type=Path, default=Path.cwd())
+    request_command.add_argument("--config", type=Path)
+    respond_command = outcome_commands.add_parser("respond")
+    respond_command.add_argument("interaction_id")
+    respond_command.add_argument("message")
+    respond_command.add_argument("--run", required=True)
+    respond_command.add_argument("--approve", action="store_true")
+    respond_command.add_argument("--reject", action="store_true")
+    respond_command.add_argument("--workspace", type=Path, default=Path.cwd())
+    respond_command.add_argument("--config", type=Path)
+    respond_command.add_argument("--agent", choices=("codex", "claude"))
+    respond_command.add_argument("--model")
     twin = commands.add_parser("twin")
     twin_commands = twin.add_subparsers(dest="twin_command", required=True)
     twin_search = twin_commands.add_parser("search")
@@ -107,7 +124,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     phase = result["instructions"]["phases"].get(args.phase)
                     if phase is None:
                         raise ExecutionError(f"workflow has no instructions for {args.phase}")
-                    result = {**result, "instructions": {"standup": result["instructions"]["standup"], "phase": phase}}
+                    result = {**result, "instructions": {"orchestrator": result["instructions"]["orchestrator"], "phase": phase}}
             print(json.dumps(result, indent=2, sort_keys=True))
         elif args.command == "outcome" and args.outcome_command == "run":
             print(json.dumps(run_outcome(args.claim, args.workspace), separators=(",", ":")))
@@ -128,6 +145,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "outcome" and args.outcome_command == "advance":
             config = args.config or args.workspace / "outcome.yml"
             print(json.dumps(advance_local_outcome(args.workspace.resolve(), config.resolve(), args.run, args.approve), indent=2, sort_keys=True))
+        elif args.command == "outcome" and args.outcome_command == "request-input":
+            config = args.config or args.workspace / "outcome.yml"
+            print(json.dumps(request_local_input(args.workspace.resolve(), config.resolve(), args.run, args.interaction_id), indent=2, sort_keys=True))
+        elif args.command == "outcome" and args.outcome_command == "respond":
+            config = args.config or args.workspace / "outcome.yml"
+            print(json.dumps(respond_local_outcome(args.workspace.resolve(), config.resolve(), args.run, args.interaction_id, args.message, approve=args.approve, reject=args.reject, agent=args.agent, model=args.model), indent=2, sort_keys=True))
         elif args.command == "twin" and args.twin_command == "search":
             print(json.dumps(search(args.query, args.repository_id, args.limit, args.component_limit), indent=2, sort_keys=True))
         return 0

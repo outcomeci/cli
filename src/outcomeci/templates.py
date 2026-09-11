@@ -16,23 +16,76 @@ spec:
       - node_modules/**
       - dist/**
   instructions:
-    standup: .outcomeci/instructions/standup.md
+    standup:
+      path: .outcomeci/instructions/standup.md
   agents:
     default:
       runner: codex
     phases:
       intake:
         instructions: .outcomeci/instructions/intake.md
+        needs: []
+        expects:
+          inputs:
+            - name: outcome_request
+              from: runtime.intent
+              media_type: text/plain
+          outputs:
+            - name: trajectory
+              path: intake/trajectory.json
+              media_type: application/json
+        humans:
+          after:
+            - id: confirm_intent
+              participant: requester
+              purpose: Confirm the intent and affected scope before planning.
+              interaction: approval
+              required: true
       plan:
         instructions: .outcomeci/instructions/plan.md
+        needs: [intake]
+        expects:
+          inputs:
+            - name: trajectory
+              from: intake.outputs.trajectory
+              media_type: application/json
+          outputs:
+            - name: specifications
+              path: specs
+              media_type: inode/directory
+            - name: plans
+              path: plans
+              media_type: inode/directory
       tasks:
         instructions: .outcomeci/instructions/tasks.md
+        needs: [plan]
+        expects:
+          inputs:
+            - name: specifications
+              from: plan.outputs.specifications
+              media_type: inode/directory
+            - name: plans
+              from: plan.outputs.plans
+              media_type: inode/directory
+          outputs:
+            - name: task_graph
+              path: tasks/tasks.md
+              media_type: text/markdown
+            - name: repository_tasks
+              path: tasks/repositories
+              media_type: inode/directory
       implementation:
         instructions: .outcomeci/instructions/implementation.md
-  gates:
-    requester_confirmation:
-      before_tasks: true
-      before_implementation: true
+        needs: [tasks]
+        expects:
+          inputs:
+            - name: task_graph
+              from: tasks.outputs.task_graph
+              media_type: text/markdown
+          outputs:
+            - name: publication
+              path: implementation/publication.json
+              media_type: application/json
   connections: []
 """
 

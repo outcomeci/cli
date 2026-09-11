@@ -4,7 +4,11 @@ import json
 import re
 from pathlib import Path
 
+import pytest
+import yaml
+
 from outcomeci import local
+from outcomeci.process import ExecutionError
 from outcomeci.repository import initialize
 
 
@@ -41,7 +45,8 @@ def test_local_start_and_continue_through_tasks(tmp_path: Path, monkeypatch) -> 
     monkeypatch.setattr(local, "_transcripts", lambda *args: {"usage_records": 0, "files": [], "usage": []})
 
     state = local.start(tmp_path, tmp_path / "outcome.yml", "Improve local onboarding")
-    assert state["status"] == "awaiting_confirmation"
+    assert state["status"] == "awaiting_input"
+    assert state["pending_interaction"]["id"] == "confirm_intent"
     assert state["phase"] == "intake"
     manifest_path = tmp_path / ".outcomeci" / "outcomes" / state["run_id"] / "manifest.json"
     intake_manifest = json.loads(manifest_path.read_text())
@@ -73,8 +78,56 @@ def test_interactive_session_lifecycle(tmp_path: Path) -> None:
     )
     _fake_invoke("codex", None, prompt, tmp_path, 1)
     validated = local.validate_artifacts(tmp_path, tmp_path / "outcome.yml", state["run_id"])
-    assert validated["status"] == "awaiting_confirmation"
+    assert validated["status"] == "awaiting_input"
 
+    answered = local.respond(tmp_path, tmp_path / "outcome.yml", state["run_id"], "confirm_intent", "The scope is correct.", approve=True)
+    assert answered["status"] == "awaiting_confirmation"
     advanced = local.advance(tmp_path, tmp_path / "outcome.yml", state["run_id"], True)
     assert advanced["phase"] == "plan"
     assert advanced["status"] == "awaiting_agent"
+
+
+def test_ready_set_supports_parallel_phases_and_join(tmp_path: Path) -> None:
+    initialize(tmp_path, "filesystem")
+    compiled = local.compile_workflow(tmp_path / "outcome.yml")
+    phases = compiled["instructions"]["phases"]
+    phases["product_review"] = {**phases["plan"], "needs": ["intake"]}
+    phases["technical_review"] = {**phases["plan"], "needs": ["intake"]}
+    phases["plan"]["needs"] = ["product_review", "technical_review"]
+    assert local._ready(compiled, ["intake"]) == ["product_review", "technical_review"]
+    assert local._ready(compiled, ["intake", "product_review"]) == ["technical_review"]
+    assert local._ready(compiled, ["intake", "product_review", "technical_review"]) == ["plan"]
+
+
+def test_declared_json_schema_is_enforced(tmp_path: Path) -> None:
+    initialize(tmp_path, "filesystem")
+    compiled = local.compile_workflow(tmp_path / "outcome.yml")
+    contract = compiled["instructions"]["phases"]["intake"]["expects"]["outputs"][0]
+    contract["schema"] = ".outcomeci/schemas/test.json"
+    compiled["instructions"]["schemas"][contract["schema"]] = {"value": {"type": "object", "required": ["intent"]}}
+    outcome = tmp_path / ".outcomeci" / "outcomes" / "test"
+    artifact = outcome / contract["path"]
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text('{"wrong": true}')
+    with pytest.raises(ExecutionError, match="failed JSON validation"):
+        local._validate_outputs(compiled, outcome, "intake")
+
+
+def test_before_interaction_is_durable_and_resumes_execution(tmp_path: Path, monkeypatch) -> None:
+    initialize(tmp_path, "filesystem")
+    workflow = tmp_path / "outcome.yml"
+    value = yaml.safe_load(workflow.read_text())
+    intake = value["spec"]["agents"]["phases"]["intake"]
+    intake["humans"] = {
+        "before": [{"id": "confirm_direction", "participant": "requester", "purpose": "Stop a bad direction.", "interaction": "approval"}],
+        "during": [{"id": "ask_expert", "participant": "domain_expert", "purpose": "Resolve domain questions.", "interaction": "consultation", "availability": "on_demand"}],
+    }
+    workflow.write_text(yaml.safe_dump(value, sort_keys=False))
+    monkeypatch.setattr(local, "invoke", _fake_invoke)
+    monkeypatch.setattr(local, "_transcripts", lambda *args: {"usage_records": 0, "files": [], "usage": []})
+    state = local.start(tmp_path, workflow, "Improve onboarding")
+    assert state["status"] == "awaiting_input"
+    request = Path(state["pending_interaction"]["path"])
+    assert json.loads(request.read_text())["timing"] == "before"
+    state = local.respond(tmp_path, workflow, state["run_id"], "confirm_direction", "Proceed.", approve=True)
+    assert state["status"] == "awaiting_confirmation"

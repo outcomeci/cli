@@ -10,6 +10,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from jsonschema import ValidationError, validate as validate_json
+
 from .process import ExecutionError, GitHub, invoke
 from .config import compile_workflow
 from .manifest import build_manifest
@@ -37,11 +39,55 @@ def _claim(path: Path) -> dict[str, Any]:
     except (OSError, json.JSONDecodeError) as exc:
         raise ExecutionError("invalid outcome claim") from exc
     required = {"odl_run_id", "workflow_run_id", "phase", "trajectory_version", "agent", "model", "state_repository", "targets", "intent_context"}
-    if not isinstance(value, dict) or not required <= set(value) or value["phase"] not in {"intake", "plan", "tasks"} or value["agent"] not in {"codex", "claude"}:
+    if not isinstance(value, dict) or not required <= set(value) or not isinstance(value["phase"], str) or value["agent"] not in {"codex", "claude"}:
         raise ExecutionError("invalid outcome claim")
     if not isinstance(value["targets"], list) or (value["phase"] != "intake" and not value["targets"]):
         raise ExecutionError("invalid outcome targets")
     return value
+
+
+def _contract_path(root: Path, contract: dict[str, Any]) -> Path:
+    path = (root / contract["path"]).resolve()
+    try:
+        path.relative_to(root.resolve())
+    except ValueError as exc:
+        raise ExecutionError(f"artifact {contract['name']} escapes the outcome directory") from exc
+    return path
+
+
+def _validate_contract_outputs(compiled: dict[str, Any], root: Path, phase: str) -> list[Path]:
+    paths: list[Path] = []
+    for contract in compiled["instructions"]["phases"][phase]["expects"]["outputs"]:
+        path = _contract_path(root, contract)
+        if not path.exists():
+            if contract["required"]:
+                raise ExecutionError(f"missing required output {phase}.{contract['name']}: {contract['path']}")
+            continue
+        paths.append(path)
+        if contract["media_type"] == "inode/directory":
+            if not path.is_dir() or not any(item.is_file() for item in path.rglob("*")):
+                raise ExecutionError(f"output {phase}.{contract['name']} must be a non-empty directory")
+            continue
+        if not path.is_file() or not path.read_bytes():
+            raise ExecutionError(f"output {phase}.{contract['name']} must be a non-empty file")
+        if contract["media_type"] == "application/json" or contract.get("schema"):
+            try:
+                value = json.loads(path.read_text(encoding="utf-8"))
+                if contract.get("schema"):
+                    validate_json(value, compiled["instructions"]["schemas"][contract["schema"]]["value"])
+            except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
+                raise ExecutionError(f"output {phase}.{contract['name']} failed JSON validation: {exc}") from exc
+    return paths
+
+
+def _validate_claim_phase(compiled: dict[str, Any], outcome_root: Path, phase: str) -> None:
+    phases = compiled["instructions"]["phases"]
+    if phase not in phases:
+        raise ExecutionError(f"workflow has no phase {phase}")
+    for dependency in phases[phase]["needs"]:
+        for contract in phases[dependency]["expects"]["outputs"]:
+            if contract["required"] and not _contract_path(outcome_root, contract).exists():
+                raise ExecutionError(f"phase {phase} is blocked by incomplete dependency {dependency}")
 
 
 def _sessions(agent: str) -> list[Path]:
@@ -215,24 +261,26 @@ def run(claim_path: Path, workspace: Path) -> dict[str, Any]:
     outcome_root = state / ".outcomeci" / "outcomes" / claim["odl_run_id"]
     outcome_root.mkdir(parents=True, exist_ok=True)
     compiled = compile_workflow(workflow)
+    _validate_claim_phase(compiled, outcome_root, claim["phase"])
+    configured_policy = compiled["instructions"]["phases"][claim["phase"]]["policy"]
+    runner = configured_policy.get("runner") or claim["agent"]
+    model = configured_policy.get("model") if configured_policy.get("model") is not None else claim.get("model")
     shared = compiled["instructions"]["standup"]["content"]
     phase_instructions = compiled["instructions"]["phases"][claim["phase"]]["content"]
     payload = {"claim": claim, "state_repository": str(state), "product_repositories": [{"name_with_owner": name, "base_commit_sha": base_commits[name], "checkout": str(path)} for name, path in zip(repositories, products)]}
     prompt = f"{shared}\n\n{phase_instructions}\n\nWrite all durable artifacts beneath {outcome_root}. Product repositories are read-only. The `oci twin search` command is the only live Digital Twin interface. Do not commit, push, or open pull requests in product repositories.\n\n{json.dumps(payload, separators=(',', ':'))}"
-    summary = invoke(claim["agent"], claim.get("model"), prompt, workspace, 7200)
+    summary = invoke(runner, model, prompt, workspace, 7200)
     for repository, checkout in zip(repositories, products):
         if _git(["git", "status", "--porcelain=v1"], checkout, github.env):
             raise ExecutionError(f"planning modified product repository {repository}")
-    expected = _expected(outcome_root, repositories, claim["phase"])
-    if any(not path.is_file() or not path.read_text(encoding="utf-8").strip() for path in expected):
-        raise ExecutionError("agent did not produce the complete outcome artifact set")
+    _validate_contract_outputs(compiled, outcome_root, claim["phase"])
     standup = (outcome_root / "standup.md").read_text(encoding="utf-8")
     if "# Standup:" not in standup or "**Status**: active" not in standup:
         raise ExecutionError("agent did not produce a valid active Standup")
     intake_context = None
     if claim["phase"] == "intake":
         intake_context = _validate_trajectory(json.loads((outcome_root / "intake" / "trajectory.json").read_text(encoding="utf-8")), claim)
-    transcripts = _transcripts(claim["agent"], outcome_root, claim["phase"])
+    transcripts = _transcripts(runner, outcome_root, claim["phase"])
     manifest = build_manifest(
         outcome_root=outcome_root,
         artifact_base=state,
@@ -247,9 +295,10 @@ def run(claim_path: Path, workspace: Path) -> dict[str, Any]:
         context_revision_id=claim["intent_context"].get("ontology_revision_id"),
         constitution_sha256=_sha(constitution),
         repository_base_commits=base_commits,
-        runner=claim["agent"],
-        model=claim.get("model"),
+        runner=runner,
+        model=model,
         transcript=transcripts,
+        phase_contract=compiled["instructions"]["phases"][claim["phase"]]["expects"],
     )
     artifacts = manifest["artifacts"]
     (outcome_root / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
