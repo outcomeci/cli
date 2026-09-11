@@ -42,3 +42,4 @@ def test_manifest_has_one_backend_independent_shape(tmp_path: Path) -> None:
     assert local["runner"].keys() == managed["runner"].keys()
     assert local["backend"].keys() == managed["backend"].keys()
     assert local["context"].keys() == managed["context"].keys()
+    assert local["phase_contract"] is None

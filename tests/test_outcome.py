@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from outcomeci import outcome
-from outcomeci.outcome import _claim, _expected, _transcripts, _validate_trajectory
+from outcomeci.outcome import _claim, _expected, _transcripts, _validate_claim_phase, _validate_trajectory
 from outcomeci.process import ExecutionError
 
 
@@ -13,11 +13,10 @@ def test_claim_accepts_managed_plan(tmp_path: Path) -> None:
     assert _claim(path)["phase"] == "plan"
 
 
-def test_claim_rejects_unknown_phase(tmp_path: Path) -> None:
+def test_claim_accepts_custom_phase_for_workflow_validation(tmp_path: Path) -> None:
     path = tmp_path / "claim.json"
-    path.write_text('{"odl_run_id":"r","workflow_run_id":"w","phase":"deploy","trajectory_version":1,"agent":"codex","model":null,"state_repository":"org/state","targets":[],"intent_context":{}}')
-    with pytest.raises(ExecutionError):
-        _claim(path)
+    path.write_text('{"odl_run_id":"r","workflow_run_id":"w","phase":"deploy","trajectory_version":1,"agent":"codex","model":null,"state_repository":"org/state","targets":[{"repository":"org/repo"}],"intent_context":{}}')
+    assert _claim(path)["phase"] == "deploy"
 
 
 def test_plan_requires_standup_and_repo_artifacts(tmp_path: Path) -> None:
@@ -58,3 +57,16 @@ def test_interactive_transcript_captures_only_bytes_after_begin(tmp_path: Path, 
     assert "session_meta" not in copied.read_text()
     assert captured["usage_records"] == 1
     assert captured["usage"][0]["input_tokens"] == 12
+
+
+def test_managed_claim_phase_must_have_completed_dependencies(tmp_path: Path) -> None:
+    compiled = {"instructions": {"phases": {
+        "intake": {"needs": [], "expects": {"outputs": [{"name": "packet", "path": "intake/packet.json", "required": True}]}},
+        "plan": {"needs": ["intake"], "expects": {"outputs": []}},
+    }}}
+    with pytest.raises(ExecutionError, match="blocked by incomplete dependency intake"):
+        _validate_claim_phase(compiled, tmp_path, "plan")
+    packet = tmp_path / "intake" / "packet.json"
+    packet.parent.mkdir()
+    packet.write_text("{}")
+    _validate_claim_phase(compiled, tmp_path, "plan")

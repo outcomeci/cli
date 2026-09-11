@@ -26,6 +26,7 @@ def build_manifest(
     runner: str,
     model: str | None,
     transcript: dict[str, Any],
+    phase_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the canonical envelope without backend-specific omissions."""
     artifacts = sorted(
@@ -47,6 +48,7 @@ def build_manifest(
         "constitution_sha256": constitution_sha256,
         "repository_base_commits": repository_base_commits,
         "runner": {"provider": runner, "model": model or "provider-default"},
+        "phase_contract": phase_contract,
         "transcript": transcript,
         "artifacts": artifacts,
     }
