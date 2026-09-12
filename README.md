@@ -188,3 +188,46 @@ current outcome artifact directory as writable. A short-lived Unix-socket
 capability permits only the current phase's configured hook IDs. Human
 responses are re-read from Slack before acceptance. Execution fails closed if
 Bubblewrap is unavailable; prompts are not treated as a security boundary.
+
+### Custom human transports
+
+A human hook may use an internal HTTP service or MCP server without granting
+the agent arbitrary access to it. The adapter always exposes the same
+`request`, `poll`, and verified `accept` lifecycle:
+
+```yaml
+connections:
+  - ref: people_api
+    provider: custom
+    transport:
+      type: http
+      endpoint: https://people.example.com
+    auth:
+      env: PEOPLE_API_TOKEN
+    operations:
+      request: {method: POST, path: /requests}
+      poll: {method: GET, path: /requests/{correlation_id}}
+    contract:
+      request:
+        input:
+          type: object
+          required: [run_id, phase, interaction_id, interaction, purpose, targets]
+        output:
+          type: object
+          required: [correlation_id]
+      poll:
+        output:
+          type: object
+          required: [responses]
+```
+
+Set `delivery.type: custom` and `delivery.connection: people_api` on the human
+hook. The request operation returns `correlation_id`. Poll returns
+`responses`, where each item contains readable `from`, `message`, and
+`responded_at` strings. MCP connections use `transport.type: mcp`, protocol
+`streamable_http` or `stdio`, and tool names under `operations.request.tool`
+and `operations.poll.tool`.
+
+Credentials remain in the named environment variable on the host side of the
+capability broker. OutcomeCI removes every connection-declared credential from
+the agent environment.

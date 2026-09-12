@@ -65,8 +65,10 @@ def invoke(
     allow_local_auth: bool = False,
     extra_env: dict[str, str] | None = None,
     writable_paths: list[Path] | None = None,
+    excluded_env: set[str] | None = None,
 ) -> str:
     secrets = {"GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"}
+    secrets.update(excluded_env or set())
     env = {key: value for key, value in os.environ.items() if key not in secrets}
     env.update(extra_env or {})
     if agent == "codex":

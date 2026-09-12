@@ -29,6 +29,15 @@ def test_secure_execution_masks_slack_and_mounts_only_outcome_writable(monkeypat
     assert not any(argv[index:index + 3] == ["--bind", str(outcome), str(outcome)] for index in range(len(argv) - 2))
 
 
+def test_secure_execution_masks_connection_defined_credentials(monkeypatch, tmp_path: Path) -> None:
+    calls = []
+    monkeypatch.setenv("PEOPLE_TOKEN", "private")
+    monkeypatch.setattr(process.shutil, "which", lambda name: "/usr/bin/bwrap" if name == "bwrap" else None)
+    monkeypatch.setattr(process, "command", lambda argv, **kwargs: calls.append(kwargs["env"]) or process.Result(0, "complete", ""))
+    process.invoke("codex", None, "prompt", tmp_path, 10, allow_local_auth=True, writable_paths=[], excluded_env={"PEOPLE_TOKEN"})
+    assert "PEOPLE_TOKEN" not in calls[0]
+
+
 def test_managed_codex_still_requires_injected_auth(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("CODEX_HOME", raising=False)

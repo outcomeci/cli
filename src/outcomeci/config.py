@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+import jsonschema
 
 from . import __version__
 
@@ -127,8 +128,10 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
             if not isinstance(purpose, str) or not purpose.strip():
                 raise ConfigError(f"{field}.{timing}[{index}].purpose is required")
             delivery = _mapping(item.get("delivery", {"type": "local"}), f"{field}.{timing}[{index}].delivery")
-            if delivery.get("type") not in {"local", "slack"}:
+            if delivery.get("type") not in {"local", "slack", "custom"}:
                 raise ConfigError(f"{field}.{timing}[{index}].delivery.type is unsupported")
+            if delivery.get("type") in {"slack", "custom"} and not isinstance(delivery.get("connection"), str):
+                raise ConfigError(f"{field}.{timing}[{index}].delivery.connection is required")
             targets = delivery.get("targets", [])
             if not isinstance(targets, list):
                 raise ConfigError(f"{field}.{timing}[{index}].delivery.targets must be a list")
@@ -262,12 +265,69 @@ def load(path: Path) -> dict[str, Any]:
     if not isinstance(connections, list):
         raise ConfigError("spec.connections must be a list")
     refs: set[str] = set()
+    connection_providers: dict[str, str] = {}
     for index, value in enumerate(connections):
         item = _mapping(value, f"spec.connections[{index}]")
         ref = item.get("ref")
         if not isinstance(ref, str) or not ref or ref in refs:
             raise ConfigError("connection references must be unique non-empty strings")
         refs.add(ref)
+        provider = item.get("provider")
+        if provider not in {"slack", "custom"}:
+            raise ConfigError(f"spec.connections[{index}].provider is unsupported")
+        connection_providers[ref] = provider
+        if provider == "custom":
+            transport = _mapping(item.get("transport"), f"spec.connections[{index}].transport")
+            transport_type = transport.get("type")
+            if transport_type == "http":
+                if not isinstance(transport.get("endpoint"), str) or not transport["endpoint"].startswith(("http://", "https://")):
+                    raise ConfigError(f"spec.connections[{index}].transport.endpoint must be an HTTP URL")
+            elif transport_type == "mcp":
+                protocol = transport.get("protocol")
+                if protocol == "streamable_http" and (not isinstance(transport.get("endpoint"), str) or not transport["endpoint"].startswith(("http://", "https://"))):
+                    raise ConfigError(f"spec.connections[{index}].transport.endpoint must be an HTTP URL")
+                if protocol == "stdio" and (not isinstance(transport.get("command"), list) or not transport["command"] or not all(isinstance(part, str) for part in transport["command"])):
+                    raise ConfigError(f"spec.connections[{index}].transport.command must be a non-empty string list")
+                if protocol not in {"streamable_http", "stdio"}:
+                    raise ConfigError(f"spec.connections[{index}].transport.protocol is unsupported")
+            else:
+                raise ConfigError(f"spec.connections[{index}].transport.type is unsupported")
+            operations = _mapping(item.get("operations"), f"spec.connections[{index}].operations")
+            for operation in ("request", "poll"):
+                operation_value = _mapping(operations.get(operation), f"spec.connections[{index}].operations.{operation}")
+                if transport_type == "http" and not isinstance(operation_value.get("path"), str):
+                    raise ConfigError(f"spec.connections[{index}].operations.{operation}.path is required")
+                if transport_type == "mcp" and not isinstance(operation_value.get("tool"), str):
+                    raise ConfigError(f"spec.connections[{index}].operations.{operation}.tool is required")
+            auth = item.get("auth", {})
+            if auth:
+                auth = _mapping(auth, f"spec.connections[{index}].auth")
+                if set(auth) - {"env", "header", "scheme"} or not isinstance(auth.get("env"), str):
+                    raise ConfigError(f"spec.connections[{index}].auth must reference an environment variable")
+            contract = item.get("contract", {})
+            if contract:
+                contract = _mapping(contract, f"spec.connections[{index}].contract")
+                if set(contract) - {"request", "poll"}:
+                    raise ConfigError(f"spec.connections[{index}].contract supports only request and poll")
+                for operation, operation_contract in contract.items():
+                    operation_contract = _mapping(operation_contract, f"spec.connections[{index}].contract.{operation}")
+                    if set(operation_contract) - {"input", "output"}:
+                        raise ConfigError(f"spec.connections[{index}].contract.{operation} supports only input and output")
+                    for direction, schema in operation_contract.items():
+                        if not isinstance(schema, dict):
+                            raise ConfigError(f"spec.connections[{index}].contract.{operation}.{direction} must be an inline JSON Schema")
+                        try:
+                            jsonschema.validators.validator_for(schema).check_schema(schema)
+                        except jsonschema.SchemaError as exc:
+                            raise ConfigError(f"spec.connections[{index}].contract.{operation}.{direction} is not a valid JSON Schema: {exc.message}") from exc
+    for phase_name, phase in normalized_phases.items():
+        for timing in ("before", "during", "after"):
+            for hook in phase["humans"][timing]:
+                delivery = hook["delivery"]
+                if delivery.get("type") in {"slack", "custom"}:
+                    ref = delivery["connection"]
+                    if connection_providers.get(ref) != delivery["type"]:
+                        raise ConfigError(f"human hook {phase_name}.{hook['id']} references an incompatible connection")
     root["_graph"] = {"orchestrator": orchestrator_name, "levels": levels, "phases": normalized_phases, "default_policy": default}
     return root
 

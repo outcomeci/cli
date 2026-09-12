@@ -116,7 +116,7 @@ def parser() -> argparse.ArgumentParser:
     human_commands = human.add_subparsers(dest="human_command", required=True)
     human_targets = human_commands.add_parser("targets", help="List readable Slack people, channels, and groups")
     human_targets.add_argument("--workspace", type=Path, default=Path.cwd())
-    human_assign = human_commands.add_parser("assign", help="Assign Slack targets to a workflow hook")
+    human_assign = human_commands.add_parser("assign", help="Assign readable targets to a workflow hook")
     human_assign.add_argument("phase")
     human_assign.add_argument("timing", choices=("before", "during", "after"))
     human_assign.add_argument("interaction_id")
@@ -125,6 +125,7 @@ def parser() -> argparse.ArgumentParser:
     human_assign.add_argument("--group", action="append", default=[])
     human_assign.add_argument("--wait", choices=("ask", "block", "continue"), default="ask")
     human_assign.add_argument("--timeout", type=int)
+    human_assign.add_argument("--connection", default="slack_local")
     human_assign.add_argument("--workspace", type=Path, default=Path.cwd())
     human_assign.add_argument("--config", type=Path)
     human_request = human_commands.add_parser("request", help="Deliver a configured human hook")
@@ -139,6 +140,7 @@ def parser() -> argparse.ArgumentParser:
     human_poll.add_argument("--wait", type=int, default=0)
     human_poll.add_argument("--interval", type=float, default=2)
     human_poll.add_argument("--workspace", type=Path, default=Path.cwd())
+    human_poll.add_argument("--config", type=Path)
     human_accept = human_commands.add_parser("accept", help="Persist a polled response without launching another agent")
     human_accept.add_argument("interaction_id")
     human_accept.add_argument("message")
@@ -246,12 +248,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 selected = [("user", value) for value in args.user] + [("channel", value) for value in args.channel] + [("group", value) for value in args.group]
                 if not selected:
                     raise ExecutionError("assign at least one --user, --channel, or --group")
-                print(json.dumps(assign_human_hook(workspace, config, args.phase, args.timing, args.interaction_id, selected, args.wait, args.timeout), indent=2, sort_keys=True))
+                print(json.dumps(assign_human_hook(workspace, config, args.phase, args.timing, args.interaction_id, selected, args.wait, args.timeout, args.connection), indent=2, sort_keys=True))
             elif args.human_command == "request":
                 result = invoke_capability("request", args.run, args.interaction_id, continue_while_waiting=args.continue_while_waiting) if scoped else request_human_input(workspace, (args.config or workspace / "outcome.yml").resolve(), args.run, args.interaction_id, args.continue_while_waiting)
                 print(json.dumps(result, indent=2, sort_keys=True))
             elif args.human_command == "poll":
-                result = invoke_capability("poll", args.run, args.interaction_id, wait_seconds=args.wait, interval_seconds=args.interval) if scoped else poll_human_input(workspace, args.run, args.interaction_id, args.wait, args.interval)
+                config = (getattr(args, "config", None) or workspace / "outcome.yml").resolve()
+                result = invoke_capability("poll", args.run, args.interaction_id, wait_seconds=args.wait, interval_seconds=args.interval) if scoped else poll_human_input(workspace, config, args.run, args.interaction_id, args.wait, args.interval)
                 print(json.dumps(result, indent=2, sort_keys=True))
             elif args.human_command == "accept":
                 result = invoke_capability("accept", args.run, args.interaction_id, message=args.message, approve=args.approve, reject=args.reject) if scoped else accept_human_input(workspace, (args.config or workspace / "outcome.yml").resolve(), args.run, args.interaction_id, args.message, args.approve, args.reject)

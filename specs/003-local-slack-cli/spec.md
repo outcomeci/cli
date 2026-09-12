@@ -29,6 +29,7 @@ Allow a developer to configure a user-owned Slack app for an OutcomeCI filesyste
 - Persist hook recipients only as readable usernames, channel names, or user-group handles in `outcome.yml`.
 - Keep Slack IDs in private integration runtime state and never include them in agent prompts, command output, workflow files, or outcome artifacts.
 - Prevent an executing agent from reading Slack credentials, changing `outcome.yml`, discovering targets, assigning hooks, invoking an undeclared hook, or fabricating a human response.
+- Allow user-defined HTTP and MCP transports to deliver only declared human hooks through the same capability boundary and normalized request/poll contracts.
 - Fail closed when the required local OS isolation primitive is unavailable.
 - Let a hook block, continue asynchronously, or ask the requester to choose a bounded wait at runtime.
 - Expose a deterministic polling command that reads durable interaction state and optionally waits for a bounded duration.

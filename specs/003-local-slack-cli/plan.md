@@ -13,4 +13,5 @@
 11. Add Slack target discovery and workflow assignment commands, plus a provider-neutral durable interaction polling command for agents.
 12. Feed resolved and late interaction responses into subsequent phase context and cover blocking, bounded-wait, and continue-while-waiting behavior.
 13. Place Codex and Claude Code behind an OS filesystem boundary and mediate runtime human operations through a short-lived run/phase/hook-scoped Unix-socket capability.
+14. Add a custom human-message adapter for HTTP, MCP Streamable HTTP, and MCP stdio with operation-scoped JSON Schema contracts and host-only credentials.
 14. Re-query Slack before accepting a response so agent-authored content cannot impersonate a human decision.
