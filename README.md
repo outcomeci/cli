@@ -231,3 +231,32 @@ and `operations.poll.tool`.
 Credentials remain in the named environment variable on the host side of the
 capability broker. OutcomeCI removes every connection-declared credential from
 the agent environment.
+## Sync a workflow to OutcomeCI Cloud
+
+Authenticate this machine through your signed-in browser:
+
+```bash
+oci auth login
+```
+
+Then create the first immutable workflow revision for a workspace:
+
+```bash
+oci workflow sync outcome.yml \
+  --workspace workspace_abc123 \
+  --create
+```
+
+When that workflow already exists, make the versioning intent explicit:
+
+```bash
+oci workflow sync outcome.yml \
+  --workspace workspace_abc123 \
+  --version
+```
+
+The CLI validates the complete local workflow—including referenced instructions
+and filesystem context—before uploading it. Credentials live in
+`~/.config/outcomeci/credentials.json` with owner-only permissions and never in
+the outcome repository. Set `OUTCOMECI_API_URL` when testing against a local or
+staging control plane.

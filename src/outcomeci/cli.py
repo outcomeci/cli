@@ -35,12 +35,32 @@ from .slack import setup as setup_slack
 from .slack import status as slack_status
 from .slack import targets as slack_targets
 from .twin import TwinError, search
+from .cloud import auth_status as cloud_auth_status
+from .cloud import login as cloud_login
+from .cloud import logout as cloud_logout
+from .cloud import sync_workflow
 
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(prog="oci", description="Standup and outcome workflows for OutcomeCI")
     root.add_argument("--version", action="version", version=f"oci {__version__}")
     commands = root.add_subparsers(dest="command", required=True)
+    auth = commands.add_parser("auth", help="Authenticate with OutcomeCI Cloud")
+    auth_commands = auth.add_subparsers(dest="auth_command", required=True)
+    auth_login = auth_commands.add_parser("login")
+    auth_login.add_argument("--api-url", default=os.environ.get("OUTCOMECI_API_URL", "https://api.outcomeci.com"))
+    auth_login.add_argument("--no-open", action="store_true")
+    auth_commands.add_parser("status")
+    auth_commands.add_parser("logout")
+    workflow = commands.add_parser("workflow", help="Manage OutcomeCI Cloud workflows")
+    workflow_commands = workflow.add_subparsers(dest="workflow_command", required=True)
+    workflow_sync = workflow_commands.add_parser("sync")
+    workflow_sync.add_argument("file", type=Path)
+    workflow_sync.add_argument("--workspace", required=True)
+    workflow_sync.add_argument("--name")
+    workflow_mode = workflow_sync.add_mutually_exclusive_group(required=True)
+    workflow_mode.add_argument("--create", action="store_true")
+    workflow_mode.add_argument("--version", action="store_true")
     for name in ("init", "update", "validate", "status"):
         item = commands.add_parser(name)
         item.add_argument("--dir", type=Path, default=Path.cwd())
@@ -179,6 +199,18 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.command == "auth":
+            if args.auth_command == "login":
+                print(json.dumps(cloud_login(args.api_url, open_browser=not args.no_open), indent=2))
+            elif args.auth_command == "status":
+                print(json.dumps(cloud_auth_status(), indent=2))
+            else:
+                print(json.dumps(cloud_logout(), indent=2))
+            return 0
+        if args.command == "workflow":
+            result = sync_workflow(args.file, args.workspace, args.name, "create" if args.create else "version")
+            print(json.dumps(result, indent=2, default=str))
+            return 0
         if args.command == "init":
             print(json.dumps({"created": initialize(args.dir, args.backend)}, indent=2))
         elif args.command == "update":
