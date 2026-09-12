@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import json
 import os
 import sys
@@ -37,8 +38,9 @@ from .slack import targets as slack_targets
 from .twin import TwinError, search
 from .cloud import auth_status as cloud_auth_status
 from .cloud import login as cloud_login
+from .cloud import login_with_key as cloud_login_with_key
 from .cloud import logout as cloud_logout
-from .cloud import sync_workflow
+from .cloud import sync_workflow, vault_request
 
 
 def parser() -> argparse.ArgumentParser:
@@ -50,6 +52,7 @@ def parser() -> argparse.ArgumentParser:
     auth_login = auth_commands.add_parser("login")
     auth_login.add_argument("--api-url", default=os.environ.get("OUTCOMECI_API_URL", "https://api.outcomeci.com"))
     auth_login.add_argument("--no-open", action="store_true")
+    auth_login.add_argument("--key-stdin", action="store_true", help="Read a workspace API key from stdin instead of using device login")
     auth_commands.add_parser("status")
     auth_commands.add_parser("logout")
     workflow = commands.add_parser("workflow", help="Manage OutcomeCI Cloud workflows")
@@ -61,6 +64,29 @@ def parser() -> argparse.ArgumentParser:
     workflow_mode = workflow_sync.add_mutually_exclusive_group(required=True)
     workflow_mode.add_argument("--create", action="store_true")
     workflow_mode.add_argument("--version", action="store_true")
+    vault = commands.add_parser("vault", help="Manage workspace credentials through OutcomeCI Vault")
+    vault_commands = vault.add_subparsers(dest="vault_command", required=True)
+    vault_list = vault_commands.add_parser("list")
+    vault_list.add_argument("--workspace", required=True)
+    vault_put = vault_commands.add_parser("put")
+    vault_put.add_argument("path")
+    vault_put.add_argument("--workspace", required=True)
+    vault_put.add_argument("--name")
+    vault_put.add_argument("--value")
+    vault_put.add_argument("--value-stdin", action="store_true")
+    vault_put.add_argument("--workflow", action="append", default=[])
+    vault_rotate = vault_commands.add_parser("rotate")
+    vault_rotate.add_argument("entry_id")
+    vault_rotate.add_argument("--workspace", required=True)
+    vault_rotate.add_argument("--value")
+    vault_rotate.add_argument("--value-stdin", action="store_true")
+    vault_grant = vault_commands.add_parser("grant")
+    vault_grant.add_argument("entry_id")
+    vault_grant.add_argument("--workspace", required=True)
+    vault_grant.add_argument("--workflow", action="append", default=[])
+    vault_revoke = vault_commands.add_parser("revoke")
+    vault_revoke.add_argument("entry_id")
+    vault_revoke.add_argument("--workspace", required=True)
     for name in ("init", "update", "validate", "status"):
         item = commands.add_parser(name)
         item.add_argument("--dir", type=Path, default=Path.cwd())
@@ -201,7 +227,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.command == "auth":
             if args.auth_command == "login":
-                print(json.dumps(cloud_login(args.api_url, open_browser=not args.no_open), indent=2))
+                if args.key_stdin:
+                    key = getpass.getpass("Workspace API key: ") if sys.stdin.isatty() else sys.stdin.read()
+                    print(json.dumps(cloud_login_with_key(args.api_url, key), indent=2))
+                else:
+                    print(json.dumps(cloud_login(args.api_url, open_browser=not args.no_open), indent=2))
             elif args.auth_command == "status":
                 print(json.dumps(cloud_auth_status(), indent=2))
             else:
@@ -210,6 +240,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "workflow":
             result = sync_workflow(args.file, args.workspace, args.name, "create" if args.create else "version")
             print(json.dumps(result, indent=2, default=str))
+            return 0
+        if args.command == "vault":
+            if args.vault_command == "list":
+                result = vault_request(args.workspace, "list")
+            elif args.vault_command in {"put", "rotate"}:
+                value = sys.stdin.read().rstrip("\n") if args.value_stdin else args.value
+                if not value:
+                    raise ExecutionError("secret value is required; use --value-stdin or --value")
+                if args.vault_command == "put":
+                    result = vault_request(args.workspace, "put", path=args.path, display_name=args.name or args.path, value=value, workflow_ids=args.workflow)
+                else:
+                    result = vault_request(args.workspace, "rotate", entry_id=args.entry_id, value=value)
+            elif args.vault_command == "grant":
+                result = vault_request(args.workspace, "grant", entry_id=args.entry_id, workflow_ids=args.workflow)
+            else:
+                result = vault_request(args.workspace, "revoke", entry_id=args.entry_id)
+            print(json.dumps(result or {"ok": True}, indent=2, default=str))
             return 0
         if args.command == "init":
             print(json.dumps({"created": initialize(args.dir, args.backend)}, indent=2))

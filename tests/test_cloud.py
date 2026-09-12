@@ -25,6 +25,29 @@ def test_device_login_persists_owner_only_credentials(tmp_path: Path, monkeypatc
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+def test_workspace_key_login_persists_non_refreshing_credentials(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("OUTCOMECI_CONFIG_HOME", str(tmp_path / "config"))
+    result = cloud.login_with_key("http://localhost:8000/", "oci_" + "a" * 40)
+    stored = json.loads(cloud.credentials_path().read_text())
+    assert result == {"authenticated": True, "api_url": "http://localhost:8000", "credential_type": "workspace_key"}
+    assert stored["credential_type"] == "workspace_key"
+    assert stored["access_token"].startswith("oci_")
+
+
+def test_revoked_workspace_key_is_not_sent_to_refresh_endpoint(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("OUTCOMECI_CONFIG_HOME", str(tmp_path))
+    cloud._write_credentials({"api_url": "https://api.outcomeci.com", "access_token": "oci_" + "a" * 40, "credential_type": "workspace_key"})
+    calls = []
+    monkeypatch.setattr(cloud, "_request", lambda *args, **kwargs: calls.append((args, kwargs)) or (401, {}))
+    try:
+        cloud._authorized_request("/workspaces/workspace_1/workflow-revisions")
+    except Exception as exc:
+        assert "invalid or revoked" in str(exc)
+    else:
+        raise AssertionError("revoked workspace key should fail")
+    assert len(calls) == 1
+
+
 def test_sync_validates_and_sends_explicit_create_mode(tmp_path: Path, monkeypatch) -> None:
     initialize(tmp_path, "filesystem")
     workflow = tmp_path / "outcome.yml"
