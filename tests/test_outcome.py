@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from outcomeci import outcome
-from outcomeci.outcome import _claim, _expected, _transcripts, _validate_claim_phase, _validate_trajectory
+from outcomeci.outcome import _claim, _expected, _publish_implementation, _transcripts, _validate_claim_phase, _validate_trajectory
 from outcomeci.process import ExecutionError
 
 
@@ -70,3 +70,32 @@ def test_managed_claim_phase_must_have_completed_dependencies(tmp_path: Path) ->
     packet.parent.mkdir()
     packet.write_text("{}")
     _validate_claim_phase(compiled, tmp_path, "plan")
+
+
+def test_implementation_publication_is_runner_owned(tmp_path: Path) -> None:
+    checkout = tmp_path / "repo"
+    checkout.mkdir()
+
+    class GitHub:
+        def run(self, argv, cwd, timeout=300):
+            if argv[:3] == ["git", "branch", "--show-current"]: return "main"
+            if argv[:3] == ["git", "status", "--porcelain=v1"]: return " M app.py"
+            if argv[:3] == ["git", "rev-parse", "HEAD"]: return "b" * 40
+            if argv[:3] == ["gh", "pr", "create"]: return "https://github.com/outcomeci/repo/pull/12"
+            return ""
+
+    result = _publish_implementation(
+        GitHub(),
+        {"outcome_run_id": "run_1", "trajectory_version": 2, "intent_context": {"title": "Ship it"}},
+        ["outcomeci/repo"],
+        [checkout],
+        {"outcomeci/repo": "a" * 40},
+        {"outcomeci/repo": "main"},
+    )
+
+    assert result == [{
+        "repository": "outcomeci/repo", "status": "pr_opened",
+        "base_commit_sha": "a" * 40, "head_commit_sha": "b" * 40,
+        "branch": "oci/run_1-2", "pull_request_number": 12,
+        "pull_request_url": "https://github.com/outcomeci/repo/pull/12",
+    }]

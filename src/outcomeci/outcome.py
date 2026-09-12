@@ -208,11 +208,45 @@ def _expected(root: Path, repositories: list[str], phase: str) -> list[Path]:
         slug = _slug(repository)
         if phase == "plan":
             paths += [root / "specs" / slug / "spec.md", root / "plans" / slug / "plan.md"]
-        else:
+        elif phase == "tasks":
             paths += [root / "tasks" / "repositories" / f"{slug}.md"]
     if phase == "tasks":
         paths += [root / "tasks" / "tasks.md"]
     return paths
+
+
+def _publish_implementation(
+    github: GitHub,
+    claim: dict[str, Any],
+    repositories: list[str],
+    products: list[Path],
+    base_commits: dict[str, str],
+    base_branches: dict[str, str],
+) -> list[dict[str, Any]]:
+    publications: list[dict[str, Any]] = []
+    branch = f"oci/{_slug(claim['outcome_run_id'])[:40]}-{claim['trajectory_version']}"
+    for repository, checkout in zip(repositories, products):
+        base_branch = base_branches[repository]
+        dirty = github.run(["git", "status", "--porcelain=v1"], checkout)
+        head = github.run(["git", "rev-parse", "HEAD"], checkout)
+        if not dirty and head == base_commits[repository]:
+            publications.append({"repository": repository, "status": "no_change", "base_commit_sha": head})
+            continue
+        if dirty:
+            github.run(["git", "config", "user.name", "OutcomeCI"], checkout)
+            github.run(["git", "config", "user.email", "runner@outcomeci.com"], checkout)
+            github.run(["git", "add", "--all"], checkout)
+            github.run(["git", "commit", "-m", f"feat: implement outcome {claim['outcome_run_id']}"], checkout)
+        head = github.run(["git", "rev-parse", "HEAD"], checkout)
+        github.run(["git", "push", "--force-with-lease", "origin", f"HEAD:refs/heads/{branch}"], checkout, 600)
+        title = str(claim.get("intent_context", {}).get("title") or f"Implement outcome {claim['outcome_run_id']}")[:240]
+        body = f"OutcomeCI run `{claim['outcome_run_id']}`\n\nGenerated from the approved workflow trajectory."
+        url = github.run(["gh", "pr", "create", "--repo", repository, "--base", base_branch, "--head", branch, "--title", title, "--body", body], checkout, 300).splitlines()[-1]
+        match = re.search(r"/pull/(\d+)$", url)
+        if not match:
+            raise ExecutionError(f"GitHub returned an invalid pull request URL for {repository}")
+        publications.append({"repository": repository, "status": "pr_opened", "base_commit_sha": base_commits[repository], "head_commit_sha": head, "branch": branch, "pull_request_number": int(match.group(1)), "pull_request_url": url})
+    return publications
 
 
 def _validate_trajectory(value: Any, claim: dict[str, Any]) -> dict[str, Any]:
@@ -248,7 +282,7 @@ def run(claim_path: Path, workspace: Path) -> dict[str, Any]:
     workflow = state / "outcome.yml"
     if not constitution.is_file() or not workflow.is_file():
         raise ExecutionError("state repository is not initialized for OutcomeCI")
-    repositories, products, base_commits = [], [], {}
+    repositories, products, base_commits, base_branches = [], [], {}, {}
     for item in claim["targets"]:
         repository = item.get("repository")
         if not isinstance(repository, str):
@@ -258,6 +292,7 @@ def run(claim_path: Path, workspace: Path) -> dict[str, Any]:
         repositories.append(repository)
         products.append(checkout)
         base_commits[repository] = _git(["git", "rev-parse", "HEAD"], checkout, github.env)
+        base_branches[repository] = str(item.get("base_branch") or "main")
     outcome_root = state / ".outcomeci" / "outcomes" / claim["outcome_run_id"]
     outcome_root.mkdir(parents=True, exist_ok=True)
     compiled = compile_workflow(workflow)
@@ -268,11 +303,20 @@ def run(claim_path: Path, workspace: Path) -> dict[str, Any]:
     shared = compiled["instructions"]["orchestrator"]["content"]
     phase_instructions = compiled["instructions"]["phases"][claim["phase"]]["content"]
     payload = {"claim": claim, "state_repository": str(state), "product_repositories": [{"name_with_owner": name, "base_commit_sha": base_commits[name], "checkout": str(path)} for name, path in zip(repositories, products)]}
-    prompt = f"{shared}\n\n{phase_instructions}\n\nWrite all durable artifacts beneath {outcome_root}. Product repositories are read-only. The `oci twin search` command is the only live Digital Twin interface. Do not commit, push, or open pull requests in product repositories.\n\n{json.dumps(payload, separators=(',', ':'))}"
+    implementation = claim["phase"] == "implementation"
+    boundary = "Product repositories are writable for approved implementation. Modify source and tests, but do not commit, push, or open pull requests; the runner owns publication." if implementation else "Product repositories are read-only. Do not commit, push, or open pull requests in product repositories."
+    prompt = f"{shared}\n\n{phase_instructions}\n\nWrite all durable artifacts beneath {outcome_root}. {boundary} The `oci twin search` command is the only live Digital Twin interface.\n\n{json.dumps(payload, separators=(',', ':'))}"
     summary = invoke(runner, model, prompt, workspace, 7200)
-    for repository, checkout in zip(repositories, products):
-        if _git(["git", "status", "--porcelain=v1"], checkout, github.env):
-            raise ExecutionError(f"planning modified product repository {repository}")
+    publications: list[dict[str, Any]] | None = None
+    if implementation:
+        publications = _publish_implementation(github, claim, repositories, products, base_commits, base_branches)
+        publication_path = outcome_root / "implementation" / "publication.json"
+        publication_path.parent.mkdir(parents=True, exist_ok=True)
+        publication_path.write_text(json.dumps({"schema_version": 1, "publications": publications}, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    else:
+        for repository, checkout in zip(repositories, products):
+            if _git(["git", "status", "--porcelain=v1"], checkout, github.env):
+                raise ExecutionError(f"planning modified product repository {repository}")
     _validate_contract_outputs(compiled, outcome_root, claim["phase"])
     standup = (outcome_root / "standup.md").read_text(encoding="utf-8")
     if "# Standup:" not in standup or "**Status**: active" not in standup:
@@ -308,7 +352,10 @@ def run(claim_path: Path, workspace: Path) -> dict[str, Any]:
     _git(["git", "commit", "-m", f"docs: record outcome {claim['outcome_run_id']} {claim['phase']}"], state, github.env)
     commit = _git(["git", "rev-parse", "HEAD"], state, github.env)
     _git(["git", "push", f"--force-with-lease=refs/heads/main:{state_base}", "origin", "HEAD:refs/heads/main"], state, github.env)
-    result = {"status": "awaiting_confirmation" if claim["phase"] in {"intake", "plan"} else "ready_for_implementation", "phase": claim["phase"], "state_commit_sha": commit, "constitution_sha": _sha(constitution), "manifest": manifest, "artifact_paths": artifacts, "summary": summary[-1000:]}
+    status = "completed" if implementation else ("awaiting_confirmation" if claim["phase"] in {"intake", "plan"} else "ready_for_implementation")
+    result = {"status": status, "phase": claim["phase"], "state_commit_sha": commit, "constitution_sha": _sha(constitution), "manifest": manifest, "artifact_paths": artifacts, "summary": summary[-1000:]}
+    if publications is not None:
+        result["publications"] = publications
     if claim["phase"] == "intake":
         result["intent_context"] = intake_context
     return result
