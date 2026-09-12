@@ -7,10 +7,12 @@ import yaml
 
 from outcomeci import humans
 from outcomeci.repository import initialize
+from outcomeci.slack import register_connection
 
 
 def test_assign_writes_only_readable_slack_selectors(tmp_path: Path) -> None:
     initialize(tmp_path, "filesystem")
+    register_connection(tmp_path / "outcome.yml")
     result = humans.assign(
         tmp_path, tmp_path / "outcome.yml", "intake", "after", "confirm_intent",
         [("user", "@isaah"), ("channel", "#product"), ("group", "design")], "ask", 900,
@@ -26,9 +28,12 @@ def test_assign_writes_only_readable_slack_selectors(tmp_path: Path) -> None:
 def test_poll_persists_readable_responses_without_provider_ids(tmp_path: Path, monkeypatch) -> None:
     path = tmp_path / ".outcomeci/outcomes/run-1/interactions/plan/review.json"
     path.parent.mkdir(parents=True)
-    path.write_text(json.dumps({"status": "pending"}))
+    path.write_text(json.dumps({
+        "run_id": "run-1", "phase": "plan", "id": "review", "status": "pending",
+        "delivery": {"type": "slack", "connection": "slack_local"},
+    }))
     monkeypatch.setattr(humans, "poll_replies", lambda *args: [{"from": "Isaah", "message": "Proceed", "responded_at": "1.2"}])
-    result = humans.poll(tmp_path, "run-1", "review")
+    result = humans.poll(tmp_path, tmp_path / "outcome.yml", "run-1", "review")
     assert result["status"] == "responded"
     assert result["responses"][0]["from"] == "Isaah"
     assert json.loads(path.read_text())["observed_responses"] == result["responses"]
@@ -36,6 +41,7 @@ def test_poll_persists_readable_responses_without_provider_ids(tmp_path: Path, m
 
 def test_request_delivers_existing_pending_hook_once(tmp_path: Path, monkeypatch) -> None:
     initialize(tmp_path, "filesystem")
+    register_connection(tmp_path / "outcome.yml")
     humans.assign(tmp_path, tmp_path / "outcome.yml", "intake", "after", "confirm_intent", [("user", "isaah")], "ask", None)
     outcome = tmp_path / ".outcomeci/outcomes/run-1"
     interaction = outcome / "interactions/intake/confirm_intent.json"
