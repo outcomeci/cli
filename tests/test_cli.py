@@ -4,6 +4,7 @@ from pathlib import Path
 
 from outcomeci.cli import main
 from outcomeci.config import compile_workflow
+from outcomeci.repository import initialize, update
 
 
 def test_init_and_validate(tmp_path: Path, capsys) -> None:
@@ -19,6 +20,18 @@ def test_init_and_validate(tmp_path: Path, capsys) -> None:
     assert not (tmp_path / ".sp").exists()
     assert main(["validate", "--dir", str(tmp_path)]) == 0
     assert '"valid": true' in capsys.readouterr().out
+
+
+def test_update_refreshes_managed_skills_but_preserves_workflow(tmp_path: Path) -> None:
+    initialize(tmp_path, "filesystem")
+    workflow = tmp_path / "outcome.yml"
+    original = workflow.read_text() + "\n# user policy\n"
+    workflow.write_text(original)
+    skill = tmp_path / ".agents/skills/outcome/SKILL.md"
+    skill.write_text("old managed skill")
+    update(tmp_path)
+    assert "Only use human tools" in skill.read_text()
+    assert workflow.read_text() == original
 
 
 def test_instruction_content_is_part_of_revision(tmp_path: Path) -> None:

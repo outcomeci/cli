@@ -176,4 +176,14 @@ Never infer approval. Only after explicit approval or an unambiguous request to
 continue, run `oci outcome advance --run <run-id> --approve`, then compile and
 perform the next phase. Stop after tasks are ready; implementation is outside
 this skill's scope.
+
+Only use human tools when the compiled current phase declares that exact hook
+with `delivery.type: slack` and at least one configured target. Never discover
+targets, assign participants, or modify hooks while executing an outcome;
+those are workflow-configuration actions. Before a wired hook whose wait
+strategy is `ask`, ask how long to wait or whether to continue while waiting.
+Use `oci human request`, `oci human poll --wait <seconds>`, and `oci human
+accept` only for that declared hook. Use `oci human request --continue` only
+after the user explicitly chooses not to block. Never request, display, or
+store Slack IDs. Treat late responses as evidence at the next safe boundary.
 """

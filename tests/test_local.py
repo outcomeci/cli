@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,12 @@ from outcomeci.process import ExecutionError
 from outcomeci.repository import initialize
 
 
-def _fake_invoke(agent: str, model: str | None, prompt: str, workspace: Path, timeout: int) -> str:
+@pytest.fixture(autouse=True)
+def capability_context(monkeypatch):
+    monkeypatch.setattr(local, "serve_capability", lambda *args: nullcontext({}))
+
+
+def _fake_invoke(agent: str, model: str | None, prompt: str, workspace: Path, timeout: int, **kwargs) -> str:
     match = re.search(r"beneath (.+?)\. During", prompt)
     assert match
     root = Path(match.group(1))
@@ -22,7 +28,7 @@ def _fake_invoke(agent: str, model: str | None, prompt: str, workspace: Path, ti
         revision = re.search(r'ontology_revision_id\s+\\?"([^"\\]+)', prompt)
         assert revision
         target = root / "intake" / "trajectory.json"
-        target.parent.mkdir(parents=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps({
             "schema_version": "1",
             "ontology_revision_id": revision.group(1),
@@ -111,6 +117,50 @@ def test_declared_json_schema_is_enforced(tmp_path: Path) -> None:
     artifact.write_text('{"wrong": true}')
     with pytest.raises(ExecutionError, match="failed JSON validation"):
         local._validate_outputs(compiled, outcome, "intake")
+
+
+def test_launch_worker_records_detached_attempt(tmp_path: Path, monkeypatch) -> None:
+    initialize(tmp_path, "filesystem")
+    state = local.begin(tmp_path, tmp_path / "outcome.yml", "Durable outcome")
+
+    class Process:
+        pid = 4242
+
+    calls = []
+
+    def popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return Process()
+
+    monkeypatch.setattr(local.subprocess, "Popen", popen)
+    result = local.launch_worker(tmp_path, tmp_path / "outcome.yml", state["run_id"], "respond", interaction_id="confirm_intent", message="continue", approve=True)
+    worker = json.loads((Path(state["outcome_root"]) / "worker.json").read_text())
+    assert result["status"] == "queued"
+    assert worker["pid"] == 4242
+    assert worker["status"] == "queued"
+    assert calls[0][0][:3] == [local.sys.executable, "-m", "outcomeci.worker"]
+    assert calls[0][1]["start_new_session"] is True
+    assert calls[0][1]["close_fds"] is True
+
+
+def test_recover_retries_only_stale_running_worker(tmp_path: Path, monkeypatch) -> None:
+    initialize(tmp_path, "filesystem")
+    state = local.begin(tmp_path, tmp_path / "outcome.yml", "Recover outcome")
+    path = tmp_path / ".outcomeci" / "outcomes" / state["run_id"] / "run.json"
+    current = json.loads(path.read_text())
+    current["status"] = "running"
+    path.write_text(json.dumps(current))
+    monkeypatch.setattr(local, "_worker_live", lambda outcome_root: False)
+    launched = {}
+
+    def launch(root, config, run_id, operation, **kwargs):
+        launched.update({"run_id": run_id, "operation": operation})
+        return {"status": "queued"}
+
+    monkeypatch.setattr(local, "launch_worker", launch)
+    assert local.recover(tmp_path, tmp_path / "outcome.yml", state["run_id"])["status"] == "queued"
+    assert launched == {"run_id": state["run_id"], "operation": "retry"}
+    assert json.loads(path.read_text())["status"] == "error"
 
 
 def test_before_interaction_is_durable_and_resumes_execution(tmp_path: Path, monkeypatch) -> None:

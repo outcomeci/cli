@@ -129,7 +129,26 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
             delivery = _mapping(item.get("delivery", {"type": "local"}), f"{field}.{timing}[{index}].delivery")
             if delivery.get("type") not in {"local", "slack"}:
                 raise ConfigError(f"{field}.{timing}[{index}].delivery.type is unsupported")
+            targets = delivery.get("targets", [])
+            if not isinstance(targets, list):
+                raise ConfigError(f"{field}.{timing}[{index}].delivery.targets must be a list")
+            normalized_targets = []
+            for target_index, target_value in enumerate(targets):
+                target = _mapping(target_value, f"{field}.{timing}[{index}].delivery.targets[{target_index}]")
+                if target.get("kind") not in {"user", "channel", "group"}:
+                    raise ConfigError(f"{field}.{timing}[{index}].delivery.targets[{target_index}].kind is unsupported")
+                if not isinstance(target.get("name"), str) or not target["name"].strip():
+                    raise ConfigError(f"{field}.{timing}[{index}].delivery.targets[{target_index}].name is required")
+                normalized_targets.append({"kind": target["kind"], "name": target["name"].strip().lstrip("@#")})
+            if normalized_targets:
+                delivery["targets"] = normalized_targets
+            wait = _mapping(item.get("wait", {"strategy": "ask"}), f"{field}.{timing}[{index}].wait")
+            if wait.get("strategy") not in {"ask", "block", "continue"}:
+                raise ConfigError(f"{field}.{timing}[{index}].wait.strategy is unsupported")
+            if wait.get("timeout_seconds") is not None and (not isinstance(wait["timeout_seconds"], int) or not 0 <= wait["timeout_seconds"] <= 86400):
+                raise ConfigError(f"{field}.{timing}[{index}].wait.timeout_seconds must be between 0 and 86400")
             normalized = {"id": interaction_id, "participant": participant, "purpose": purpose.strip(), "interaction": interaction, "required": required, "delivery": delivery}
+            normalized["wait"] = {"strategy": wait["strategy"], **({"timeout_seconds": wait["timeout_seconds"]} if wait.get("timeout_seconds") is not None else {})}
             if timing == "during":
                 availability = item.get("availability", "on_demand")
                 if availability not in {"on_demand", "always"}:
