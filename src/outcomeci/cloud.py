@@ -88,12 +88,27 @@ def login(api_url: str, *, open_browser: bool = True) -> dict[str, Any]:
     raise ExecutionError("OutcomeCI login expired")
 
 
+def login_with_key(api_url: str, key: str) -> dict[str, Any]:
+    """Persist a member-bound workspace key without sending it anywhere first."""
+    key = key.strip()
+    if not key.startswith("oci_") or len(key) < 20:
+        raise ExecutionError("invalid OutcomeCI workspace key")
+    credentials = {
+        "api_url": api_url.rstrip("/"),
+        "access_token": key,
+        "credential_type": "workspace_key",
+    }
+    _write_credentials(credentials)
+    return {"authenticated": True, "api_url": credentials["api_url"], "credential_type": "workspace_key"}
+
+
 def logout() -> dict[str, Any]:
     path = credentials_path()
     if path.is_file():
         try:
             credentials = load_credentials()
-            _request(credentials["api_url"], "/auth/revoke", method="POST", body={"refresh_token": credentials.get("refresh_token")})
+            if credentials.get("credential_type") != "workspace_key":
+                _request(credentials["api_url"], "/auth/revoke", method="POST", body={"refresh_token": credentials.get("refresh_token")})
         except ExecutionError:
             pass
     if path.exists():
@@ -106,7 +121,7 @@ def auth_status() -> dict[str, Any]:
         value = load_credentials()
     except ExecutionError:
         return {"authenticated": False}
-    return {"authenticated": True, "api_url": value.get("api_url")}
+    return {"authenticated": True, "api_url": value.get("api_url"), "credential_type": value.get("credential_type", "user")}
 
 
 def _refresh(credentials: dict[str, Any]) -> dict[str, Any]:
@@ -122,6 +137,8 @@ def _authorized_request(path: str, *, method: str = "GET", body: dict[str, Any] 
     credentials = load_credentials()
     status, value = _request(credentials["api_url"], path, method=method, body=body, token=credentials["access_token"])
     if status == 401:
+        if credentials.get("credential_type") == "workspace_key":
+            raise ExecutionError("OutcomeCI workspace key is invalid or revoked; run `oci auth login` again")
         credentials = _refresh(credentials)
         status, value = _request(credentials["api_url"], path, method=method, body=body, token=credentials["access_token"])
     return status, value
@@ -149,3 +166,24 @@ def sync_workflow(path: Path, workspace_id: str, name: str | None, mode: str) ->
         detail = value.get("detail") if isinstance(value, dict) else None
         raise ExecutionError(str(detail or "workflow synchronization failed"))
     return value  # type: ignore[return-value]
+
+
+def vault_request(workspace_id: str, operation: str, **values: Any) -> dict[str, Any] | list[Any]:
+    """Perform provider-neutral credential management through OutcomeCI Vault."""
+    base = f"/workspaces/{workspace_id}/vault"
+    method, path, body = "GET", base, None
+    expected = {200}
+    if operation == "put":
+        method, path, expected = "POST", f"{base}/secrets", {201}
+        body = {"path": values["path"], "display_name": values["display_name"], "value": values["value"], "workflow_ids": values.get("workflow_ids", [])}
+    elif operation == "rotate":
+        method, path, body = "POST", f"{base}/secrets/{values['entry_id']}/rotate", {"value": values["value"]}
+    elif operation == "grant":
+        method, path, body = "PUT", f"{base}/entries/{values['entry_id']}/grants", {"workflow_ids": values.get("workflow_ids", [])}
+    elif operation == "revoke":
+        method, path, expected = "DELETE", f"{base}/entries/{values['entry_id']}", {204}
+    status, result = _authorized_request(path, method=method, body=body)
+    if status not in expected:
+        detail = result.get("detail") if isinstance(result, dict) else None
+        raise ExecutionError(str(detail or f"Vault request failed ({status})"))
+    return result

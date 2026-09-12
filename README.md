@@ -239,6 +239,19 @@ Authenticate this machine through your signed-in browser:
 oci auth login
 ```
 
+For non-interactive CLI or MCP access, create a member key on the workspace
+Access screen and pass it over stdin so it is not written to shell history:
+
+```bash
+oci auth login --key-stdin
+```
+
+Paste the key at the protected prompt. Automation can pipe the key over stdin.
+
+Workspace keys inherit the member's current Workflow and Vault permissions.
+They are limited to one workspace, can be revoked from Access, and are never
+refreshed as user sessions.
+
 Then create the first immutable workflow revision for a workspace:
 
 ```bash
