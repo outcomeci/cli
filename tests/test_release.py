@@ -28,6 +28,8 @@ def test_homebrew_release_targets_outcomeci_package_and_tap() -> None:
     assert "pypi.org/pypi/outcomeci-cli/" in source
     assert "repository: outcomeci/homebrew-tap" in source
     assert "Formula/outcomeci-cli.rb" in source
+    assert 'gh pr merge --repo outcomeci/homebrew-tap "$url" --squash' in source
+    assert "--auto --squash" not in source
     formula = (ROOT / "packaging/outcomeci-cli.rb").read_text()
     assert "class OutcomeciCli < Formula" in formula
     assert 'shell_output("#{bin}/oci --version")' in formula

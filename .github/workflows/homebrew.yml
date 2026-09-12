@@ -67,4 +67,4 @@ jobs:
           if [ -z "$url" ]; then
             url="$(gh pr create --repo outcomeci/homebrew-tap --base main --head "$branch" --title "outcomeci-cli ${VERSION}" --body "Update the Homebrew formula for outcomeci-cli ${VERSION}.")"
           fi
-          gh pr merge --repo outcomeci/homebrew-tap "$url" --auto --squash
+          gh pr merge --repo outcomeci/homebrew-tap "$url" --squash
