@@ -102,7 +102,7 @@ class ExecutionClaim:
             raise ContractError("invalid Outcome job binding")
         string(job.get("job_id"), "job id")
         repositories = job.get("repositories")
-        if not isinstance(repositories, list) or not 1 <= len(repositories) <= 11:
+        if not isinstance(repositories, list) or len(repositories) > 11:
             raise ContractError("invalid job repositories")
         normalized = [string(item, "job repository", 511).lower() for item in repositories]
         if len(set(normalized)) != len(normalized):
@@ -118,4 +118,9 @@ class ExecutionClaim:
             oauth_token = string(oauth_token, "Claude credential", 32768)
         outcome=raw.get("outcome")
         if job.get("kind")=="outcome" and not isinstance(outcome,dict): raise ContractError("invalid outcome binding")
-        return cls(selected, string(raw.get("lease_id"), "lease id", 256), version, string(raw.get("lease_expires_at"), "lease expiry", 128), string(raw.get("completion_token"), "completion token", 8192), string(raw.get("core_job_token"), "Core job token", 8192), job, command(raw.get("command")), string(raw.get("github_token"), "GitHub token", 32768), auth_json, oauth_token, timeout, outcome_run, outcome)
+        github_token = raw.get("github_token")
+        if github_token is None:
+            github_token = ""
+        if not isinstance(github_token,str) or len(github_token)>32768:
+            raise ContractError("invalid GitHub token")
+        return cls(selected, string(raw.get("lease_id"), "lease id", 256), version, string(raw.get("lease_expires_at"), "lease expiry", 128), string(raw.get("completion_token"), "completion token", 8192), string(raw.get("core_job_token"), "Core job token", 8192), job, command(raw.get("command")), github_token, auth_json, oauth_token, timeout, outcome_run, outcome)

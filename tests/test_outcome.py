@@ -4,20 +4,34 @@ import pytest
 
 from outcomeci import outcome
 from outcomeci import outcome as outcome_module
-from outcomeci.outcome import _claim, _expected, _publish_implementation, _transcripts, _validate_claim_phase, _validate_trajectory
+from outcomeci.outcome import _claim, _expected, _managed_artifacts, _managed_state, _publish_implementation, _transcripts, _validate_claim_phase, _validate_trajectory
 from outcomeci.process import ExecutionError
 
 
 def test_claim_accepts_managed_plan(tmp_path: Path) -> None:
     path = tmp_path / "claim.json"
-    path.write_text('{"outcome_run_id":"r","workflow_run_id":"w","phase":"plan","trajectory_version":1,"agent":"codex","model":null,"state_repository":"org/state","targets":[{"repository":"org/repo"}],"intent_context":{}}')
+    path.write_text('{"outcome_run_id":"r","workflow_run_id":"w","phase":"plan","trajectory_version":1,"agent":"codex","model":null,"artifact_backend":{"provider":"outcomeci","files":{}},"targets":[{"repository":"org/repo"}],"intent_context":{}}')
     assert _claim(path)["phase"] == "plan"
 
 
 def test_claim_accepts_custom_phase_for_workflow_validation(tmp_path: Path) -> None:
     path = tmp_path / "claim.json"
-    path.write_text('{"outcome_run_id":"r","workflow_run_id":"w","phase":"deploy","trajectory_version":1,"agent":"codex","model":null,"state_repository":"org/state","targets":[{"repository":"org/repo"}],"intent_context":{}}')
+    path.write_text('{"outcome_run_id":"r","workflow_run_id":"w","phase":"deploy","trajectory_version":1,"agent":"codex","model":null,"artifact_backend":{"provider":"github","repository":"org/state"},"targets":[{"repository":"org/repo"}],"intent_context":{}}')
     assert _claim(path)["phase"] == "deploy"
+
+
+def test_managed_backend_round_trips_bounded_artifacts(tmp_path: Path) -> None:
+    import base64
+    state = tmp_path / "state"
+    state.mkdir()
+    _managed_state(state, {"files": {"outcome.yml": base64.b64encode(b"kind: OutcomeWorkflow\n").decode()}})
+    assert (state / "outcome.yml").read_text() == "kind: OutcomeWorkflow\n"
+    artifact = state / ".outcomeci" / "outcomes" / "run_1" / "standup.md"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text("# Standup\n")
+    result = _managed_artifacts(state, artifact.parent)
+    assert result[0]["path"] == ".outcomeci/outcomes/run_1/standup.md"
+    assert base64.b64decode(result[0]["content_base64"]) == b"# Standup\n"
 
 
 def test_plan_requires_standup_and_repo_artifacts(tmp_path: Path) -> None:

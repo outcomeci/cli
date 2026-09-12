@@ -5,6 +5,7 @@ import json
 import os
 import stat
 import time
+import base64
 import urllib.error
 import urllib.request
 import webbrowser
@@ -157,10 +158,20 @@ def sync_workflow(path: Path, workspace_id: str, name: str | None, mode: str) ->
     workflow_name = name or str((document.get("metadata") or {}).get("name") or "").strip()
     if not workflow_name:
         raise ExecutionError("workflow name is required; set metadata.name or pass --name")
+    files: dict[str, str] = {}
+    support_root = path.parent / ".outcomeci"
+    if support_root.is_dir():
+        total = 0
+        for support in sorted(item for item in support_root.rglob("*") if item.is_file() and "outcomes" not in item.relative_to(support_root).parts):
+            content = support.read_bytes()
+            total += len(content)
+            if len(content) > 2 * 1024 * 1024 or total > 20 * 1024 * 1024:
+                raise ExecutionError("workflow support files exceed the 20 MiB synchronization limit")
+            files[str(Path(".outcomeci") / support.relative_to(support_root))] = base64.b64encode(content).decode()
     status, value = _authorized_request(
         f"/workspaces/{workspace_id}/workflow-revisions",
         method="POST",
-        body={"name": workflow_name, "mode": mode, "content": content, "content_type": "json" if suffix == ".json" else "yaml", "source_filename": path.name},
+        body={"name": workflow_name, "mode": mode, "content": content, "content_type": "json" if suffix == ".json" else "yaml", "source_filename": path.name, "files": files},
     )
     if status != 201:
         detail = value.get("detail") if isinstance(value, dict) else None
