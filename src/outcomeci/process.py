@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import base64
 import os
+import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -54,11 +55,22 @@ class GitHub:
             raise ExecutionError(f"git clone failed: {result.stderr[-1000:]}", True)
 
 
-def invoke(agent: str, model: str | None, prompt: str, workspace: Path, timeout: int) -> str:
+def invoke(
+    agent: str,
+    model: str | None,
+    prompt: str,
+    workspace: Path,
+    timeout: int,
+    *,
+    allow_local_auth: bool = False,
+    extra_env: dict[str, str] | None = None,
+    writable_paths: list[Path] | None = None,
+) -> str:
     secrets = {"GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"}
     env = {key: value for key, value in os.environ.items() if key not in secrets}
+    env.update(extra_env or {})
     if agent == "codex":
-        if not os.environ.get("OPENAI_API_KEY") and not os.environ.get("CODEX_HOME"):
+        if not allow_local_auth and not os.environ.get("OPENAI_API_KEY") and not os.environ.get("CODEX_HOME"):
             raise ExecutionError("Codex needs OPENAI_API_KEY or an ephemeral CODEX_HOME")
         if os.environ.get("OPENAI_API_KEY"):
             env["OPENAI_API_KEY"] = os.environ["OPENAI_API_KEY"]
@@ -71,7 +83,7 @@ def invoke(agent: str, model: str | None, prompt: str, workspace: Path, timeout:
         for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
             if os.environ.get(key):
                 env[key] = os.environ[key]
-        if not any(key in env for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")):
+        if not allow_local_auth and not any(key in env for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")):
             raise ExecutionError("Claude needs ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN")
         argv = ["claude", "--print", "--permission-mode", "acceptEdits"]
         if model:
@@ -80,8 +92,86 @@ def invoke(agent: str, model: str | None, prompt: str, workspace: Path, timeout:
         input_text = None
     else:
         raise ExecutionError(f"unsupported agent: {agent}")
+    if writable_paths is not None:
+        bwrap = shutil.which("bwrap")
+        if not bwrap:
+            raise ExecutionError("bubblewrap is required for secure local agent execution")
+        wrapper = [
+            bwrap,
+            "--die-with-parent",
+            "--new-session",
+            "--unshare-pid",
+            "--ro-bind",
+            "/",
+            "/",
+            "--dev-bind",
+            "/dev",
+            "/dev",
+            "--proc",
+            "/proc",
+            "--tmpfs",
+            "/tmp",
+        ]
+        slack_home = Path.home() / ".slack"
+        if slack_home.exists():
+            wrapper += ["--tmpfs", str(slack_home)]
+        for agent_home in (Path.home() / ".codex", Path.home() / ".claude"):
+            if agent_home.exists():
+                wrapper += ["--bind", str(agent_home), str(agent_home)]
+        for writable in writable_paths:
+            wrapper += ["--bind", str(writable), str(writable)]
+        wrapper += ["--"]
+        argv = [*wrapper, *argv]
     result = command(argv, cwd=workspace, timeout=timeout, input_text=input_text, env=env)
     if result.code:
         raise ExecutionError(f"{agent} failed with exit {result.code}: {(result.stderr or result.stdout)[-1000:]}", True)
     return result.stdout.strip()[-4000:]
 
+
+def invoke_conversation(
+    agent: str,
+    session_id: str | None,
+    model: str | None,
+    prompt: str,
+    workspace: Path,
+    timeout: int,
+    *,
+    allow_local_auth: bool = False,
+) -> str:
+    """Run a read-only turn, resuming the outcome session when available."""
+    secrets = {"GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"}
+    env = {key: value for key, value in os.environ.items() if key not in secrets}
+    if agent == "codex":
+        if os.environ.get("OPENAI_API_KEY"):
+            env["OPENAI_API_KEY"] = os.environ["OPENAI_API_KEY"]
+        if not allow_local_auth and not os.environ.get("OPENAI_API_KEY") and not os.environ.get("CODEX_HOME"):
+            raise ExecutionError("Codex needs OPENAI_API_KEY or an ephemeral CODEX_HOME")
+        base = ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check"]
+        if model:
+            base += ["--model", model]
+        argv = [*base, "resume", session_id, "-"] if session_id else [*base, "-"]
+        input_text = prompt
+    elif agent == "claude":
+        for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
+            if os.environ.get(key):
+                env[key] = os.environ[key]
+        if not allow_local_auth and not any(key in env for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")):
+            raise ExecutionError("Claude needs ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN")
+        argv = ["claude", "--print", "--permission-mode", "manual", "--allowedTools", "Read,Grep,Glob"]
+        if session_id:
+            argv += ["--resume", session_id, "--fork-session"]
+        if model:
+            argv += ["--model", model]
+        argv += [prompt]
+        input_text = None
+    else:
+        raise ExecutionError(f"unsupported agent: {agent}")
+    result = command(argv, cwd=workspace, timeout=timeout, input_text=input_text, env=env)
+    if agent == "codex" and session_id and result.code and "active writer" in (result.stderr or result.stdout):
+        # Codex cannot concurrently resume a session that is still open in an
+        # interactive client. A fresh read-only turn can recover its context
+        # from the durable outcome artifacts named in the prompt.
+        result = command([*base, "-"], cwd=workspace, timeout=timeout, input_text=prompt, env=env)
+    if result.code:
+        raise ExecutionError(f"{agent} conversation failed with exit {result.code}: {(result.stderr or result.stdout)[-1000:]}", True)
+    return result.stdout.strip()[-12000:]

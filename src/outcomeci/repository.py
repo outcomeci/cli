@@ -38,8 +38,18 @@ def initialize(root: Path, backend: str = "outcomeci") -> list[str]:
 
 
 def update(root: Path) -> list[str]:
-    """Add newly introduced framework files without replacing user policy."""
-    return initialize(root)
+    """Refresh managed agent skills without replacing user-owned workflow policy."""
+    changed = initialize(root)
+    for path in (
+        root / ".agents" / "skills" / "outcome" / "SKILL.md",
+        root / ".claude" / "skills" / "outcome" / "SKILL.md",
+    ):
+        if path.read_text(encoding="utf-8") != OUTCOME_SKILL:
+            path.write_text(OUTCOME_SKILL, encoding="utf-8")
+            relative = str(path.relative_to(root))
+            if relative not in changed:
+                changed.append(relative)
+    return changed
 
 
 def validate(root: Path) -> dict:

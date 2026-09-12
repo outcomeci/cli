@@ -6,6 +6,9 @@ import json
 import re
 import subprocess
 import os
+import sys
+import uuid
+import fcntl
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,6 +16,7 @@ from typing import Any
 from jsonschema import ValidationError, validate as validate_json
 
 from .config import compile_workflow
+from .capability import serve as serve_capability
 from .manifest import build_manifest
 from .outcome import _expected, _select_sessions, _session_details, _transcripts, _validate_trajectory
 from .process import ExecutionError, invoke
@@ -56,6 +60,22 @@ def _artifact_path(outcome_root: Path, contract: dict[str, Any]) -> Path:
     except ValueError as exc:
         raise ExecutionError(f"artifact {contract['name']} escapes the outcome directory") from exc
     return path
+
+
+def _prepare_writable_artifacts(compiled: dict[str, Any], outcome_root: Path, phase: str) -> list[Path]:
+    standup = outcome_root / "standup.md"
+    standup.parent.mkdir(parents=True, exist_ok=True)
+    standup.touch(exist_ok=True)
+    paths = [standup]
+    for contract in compiled["instructions"]["phases"][phase]["expects"]["outputs"]:
+        path = _artifact_path(outcome_root, contract)
+        if contract["media_type"] == "inode/directory":
+            path.mkdir(parents=True, exist_ok=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.touch(exist_ok=True)
+        paths.append(path)
+    return paths
 
 
 def _validate_outputs(compiled: dict[str, Any], outcome_root: Path, phase: str) -> None:
@@ -103,6 +123,23 @@ def _input_context(compiled: dict[str, Any], outcome_root: Path, phase: str, int
             value["path"] = str(path)
         values.append(value)
     return values
+
+
+def _human_context(state: dict[str, Any], outcome_root: Path) -> list[dict[str, Any]]:
+    context = []
+    paths = {Path(item["path"]) for item in state.get("interaction_history", []) if isinstance(item, dict) and isinstance(item.get("path"), str)}
+    paths.update((outcome_root / "interactions").glob("*/*.json"))
+    for path in sorted(paths):
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        context.append({
+            "phase": value.get("phase"), "timing": value.get("timing"), "interaction_id": value.get("id"),
+            "status": value.get("status"), "response": value.get("response"),
+            "observed_responses": value.get("observed_responses", []),
+        })
+    return context
 
 
 def _interaction_path(root: Path, run_id: str, phase: str, interaction_id: str) -> Path:
@@ -153,7 +190,9 @@ def _write(root: Path, state: dict[str, Any]) -> None:
     path = _record(root, state["run_id"])
     path.parent.mkdir(parents=True, exist_ok=True)
     state["updated_at"] = datetime.now(timezone.utc).isoformat()
-    path.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
 
 
 def _local_revision(root: Path) -> str | None:
@@ -190,6 +229,7 @@ def _execute(root: Path, config: Path, state: dict[str, Any], *, agent: str | No
     phase = state["phase"]
     runner, chosen_model = _policy(compiled, phase, agent, model)
     outcome_root = root / ".outcomeci" / "outcomes" / state["run_id"]
+    writable_artifacts = _prepare_writable_artifacts(compiled, outcome_root, phase)
     repository = root.name
     shared = compiled["instructions"]["standup"]["content"]
     instructions = compiled["instructions"]["phases"][phase]["content"]
@@ -202,6 +242,7 @@ def _execute(root: Path, config: Path, state: dict[str, Any], *, agent: str | No
         "context_files": compiled["context"]["files"],
         "inputs": _input_context(compiled, outcome_root, phase, state["intent"]),
         "outputs": compiled["instructions"]["phases"][phase]["expects"]["outputs"],
+        "human_context": _human_context(state, outcome_root),
     }
     intake_contract = ""
     if phase == "intake":
@@ -212,11 +253,12 @@ repository_id \"local:{repository}\", repository \"{repository}\", a non-empty
 rationale, and a candidates array following the stable role and disposition
 contract above. Use paths relative to this repository.
 """
-    prompt = f"{shared}\n\n{instructions}\n\nThis is a filesystem-backed local Standup. Work in {root}. Write durable artifacts beneath {outcome_root}. During intake, plan, and tasks, do not modify product source files. There is no OutcomeCI Cloud or Digital Twin; inspect the local repository directly. Human interactions available during this phase are included in the phase contract. If one is needed, run `oci outcome request-input <interaction-id> --run {state['run_id']} --workspace {root}` and stop so the requester can respond.\n{intake_contract}\n{json.dumps(context, separators=(',', ':'))}"
+    prompt = f"{shared}\n\n{instructions}\n\nThis is a filesystem-backed local Standup. Work in {root}. Write durable artifacts beneath {outcome_root}. During intake, plan, and tasks, do not modify product source files. There is no OutcomeCI Cloud or Digital Twin; inspect the local repository directly. Only use human tools for a hook declared on this current phase with Slack delivery and configured targets. Never discover targets or change hook assignments during execution. Use only readable Slack names; never request or expose provider IDs. Before a wired hook with wait strategy `ask`, ask the requester how long to wait or whether to continue. Deliver it with `oci human request <interaction-id> --run {state['run_id']} --workspace {root}`; add `--continue` only when the requester chose to keep working. Otherwise poll for exactly their bounded duration using `oci human poll <interaction-id> --run {state['run_id']} --wait <seconds> --workspace {root}`. Apply a received response with `oci human accept` and preserve it as outcome context.\n{intake_contract}\n{json.dumps(context, separators=(',', ':'))}"
     state.update({"status": "running", "agent": runner, "model": chosen_model, "workflow_revision": compiled["workflow_revision"]})
     _write(root, state)
     try:
-        summary = invoke(runner, chosen_model, prompt, root, 7200)
+        with serve_capability(root, config, state["run_id"], phase) as capability_env:
+            summary = invoke(runner, chosen_model, prompt, root, 7200, allow_local_auth=True, extra_env=capability_env, writable_paths=writable_artifacts)
         persisted = _read(root, state["run_id"])
         if persisted.get("status") == "awaiting_input":
             return persisted
@@ -452,6 +494,90 @@ def continue_run(root: Path, config: Path, run_id: str, approve: bool, *, agent:
     return _execute(root, config, state, agent=agent, model=model)
 
 
+def retry(root: Path, config: Path, run_id: str, *, agent: str | None = None, model: str | None = None) -> dict[str, Any]:
+    """Retry agent execution after a failure without replaying resolved gates."""
+    state = _read(root, run_id)
+    if state.get("status") != "error":
+        raise ExecutionError(f"outcome cannot retry from {state.get('status')}")
+    state["status"] = "queued"
+    state.pop("error", None)
+    _write(root, state)
+    return _execute(root, config, state, agent=agent, model=model)
+
+
+def _worker_live(outcome_root: Path) -> bool:
+    try:
+        worker = json.loads((outcome_root / "worker.json").read_text(encoding="utf-8"))
+        if worker.get("status") == "queued" and not worker.get("pid"):
+            started = datetime.fromisoformat(worker["started_at"])
+            return (datetime.now(timezone.utc) - started).total_seconds() < 30
+        os.kill(int(worker["pid"]), 0)
+        return True
+    except (OSError, ValueError, KeyError, json.JSONDecodeError):
+        return False
+
+
+def launch_worker(root: Path, config: Path, run_id: str, operation: str, *, interaction_id: str | None = None, message: str | None = None, approve: bool = False, reject: bool = False) -> dict[str, Any]:
+    """Launch an outcome transition outside the Slack listener process tree."""
+    outcome_root = _record(root, run_id).parent
+    lock_path = outcome_root / "worker.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock = lock_path.open("a+")
+    try:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError as exc:
+        lock.close()
+        raise ExecutionError("an outcome worker launch is already in progress") from exc
+    if _worker_live(outcome_root):
+        lock.close()
+        raise ExecutionError("an outcome worker is already active")
+    if operation == "respond" and (not interaction_id or message is None):
+        raise ExecutionError("respond workers require an interaction and message")
+    if operation not in {"continue", "retry", "respond"}:
+        raise ExecutionError(f"unsupported worker operation: {operation}")
+    worker_id = str(uuid.uuid4())
+    argv = [sys.executable, "-m", "outcomeci.worker", operation, run_id, "--workspace", str(root), "--config", str(config), "--worker-id", worker_id]
+    if interaction_id:
+        argv.extend(["--interaction-id", interaction_id])
+    if message is not None:
+        argv.extend(["--message", message])
+    if approve:
+        argv.append("--approve")
+    if reject:
+        argv.append("--reject")
+    log_path = outcome_root / "worker.log"
+    worker_path = outcome_root / "worker.json"
+    try:
+        previous_worker = json.loads(worker_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        previous_worker = {}
+    worker = {"schema_version": 1, "worker_id": worker_id, "attempt": int(previous_worker.get("attempt", 0)) + 1, "pid": None, "operation": operation, "status": "queued", "started_at": datetime.now(timezone.utc).isoformat(), "log": str(log_path)}
+    try:
+        worker_path.write_text(json.dumps(worker, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        log = log_path.open("a", encoding="utf-8")
+        try:
+            process = subprocess.Popen(argv, cwd=root, stdout=log, stderr=subprocess.STDOUT, start_new_session=True, close_fds=True, env=os.environ.copy())
+        finally:
+            log.close()
+        worker["pid"] = process.pid
+        worker_path.write_text(json.dumps(worker, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    finally:
+        lock.close()
+    return {"status": "queued", "run_id": run_id, "worker": worker}
+
+
+def recover(root: Path, config: Path, run_id: str) -> dict[str, Any]:
+    state = _read(root, run_id)
+    outcome_root = _record(root, run_id).parent
+    if state.get("status") != "running":
+        raise ExecutionError(f"outcome cannot recover from {state.get('status')}")
+    if _worker_live(outcome_root):
+        raise ExecutionError("outcome worker is still active")
+    state.update({"status": "error", "error": "previous outcome worker exited before recording completion"})
+    _write(root, state)
+    return launch_worker(root, config, run_id, "retry")
+
+
 def status(root: Path, run_id: str | None) -> dict[str, Any]:
     if run_id:
         return _read(root, run_id)
@@ -482,6 +608,7 @@ def respond(
     reject: bool = False,
     agent: str | None = None,
     model: str | None = None,
+    execute: bool = True,
 ) -> dict[str, Any]:
     state = _read(root, run_id)
     if approve and reject:
@@ -525,6 +652,10 @@ def respond(
         next_interaction = _first_required_interaction(compiled, phase, "before", state)
         if next_interaction:
             return _open_interaction(root, state, phase, "before", next_interaction)
+    if not execute:
+        state["status"] = "running"
+        _write(root, state)
+        return state
     state["status"] = "queued"
     _write(root, state)
     return _execute(root, config, state, agent=agent, model=model)
