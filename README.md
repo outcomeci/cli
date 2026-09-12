@@ -268,8 +268,11 @@ oci workflow sync outcome.yml \
   --version
 ```
 
-The CLI validates the complete local workflow—including referenced instructions
-and filesystem context—before uploading it. Credentials live in
+The CLI validates the complete local workflow and uploads a bounded bundle of
+`outcome.yml`, the constitution, and referenced `.outcomeci/` support files.
+OutcomeCI-managed runs hydrate and version that bundle without requiring a Git
+state repository. A GitHub state repository is used only when the workflow
+selects it explicitly. Credentials live in
 `~/.config/outcomeci/credentials.json` with owner-only permissions and never in
 the outcome repository. Set `OUTCOMECI_API_URL` when testing against a local or
 staging control plane.

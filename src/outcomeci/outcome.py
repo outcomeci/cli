@@ -6,6 +6,7 @@ import json
 import os
 import re
 import shutil
+import base64
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -67,12 +68,52 @@ def _claim(path: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ExecutionError("invalid outcome claim") from exc
-    required = {"outcome_run_id", "workflow_run_id", "phase", "trajectory_version", "agent", "model", "state_repository", "targets", "intent_context"}
+    required = {"outcome_run_id", "workflow_run_id", "phase", "trajectory_version", "agent", "model", "artifact_backend", "targets", "intent_context"}
     if not isinstance(value, dict) or not required <= set(value) or not isinstance(value["phase"], str) or value["agent"] not in {"codex", "claude"}:
         raise ExecutionError("invalid outcome claim")
     if not isinstance(value["targets"], list) or (value["phase"] != "intake" and not value["targets"]):
         raise ExecutionError("invalid outcome targets")
+    backend = value["artifact_backend"]
+    if not isinstance(backend, dict) or backend.get("provider") not in {"outcomeci", "github"}:
+        raise ExecutionError("invalid artifact backend")
+    if backend["provider"] == "github" and not isinstance(backend.get("repository"), str):
+        raise ExecutionError("GitHub artifact backend requires a repository")
+    if backend["provider"] == "outcomeci" and not isinstance(backend.get("files"), dict):
+        raise ExecutionError("OutcomeCI artifact backend requires files")
     return value
+
+
+def _managed_state(state: Path, backend: dict[str, Any]) -> None:
+    files = backend["files"]
+    total = 0
+    for relative, encoded in files.items():
+        if not isinstance(relative, str) or not isinstance(encoded, str):
+            raise ExecutionError("invalid managed artifact")
+        target = (state / relative).resolve()
+        try:
+            target.relative_to(state.resolve())
+        except ValueError as exc:
+            raise ExecutionError("managed artifact escapes the state directory") from exc
+        try:
+            content = base64.b64decode(encoded, validate=True)
+        except ValueError as exc:
+            raise ExecutionError("invalid managed artifact encoding") from exc
+        total += len(content)
+        if len(content) > 2 * 1024 * 1024 or total > 20 * 1024 * 1024:
+            raise ExecutionError("managed artifact bundle is too large")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(content)
+
+
+def _managed_artifacts(state: Path, outcome_root: Path) -> list[dict[str, Any]]:
+    result, total = [], 0
+    for path in sorted(item for item in outcome_root.rglob("*") if item.is_file()):
+        content = path.read_bytes()
+        total += len(content)
+        if len(content) > 2 * 1024 * 1024 or total > 20 * 1024 * 1024:
+            raise ExecutionError("managed outcome artifacts exceed the result limit")
+        result.append({"path": str(path.relative_to(state)), "content_base64": base64.b64encode(content).decode(), "sha256": hashlib.sha256(content).hexdigest()})
+    return result
 
 
 def _contract_path(root: Path, contract: dict[str, Any]) -> Path:
@@ -299,17 +340,27 @@ def _validate_trajectory(value: Any, claim: dict[str, Any]) -> dict[str, Any]:
 
 def run(claim_path: Path, workspace: Path) -> dict[str, Any]:
     claim = _claim(claim_path)
-    github = GitHub(os.environ.get("GITHUB_TOKEN", ""))
+    needs_github = bool(claim["targets"]) or claim["artifact_backend"]["provider"] == "github"
+    github = GitHub(os.environ.get("GITHUB_TOKEN", "")) if needs_github else None
     workspace.mkdir(parents=True, exist_ok=True)
     state = workspace / "state"
-    github.clone(claim["state_repository"], state)
-    state_base = _git(["git", "rev-parse", "HEAD"], state, github.env)
+    backend = claim["artifact_backend"]
+    state_repository = backend.get("repository") if backend["provider"] == "github" else None
+    state_base = None
+    if backend["provider"] == "github":
+        assert github is not None
+        github.clone(state_repository, state)
+        state_base = _git(["git", "rev-parse", "HEAD"], state, github.env)
+    else:
+        state.mkdir(parents=True, exist_ok=True)
+        _managed_state(state, backend)
     constitution = state / ".outcomeci" / "constitution.md"
     workflow = state / "outcome.yml"
     if not constitution.is_file() or not workflow.is_file():
         raise ExecutionError("state repository is not initialized for OutcomeCI")
     repositories, products, base_commits, base_branches = [], [], {}, {}
     for item in claim["targets"]:
+        assert github is not None
         repository = item.get("repository")
         if not isinstance(repository, str):
             raise ExecutionError("invalid outcome target")
@@ -328,13 +379,14 @@ def run(claim_path: Path, workspace: Path) -> dict[str, Any]:
     model = configured_policy.get("model") if configured_policy.get("model") is not None else claim.get("model")
     shared = compiled["instructions"]["orchestrator"]["content"]
     phase_instructions = compiled["instructions"]["phases"][claim["phase"]]["content"]
-    payload = {"claim": claim, "state_repository": str(state), "product_repositories": [{"name_with_owner": name, "base_commit_sha": base_commits[name], "checkout": str(path)} for name, path in zip(repositories, products)]}
+    payload = {"claim": claim, "artifact_workspace": str(state), "product_repositories": [{"name_with_owner": name, "base_commit_sha": base_commits[name], "checkout": str(path)} for name, path in zip(repositories, products)]}
     implementation = claim["phase"] == "implementation"
     boundary = "Product repositories are writable for approved implementation. Modify source and tests, but do not commit, push, or open pull requests; the runner owns publication." if implementation else "Product repositories are read-only. Do not commit, push, or open pull requests in product repositories."
     prompt = f"{shared}\n\n{phase_instructions}\n\nWrite all durable artifacts beneath {outcome_root}. {boundary} The `oci twin search` command is the only live Digital Twin interface.\n\n{json.dumps(payload, separators=(',', ':'))}"
     summary = invoke(runner, model, prompt, workspace, 7200)
     publications: list[dict[str, Any]] | None = None
     if implementation:
+        assert github is not None
         publications = _publish_implementation(github, claim, repositories, products, base_commits, base_branches)
         publication_path = outcome_root / "implementation" / "publication.json"
         publication_path.parent.mkdir(parents=True, exist_ok=True)
@@ -359,8 +411,8 @@ def run(claim_path: Path, workspace: Path) -> dict[str, Any]:
         trajectory_version=claim["trajectory_version"],
         phase=claim["phase"],
         workflow_revision=compiled["workflow_revision"],
-        backend_provider="outcomeci",
-        state_repository=claim["state_repository"],
+        backend_provider=backend["provider"],
+        state_repository=state_repository,
         context_provider=compiled["workflow"]["spec"]["context"].get("provider", "outcomeci"),
         context_revision_id=claim["intent_context"].get("ontology_revision_id"),
         constitution_sha256=_sha(constitution),
@@ -372,16 +424,24 @@ def run(claim_path: Path, workspace: Path) -> dict[str, Any]:
     )
     artifacts = manifest["artifacts"]
     (outcome_root / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    _git(["git", "add", "--", str(outcome_root.relative_to(state))], state, github.env)
-    _git(["git", "config", "user.name", "OutcomeCI"], state, github.env)
-    _git(["git", "config", "user.email", "runner@outcomeci.com"], state, github.env)
-    _git(["git", "commit", "-m", f"docs: record outcome {claim['outcome_run_id']} {claim['phase']}"], state, github.env)
-    commit = _git(["git", "rev-parse", "HEAD"], state, github.env)
-    _git(["git", "push", f"--force-with-lease=refs/heads/main:{state_base}", "origin", "HEAD:refs/heads/main"], state, github.env)
+    commit = None
+    managed_artifacts = None
+    if backend["provider"] == "github":
+        assert github is not None
+        _git(["git", "add", "--", str(outcome_root.relative_to(state))], state, github.env)
+        _git(["git", "config", "user.name", "OutcomeCI"], state, github.env)
+        _git(["git", "config", "user.email", "runner@outcomeci.com"], state, github.env)
+        _git(["git", "commit", "-m", f"docs: record outcome {claim['outcome_run_id']} {claim['phase']}"], state, github.env)
+        commit = _git(["git", "rev-parse", "HEAD"], state, github.env)
+        _git(["git", "push", f"--force-with-lease=refs/heads/main:{state_base}", "origin", "HEAD:refs/heads/main"], state, github.env)
+    else:
+        managed_artifacts = _managed_artifacts(state, outcome_root)
     status = "completed" if implementation else ("awaiting_confirmation" if claim["phase"] in {"intake", "plan"} else "ready_for_implementation")
     result = {"status": status, "phase": claim["phase"], "state_commit_sha": commit, "constitution_sha": _sha(constitution), "manifest": manifest, "artifact_paths": artifacts, "summary": summary[-1000:]}
     if publications is not None:
         result["publications"] = publications
+    if managed_artifacts is not None:
+        result["managed_artifacts"] = managed_artifacts
     if claim["phase"] == "intake":
         result["intent_context"] = intake_context
     return result

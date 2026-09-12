@@ -63,6 +63,7 @@ def test_sync_validates_and_sends_explicit_create_mode(tmp_path: Path, monkeypat
     assert captured["path"] == "/workspaces/workspace_1/workflow-revisions"
     assert captured["body"]["mode"] == "create"
     assert captured["body"]["content_type"] == "yaml"
+    assert ".outcomeci/constitution.md" in captured["body"]["files"]
 
 
 def test_logout_revokes_before_removing_local_credentials(tmp_path: Path, monkeypatch) -> None:
