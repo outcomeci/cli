@@ -37,7 +37,7 @@ def build_manifest(
     return {
         "schema_version": SCHEMA_VERSION,
         "run_id": run_id,
-        "odl_run_id": run_id,
+        "outcome_run_id": run_id,
         "workflow_run_id": workflow_run_id,
         "trajectory_version": trajectory_version,
         "phase": phase,

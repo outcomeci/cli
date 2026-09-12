@@ -371,9 +371,8 @@ def compile_workflow(path: Path) -> dict[str, Any]:
     normalized = json.loads(json.dumps(document, sort_keys=True, separators=(",", ":")))
     context = spec.get("context", {"provider": "outcomeci"})
     context_files = _filesystem_context(root, context) if context.get("provider") == "filesystem" else []
-    # `standup` is a compatibility alias for the runtime while callers migrate
     # to the role-neutral orchestrator key.
-    resolved = {"orchestrator": orchestrator, "standup": orchestrator, "phases": phases, "schemas": schemas}
+    resolved = {"orchestrator": orchestrator, "phases": phases, "schemas": schemas}
     revision_input = {"workflow": normalized, "graph": {"levels": graph["levels"]}, "instructions": resolved, "context": {"provider": context.get("provider", "outcomeci"), "files": context_files}}
     revision = hashlib.sha256(json.dumps(revision_input, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     return {"schema_version": "outcomeci.workflow/v1alpha1", "engine_version": "2", "engine_package_version": __version__, "workflow_revision": revision, **revision_input}

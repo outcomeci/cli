@@ -9,13 +9,13 @@ from outcomeci.process import ExecutionError
 
 def test_claim_accepts_managed_plan(tmp_path: Path) -> None:
     path = tmp_path / "claim.json"
-    path.write_text('{"odl_run_id":"r","workflow_run_id":"w","phase":"plan","trajectory_version":1,"agent":"codex","model":null,"state_repository":"org/state","targets":[{"repository":"org/repo"}],"intent_context":{}}')
+    path.write_text('{"outcome_run_id":"r","workflow_run_id":"w","phase":"plan","trajectory_version":1,"agent":"codex","model":null,"state_repository":"org/state","targets":[{"repository":"org/repo"}],"intent_context":{}}')
     assert _claim(path)["phase"] == "plan"
 
 
 def test_claim_accepts_custom_phase_for_workflow_validation(tmp_path: Path) -> None:
     path = tmp_path / "claim.json"
-    path.write_text('{"odl_run_id":"r","workflow_run_id":"w","phase":"deploy","trajectory_version":1,"agent":"codex","model":null,"state_repository":"org/state","targets":[{"repository":"org/repo"}],"intent_context":{}}')
+    path.write_text('{"outcome_run_id":"r","workflow_run_id":"w","phase":"deploy","trajectory_version":1,"agent":"codex","model":null,"state_repository":"org/state","targets":[{"repository":"org/repo"}],"intent_context":{}}')
     assert _claim(path)["phase"] == "deploy"
 
 

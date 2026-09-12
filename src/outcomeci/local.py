@@ -238,7 +238,7 @@ def _execute(root: Path, config: Path, state: dict[str, Any], *, agent: str | No
         and isinstance(connection["auth"].get("env"), str)
     }
     repository = root.name
-    shared = compiled["instructions"]["standup"]["content"]
+    shared = compiled["instructions"]["orchestrator"]["content"]
     instructions = compiled["instructions"]["phases"][phase]["content"]
     local_revision = f"filesystem:{compiled['workflow_revision']}"
     context = {
@@ -390,7 +390,7 @@ def compile_context(root: Path, config: Path, run_id: str | None) -> dict[str, A
         "context": compiled["context"],
         "phase_contract": phase_contract,
         "instructions": {
-            "standup": compiled["instructions"]["standup"],
+            "standup": compiled["instructions"]["orchestrator"],
             "phase": compiled["instructions"]["phases"][phase],
         },
         "workflow_revision": compiled["workflow_revision"],

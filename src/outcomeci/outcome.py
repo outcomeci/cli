@@ -38,7 +38,7 @@ def _claim(path: Path) -> dict[str, Any]:
         value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
         raise ExecutionError("invalid outcome claim") from exc
-    required = {"odl_run_id", "workflow_run_id", "phase", "trajectory_version", "agent", "model", "state_repository", "targets", "intent_context"}
+    required = {"outcome_run_id", "workflow_run_id", "phase", "trajectory_version", "agent", "model", "state_repository", "targets", "intent_context"}
     if not isinstance(value, dict) or not required <= set(value) or not isinstance(value["phase"], str) or value["agent"] not in {"codex", "claude"}:
         raise ExecutionError("invalid outcome claim")
     if not isinstance(value["targets"], list) or (value["phase"] != "intake" and not value["targets"]):
@@ -258,14 +258,14 @@ def run(claim_path: Path, workspace: Path) -> dict[str, Any]:
         repositories.append(repository)
         products.append(checkout)
         base_commits[repository] = _git(["git", "rev-parse", "HEAD"], checkout, github.env)
-    outcome_root = state / ".outcomeci" / "outcomes" / claim["odl_run_id"]
+    outcome_root = state / ".outcomeci" / "outcomes" / claim["outcome_run_id"]
     outcome_root.mkdir(parents=True, exist_ok=True)
     compiled = compile_workflow(workflow)
     _validate_claim_phase(compiled, outcome_root, claim["phase"])
     configured_policy = compiled["instructions"]["phases"][claim["phase"]]["policy"]
     runner = configured_policy.get("runner") or claim["agent"]
     model = configured_policy.get("model") if configured_policy.get("model") is not None else claim.get("model")
-    shared = compiled["instructions"]["standup"]["content"]
+    shared = compiled["instructions"]["orchestrator"]["content"]
     phase_instructions = compiled["instructions"]["phases"][claim["phase"]]["content"]
     payload = {"claim": claim, "state_repository": str(state), "product_repositories": [{"name_with_owner": name, "base_commit_sha": base_commits[name], "checkout": str(path)} for name, path in zip(repositories, products)]}
     prompt = f"{shared}\n\n{phase_instructions}\n\nWrite all durable artifacts beneath {outcome_root}. Product repositories are read-only. The `oci twin search` command is the only live Digital Twin interface. Do not commit, push, or open pull requests in product repositories.\n\n{json.dumps(payload, separators=(',', ':'))}"
@@ -284,7 +284,7 @@ def run(claim_path: Path, workspace: Path) -> dict[str, Any]:
     manifest = build_manifest(
         outcome_root=outcome_root,
         artifact_base=state,
-        run_id=claim["odl_run_id"],
+        run_id=claim["outcome_run_id"],
         workflow_run_id=claim["workflow_run_id"],
         trajectory_version=claim["trajectory_version"],
         phase=claim["phase"],
@@ -305,7 +305,7 @@ def run(claim_path: Path, workspace: Path) -> dict[str, Any]:
     _git(["git", "add", "--", str(outcome_root.relative_to(state))], state, github.env)
     _git(["git", "config", "user.name", "OutcomeCI"], state, github.env)
     _git(["git", "config", "user.email", "runner@outcomeci.com"], state, github.env)
-    _git(["git", "commit", "-m", f"docs: record outcome {claim['odl_run_id']} {claim['phase']}"], state, github.env)
+    _git(["git", "commit", "-m", f"docs: record outcome {claim['outcome_run_id']} {claim['phase']}"], state, github.env)
     commit = _git(["git", "rev-parse", "HEAD"], state, github.env)
     _git(["git", "push", f"--force-with-lease=refs/heads/main:{state_base}", "origin", "HEAD:refs/heads/main"], state, github.env)
     result = {"status": "awaiting_confirmation" if claim["phase"] in {"intake", "plan"} else "ready_for_implementation", "phase": claim["phase"], "state_commit_sha": commit, "constitution_sha": _sha(constitution), "manifest": manifest, "artifact_paths": artifacts, "summary": summary[-1000:]}
