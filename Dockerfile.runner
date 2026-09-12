@@ -12,8 +12,6 @@ FROM node:22-bookworm-slim
 
 ARG CODEX_CLI_VERSION=0.149.0
 ARG CLAUDE_CODE_VERSION=2.1.238
-ARG GH_CLI_VERSION=2.100.0
-ARG TARGETARCH
 
 ENV PATH="/opt/oci/bin:${PATH}" \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -27,15 +25,6 @@ RUN apt-get update \
     && npm install --global "@openai/codex@${CODEX_CLI_VERSION}" "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && npm cache clean --force \
     && rm -rf /usr/local/lib/node_modules/npm /usr/local/bin/npm /usr/local/bin/npx /root/.npm \
-    && case "$TARGETARCH" in amd64) gh_arch=amd64 ;; arm64) gh_arch=arm64 ;; *) echo "unsupported architecture: $TARGETARCH" >&2; exit 2 ;; esac \
-    && curl --fail --silent --show-error --location --output "/tmp/gh_${GH_CLI_VERSION}_linux_${gh_arch}.tar.gz" \
-      "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/gh_${GH_CLI_VERSION}_linux_${gh_arch}.tar.gz" \
-    && curl --fail --silent --show-error --location --output /tmp/checksums.txt \
-      "https://github.com/cli/cli/releases/download/v${GH_CLI_VERSION}/gh_${GH_CLI_VERSION}_checksums.txt" \
-    && grep " gh_${GH_CLI_VERSION}_linux_${gh_arch}.tar.gz$" /tmp/checksums.txt | sed 's#  gh_#  /tmp/gh_#' | sha256sum --check --strict \
-    && tar --extract --gzip --file "/tmp/gh_${GH_CLI_VERSION}_linux_${gh_arch}.tar.gz" --strip-components=2 --directory /usr/local/bin \
-      "gh_${GH_CLI_VERSION}_linux_${gh_arch}/bin/gh" \
-    && rm "/tmp/gh_${GH_CLI_VERSION}_linux_${gh_arch}.tar.gz" /tmp/checksums.txt \
     && groupadd --gid 10001 runner \
     && useradd --uid 10001 --create-home --gid runner runner \
     && mkdir /work \

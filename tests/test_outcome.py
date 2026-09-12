@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from outcomeci import outcome
+from outcomeci import outcome as outcome_module
 from outcomeci.outcome import _claim, _expected, _publish_implementation, _transcripts, _validate_claim_phase, _validate_trajectory
 from outcomeci.process import ExecutionError
 
@@ -72,7 +73,7 @@ def test_managed_claim_phase_must_have_completed_dependencies(tmp_path: Path) ->
     _validate_claim_phase(compiled, tmp_path, "plan")
 
 
-def test_implementation_publication_is_runner_owned(tmp_path: Path) -> None:
+def test_implementation_publication_is_runner_owned(tmp_path: Path, monkeypatch) -> None:
     checkout = tmp_path / "repo"
     checkout.mkdir()
 
@@ -81,8 +82,9 @@ def test_implementation_publication_is_runner_owned(tmp_path: Path) -> None:
             if argv[:3] == ["git", "branch", "--show-current"]: return "main"
             if argv[:3] == ["git", "status", "--porcelain=v1"]: return " M app.py"
             if argv[:3] == ["git", "rev-parse", "HEAD"]: return "b" * 40
-            if argv[:3] == ["gh", "pr", "create"]: return "https://github.com/outcomeci/repo/pull/12"
             return ""
+
+    monkeypatch.setattr(outcome_module, "_open_pull_request", lambda *args: (12, "https://github.com/outcomeci/repo/pull/12"))
 
     result = _publish_implementation(
         GitHub(),
