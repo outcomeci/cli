@@ -7,10 +7,19 @@ from pathlib import Path
 import pytest
 import yaml
 
+from outcomeci import slack as slack_module
 from outcomeci.cli import main
 from outcomeci.repository import initialize
-from outcomeci import slack as slack_module
-from outcomeci.slack import SlackError, installed_app_id, manifest, register_connection, run, scaffold, setup, status
+from outcomeci.slack import (
+    SlackError,
+    installed_app_id,
+    manifest,
+    register_connection,
+    run,
+    scaffold,
+    setup,
+    status,
+)
 
 
 class FakeSlack:
@@ -28,7 +37,9 @@ class FakeSlack:
             self.authorized = True
             self.expired = False
         if command[1:3] == ["manifest", "validate"] and self.expired:
-            return subprocess.CompletedProcess(command, 0, stdout="auth_token_error: token_expired", stderr="")
+            return subprocess.CompletedProcess(
+                command, 0, stdout="auth_token_error: token_expired", stderr=""
+            )
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
 
@@ -72,7 +83,9 @@ def test_register_connection_migrates_socket_mode_in_place(tmp_path: Path) -> No
     initialize(tmp_path, "filesystem")
     workflow = tmp_path / "outcome.yml"
     register_connection(workflow)
-    workflow.write_text(workflow.read_text().replace("delivery: on_demand", "delivery: socket_mode"))
+    workflow.write_text(
+        workflow.read_text().replace("delivery: on_demand", "delivery: socket_mode")
+    )
     assert register_connection(workflow) is True
     assert "delivery: on_demand" in workflow.read_text()
 
@@ -84,13 +97,31 @@ def test_setup_logs_in_when_needed_and_installs_app(tmp_path: Path, monkeypatch)
     result = setup(tmp_path, name="Acme Outcomes", team="T0123456", channel="C0123456", runner=fake)
     commands = [command for command, _ in fake.commands]
     assert ["/usr/local/bin/slack", "login"] in commands
-    assert ["/usr/local/bin/slack", "manifest", "validate", "--no-color", "--team", "T0123456"] in commands
     assert [
-        "/usr/local/bin/slack", "app", "install", "--environment", "local", "--team", "T0123456"
+        "/usr/local/bin/slack",
+        "manifest",
+        "validate",
+        "--no-color",
+        "--team",
+        "T0123456",
+    ] in commands
+    assert [
+        "/usr/local/bin/slack",
+        "app",
+        "install",
+        "--environment",
+        "local",
+        "--team",
+        "T0123456",
     ] in commands
     assert result["configured"] is True
     assert result["workflow_updated"] is True
-    assert json.loads((tmp_path / ".outcomeci/integrations/slack/config.json").read_text())["default_target"] == "C0123456"
+    assert (
+        json.loads((tmp_path / ".outcomeci/integrations/slack/config.json").read_text())[
+            "default_target"
+        ]
+        == "C0123456"
+    )
 
 
 def test_setup_skips_login_for_authorized_workspace(tmp_path: Path, monkeypatch) -> None:
@@ -132,7 +163,7 @@ def test_status_reports_ready_configuration(tmp_path: Path, monkeypatch) -> None
 
 
 def test_run_delegates_to_slack_cli(tmp_path: Path, monkeypatch) -> None:
-    project = scaffold(tmp_path, "OutcomeCI")
+    scaffold(tmp_path, "OutcomeCI")
     fake = FakeSlack()
     monkeypatch.setattr("outcomeci.slack.shutil.which", lambda _: "/usr/bin/slack")
     assert run(tmp_path, team="T0123456", runner=fake) == 0
@@ -141,9 +172,11 @@ def test_run_delegates_to_slack_cli(tmp_path: Path, monkeypatch) -> None:
 
 def test_run_uses_the_only_installed_app_without_prompt(tmp_path: Path, monkeypatch) -> None:
     project = scaffold(tmp_path, "OutcomeCI")
-    (project / ".slack/apps.dev.json").write_text(json.dumps({
-        "T0123456": {"app_id": "A0123456789", "team_id": "T0123456", "team_domain": "acme"}
-    }))
+    (project / ".slack/apps.dev.json").write_text(
+        json.dumps(
+            {"T0123456": {"app_id": "A0123456789", "team_id": "T0123456", "team_domain": "acme"}}
+        )
+    )
     fake = FakeSlack()
     monkeypatch.setattr("outcomeci.slack.shutil.which", lambda _: "/usr/bin/slack")
     assert installed_app_id(project) == "A0123456789"
@@ -153,10 +186,14 @@ def test_run_uses_the_only_installed_app_without_prompt(tmp_path: Path, monkeypa
 
 def test_run_preserves_selector_when_installation_is_ambiguous(tmp_path: Path, monkeypatch) -> None:
     project = scaffold(tmp_path, "OutcomeCI")
-    (project / ".slack/apps.dev.json").write_text(json.dumps({
-        "T1": {"app_id": "A1", "team_id": "T1"},
-        "T2": {"app_id": "A2", "team_id": "T2"},
-    }))
+    (project / ".slack/apps.dev.json").write_text(
+        json.dumps(
+            {
+                "T1": {"app_id": "A1", "team_id": "T1"},
+                "T2": {"app_id": "A2", "team_id": "T2"},
+            }
+        )
+    )
     fake = FakeSlack()
     monkeypatch.setattr("outcomeci.slack.shutil.which", lambda _: "/usr/bin/slack")
     assert installed_app_id(project) is None
@@ -180,11 +217,16 @@ def test_cli_manifest_hook_emits_json(tmp_path: Path, capsys) -> None:
 
 def test_targets_expose_names_without_slack_ids(tmp_path: Path, monkeypatch) -> None:
     responses = {
-        "users.list": {"ok": True, "members": [{"id": "U123", "name": "isaah", "profile": {"display_name": "Isaah"}}]},
+        "users.list": {
+            "ok": True,
+            "members": [{"id": "U123", "name": "isaah", "profile": {"display_name": "Isaah"}}],
+        },
         "conversations.list": {"ok": True, "channels": [{"id": "C123", "name": "product"}]},
         "usergroups.list": {"ok": True, "usergroups": [{"id": "S123", "handle": "design"}]},
     }
-    monkeypatch.setattr(slack_module, "api", lambda workspace, method, payload=None, runner=None: responses[method])
+    monkeypatch.setattr(
+        slack_module, "api", lambda workspace, method, payload=None, runner=None: responses[method]
+    )
     result = slack_module.targets(tmp_path)
     assert result == {"users": ["Isaah"], "channels": ["product"], "groups": ["design"]}
     assert not any("123" in value for values in result.values() for value in values)

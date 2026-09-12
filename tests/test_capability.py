@@ -15,13 +15,21 @@ def _broker_without_socket(tmp_path: Path, monkeypatch):
     workflow = tmp_path / "outcome.yml"
     value = yaml.safe_load(workflow.read_text())
     hook = value["spec"]["agents"]["phases"]["intake"]["humans"]["after"][0]
-    hook["delivery"] = {"type": "slack", "connection": "slack_local", "targets": [{"kind": "user", "name": "isaah"}]}
-    value["spec"]["connections"] = [{"ref": "slack_local", "provider": "slack", "delivery": "on_demand"}]
+    hook["delivery"] = {
+        "type": "slack",
+        "connection": "slack_local",
+        "targets": [{"kind": "user", "name": "isaah"}],
+    }
+    value["spec"]["connections"] = [
+        {"ref": "slack_local", "provider": "slack", "delivery": "on_demand"}
+    ]
     workflow.write_text(yaml.safe_dump(value, sort_keys=False))
     monkeypatch.setattr(capability, "_Server", lambda *args: object())
     broker = capability.Broker.__new__(capability.Broker)
     compiled = capability.compile_workflow(workflow)
-    broker.hooks = {"confirm_intent": compiled["instructions"]["phases"]["intake"]["humans"]["after"][0]}
+    broker.hooks = {
+        "confirm_intent": compiled["instructions"]["phases"]["intake"]["humans"]["after"][0]
+    }
     broker.root, broker.config, broker.run_id = tmp_path, workflow, "run-1"
     broker.token = "secret"
     return broker
@@ -30,19 +38,49 @@ def _broker_without_socket(tmp_path: Path, monkeypatch):
 def test_broker_rejects_wrong_run_and_undeclared_hook(tmp_path: Path, monkeypatch) -> None:
     broker = _broker_without_socket(tmp_path, monkeypatch)
     with pytest.raises(ExecutionError, match="not authorized"):
-        broker.dispatch({"token": "secret", "operation": "poll", "run_id": "other", "interaction_id": "confirm_intent"})
+        broker.dispatch(
+            {
+                "token": "secret",
+                "operation": "poll",
+                "run_id": "other",
+                "interaction_id": "confirm_intent",
+            }
+        )
     with pytest.raises(ExecutionError, match="not authorized"):
-        broker.dispatch({"token": "secret", "operation": "poll", "run_id": "run-1", "interaction_id": "other"})
+        broker.dispatch(
+            {"token": "secret", "operation": "poll", "run_id": "run-1", "interaction_id": "other"}
+        )
 
 
 def test_broker_accepts_only_slack_verified_response(tmp_path: Path, monkeypatch) -> None:
     broker = _broker_without_socket(tmp_path, monkeypatch)
-    monkeypatch.setattr(capability, "transport_responses", lambda *args: [{"from": "isaah", "message": "approved"}])
+    monkeypatch.setattr(
+        capability, "transport_responses", lambda *args: [{"from": "isaah", "message": "approved"}]
+    )
     interaction = tmp_path / ".outcomeci/outcomes/run-1/interactions/intake/confirm_intent.json"
     interaction.parent.mkdir(parents=True)
-    interaction.write_text('{"run_id":"run-1","phase":"intake","id":"confirm_intent","delivery":{"type":"slack"}}')
+    interaction.write_text(
+        '{"run_id":"run-1","phase":"intake","id":"confirm_intent","delivery":{"type":"slack"}}'
+    )
     monkeypatch.setattr(capability, "accept", lambda *args: {"status": "running"})
     with pytest.raises(ExecutionError, match="not verified"):
-        broker.dispatch({"token": "secret", "operation": "accept", "run_id": "run-1", "interaction_id": "confirm_intent", "message": "fabricated"})
-    result = broker.dispatch({"token": "secret", "operation": "accept", "run_id": "run-1", "interaction_id": "confirm_intent", "message": "approved", "approve": True})
+        broker.dispatch(
+            {
+                "token": "secret",
+                "operation": "accept",
+                "run_id": "run-1",
+                "interaction_id": "confirm_intent",
+                "message": "fabricated",
+            }
+        )
+    result = broker.dispatch(
+        {
+            "token": "secret",
+            "operation": "accept",
+            "run_id": "run-1",
+            "interaction_id": "confirm_intent",
+            "message": "approved",
+            "approve": True,
+        }
+    )
     assert result["status"] == "running"

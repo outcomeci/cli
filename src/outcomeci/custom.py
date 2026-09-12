@@ -1,4 +1,5 @@
 """Custom human-message transports with a fixed OutcomeCI boundary."""
+
 from __future__ import annotations
 
 import json
@@ -19,11 +20,27 @@ from .process import ExecutionError
 
 REQUEST_INPUT = {
     "type": "object",
-    "required": ["schema_version", "run_id", "phase", "interaction_id", "interaction", "purpose", "targets"],
+    "required": [
+        "schema_version",
+        "run_id",
+        "phase",
+        "interaction_id",
+        "interaction",
+        "purpose",
+        "targets",
+    ],
     "properties": {"targets": {"type": "array", "minItems": 1}},
 }
-REQUEST_OUTPUT = {"type": "object", "required": ["correlation_id"], "properties": {"correlation_id": {"type": "string", "minLength": 1}}}
-POLL_INPUT = {"type": "object", "required": ["correlation_id"], "properties": {"correlation_id": {"type": "string", "minLength": 1}}}
+REQUEST_OUTPUT = {
+    "type": "object",
+    "required": ["correlation_id"],
+    "properties": {"correlation_id": {"type": "string", "minLength": 1}},
+}
+POLL_INPUT = {
+    "type": "object",
+    "required": ["correlation_id"],
+    "properties": {"correlation_id": {"type": "string", "minLength": 1}},
+}
 POLL_OUTPUT = {
     "type": "object",
     "required": ["responses"],
@@ -33,7 +50,10 @@ POLL_OUTPUT = {
             "items": {
                 "type": "object",
                 "required": ["from", "message", "responded_at"],
-                "properties": {key: {"type": "string", "minLength": 1} for key in ("from", "message", "responded_at")},
+                "properties": {
+                    key: {"type": "string", "minLength": 1}
+                    for key in ("from", "message", "responded_at")
+                },
             },
         }
     },
@@ -46,7 +66,9 @@ def _connection(config: Path, ref: str) -> dict[str, Any]:
         connections = document["spec"].get("connections", [])
     except (OSError, yaml.YAMLError, KeyError, TypeError) as exc:
         raise ExecutionError(f"could not read custom connection {ref}: {exc}") from exc
-    match = next((item for item in connections if isinstance(item, dict) and item.get("ref") == ref), None)
+    match = next(
+        (item for item in connections if isinstance(item, dict) and item.get("ref") == ref), None
+    )
     if not isinstance(match, dict) or match.get("provider") != "custom":
         raise ExecutionError(f"custom connection {ref} was not found")
     return match
@@ -69,7 +91,11 @@ def _decode(body: bytes, content_type: str = "") -> dict[str, Any]:
     if not text.strip():
         return {}
     if "text/event-stream" in content_type or text.lstrip().startswith("data:"):
-        payloads = [line[5:].strip() for line in text.splitlines() if line.startswith("data:") and line[5:].strip()]
+        payloads = [
+            line[5:].strip()
+            for line in text.splitlines()
+            if line.startswith("data:") and line[5:].strip()
+        ]
         text = next((item for item in reversed(payloads) if item != "[DONE]"), "")
     try:
         value = json.loads(text)
@@ -80,11 +106,17 @@ def _decode(body: bytes, content_type: str = "") -> dict[str, Any]:
     return value
 
 
-def _post(url: str, payload: dict[str, Any], headers: dict[str, str]) -> tuple[dict[str, Any], dict[str, str]]:
-    request = urllib.request.Request(url, json.dumps(payload).encode(), headers=headers, method="POST")
+def _post(
+    url: str, payload: dict[str, Any], headers: dict[str, str]
+) -> tuple[dict[str, Any], dict[str, str]]:
+    request = urllib.request.Request(
+        url, json.dumps(payload).encode(), headers=headers, method="POST"
+    )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
-            return _decode(response.read(), response.headers.get("Content-Type", "")), dict(response.headers)
+            return _decode(response.read(), response.headers.get("Content-Type", "")), dict(
+                response.headers
+            )
     except (urllib.error.URLError, TimeoutError) as exc:
         raise ExecutionError(f"custom human transport request failed: {exc}", True) from exc
 
@@ -93,7 +125,9 @@ def _http(connection: dict[str, Any], operation: str, payload: dict[str, Any]) -
     transport = connection["transport"]
     operation_config = connection["operations"][operation]
     base = str(transport["endpoint"]).rstrip("/")
-    path = str(operation_config.get("path", "")).format(correlation_id=urllib.parse.quote(str(payload.get("correlation_id", "")), safe=""))
+    path = str(operation_config.get("path", "")).format(
+        correlation_id=urllib.parse.quote(str(payload.get("correlation_id", "")), safe="")
+    )
     url = base + (path if path.startswith("/") else f"/{path}")
     method = str(operation_config.get("method", "POST")).upper()
     headers = _headers(connection)
@@ -121,10 +155,25 @@ def _mcp_result(value: dict[str, Any]) -> dict[str, Any]:
     raise ExecutionError("custom MCP tool returned no structured result")
 
 
-def _mcp_http(connection: dict[str, Any], operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _mcp_http(
+    connection: dict[str, Any], operation: str, payload: dict[str, Any]
+) -> dict[str, Any]:
     endpoint = str(connection["transport"]["endpoint"])
     headers = _headers(connection)
-    initialized, response_headers = _post(endpoint, {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "outcomeci", "version": "1"}}}, headers)
+    initialized, response_headers = _post(
+        endpoint,
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "outcomeci", "version": "1"},
+            },
+        },
+        headers,
+    )
     if initialized.get("error"):
         raise ExecutionError(f"custom MCP initialization failed: {initialized['error']}")
     session = response_headers.get("Mcp-Session-Id") or response_headers.get("mcp-session-id")
@@ -132,19 +181,55 @@ def _mcp_http(connection: dict[str, Any], operation: str, payload: dict[str, Any
         headers["Mcp-Session-Id"] = session
     _post(endpoint, {"jsonrpc": "2.0", "method": "notifications/initialized"}, headers)
     tool = str(connection["operations"][operation].get("tool", f"human_{operation}"))
-    result, _ = _post(endpoint, {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": tool, "arguments": payload}}, headers)
+    result, _ = _post(
+        endpoint,
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": tool, "arguments": payload},
+        },
+        headers,
+    )
     return _mcp_result(result)
 
 
-def _mcp_stdio(connection: dict[str, Any], operation: str, payload: dict[str, Any]) -> dict[str, Any]:
+def _mcp_stdio(
+    connection: dict[str, Any], operation: str, payload: dict[str, Any]
+) -> dict[str, Any]:
     command = connection["transport"].get("command")
-    if not isinstance(command, list) or not command or not all(isinstance(item, str) for item in command):
+    if (
+        not isinstance(command, list)
+        or not command
+        or not all(isinstance(item, str) for item in command)
+    ):
         raise ExecutionError("custom MCP stdio transport requires a command list")
     tool = str(connection["operations"][operation].get("tool", f"human_{operation}"))
-    initialize = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18", "capabilities": {}, "clientInfo": {"name": "outcomeci", "version": "1"}}}
-    tool_call = {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {"name": tool, "arguments": payload}}
+    initialize = {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": "2025-06-18",
+            "capabilities": {},
+            "clientInfo": {"name": "outcomeci", "version": "1"},
+        },
+    }
+    tool_call = {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": payload},
+    }
     try:
-        process = subprocess.Popen(command, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=os.environ.copy())
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=os.environ.copy(),
+        )
         assert process.stdin is not None and process.stdout is not None
 
         def exchange(message: dict[str, Any], response_id: int) -> dict[str, Any]:
@@ -152,7 +237,9 @@ def _mcp_stdio(connection: dict[str, Any], operation: str, payload: dict[str, An
             process.stdin.flush()
             deadline = time.monotonic() + 30
             while time.monotonic() < deadline:
-                ready, _, _ = select.select([process.stdout], [], [], max(0, deadline - time.monotonic()))
+                ready, _, _ = select.select(
+                    [process.stdout], [], [], max(0, deadline - time.monotonic())
+                )
                 if not ready:
                     break
                 line = process.stdout.readline()
@@ -166,7 +253,12 @@ def _mcp_stdio(connection: dict[str, Any], operation: str, payload: dict[str, An
         initialized = exchange(initialize, 1)
         if initialized.get("error"):
             raise ExecutionError(f"custom MCP initialization failed: {initialized['error']}")
-        process.stdin.write(json.dumps({"jsonrpc": "2.0", "method": "notifications/initialized"}, separators=(",", ":")) + "\n")
+        process.stdin.write(
+            json.dumps(
+                {"jsonrpc": "2.0", "method": "notifications/initialized"}, separators=(",", ":")
+            )
+            + "\n"
+        )
         process.stdin.flush()
         response = exchange(tool_call, 2)
     except OSError as exc:
@@ -182,11 +274,17 @@ def _mcp_stdio(connection: dict[str, Any], operation: str, payload: dict[str, An
     return _mcp_result(response)
 
 
-def call(config: Path, operation: str, payload: dict[str, Any], connection_ref: str) -> dict[str, Any]:
+def call(
+    config: Path, operation: str, payload: dict[str, Any], connection_ref: str
+) -> dict[str, Any]:
     connection = _connection(config, connection_ref)
     if operation not in {"request", "poll"}:
         raise ExecutionError(f"unsupported custom human operation: {operation}")
-    contract = connection.get("contract", {}).get(operation, {}) if isinstance(connection.get("contract", {}), dict) else {}
+    contract = (
+        connection.get("contract", {}).get(operation, {})
+        if isinstance(connection.get("contract", {}), dict)
+        else {}
+    )
     input_schemas = [REQUEST_INPUT if operation == "request" else POLL_INPUT]
     if isinstance(contract, dict) and isinstance(contract.get("input"), dict):
         input_schemas.append(contract["input"])

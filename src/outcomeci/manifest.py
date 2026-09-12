@@ -1,9 +1,9 @@
 """Shared artifact manifest contract for local and managed outcome runs."""
+
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
-
 
 SCHEMA_VERSION = "outcomeci.outcome-manifest/v1alpha1"
 

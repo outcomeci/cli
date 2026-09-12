@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-from ..models import ExecutionClaim, ContractError
+from ..models import ContractError, ExecutionClaim
 
 
 class CodexAdapter:
@@ -31,4 +31,8 @@ class CodexAdapter:
         parsed = json.loads(raw)
         if not isinstance(parsed, dict):
             raise ContractError("invalid Codex credential")
-        return {"provider": "codex", "auth_json": parsed, "expected_credential_version": claim.lease_version}
+        return {
+            "provider": "codex",
+            "auth_json": parsed,
+            "expected_credential_version": claim.lease_version,
+        }

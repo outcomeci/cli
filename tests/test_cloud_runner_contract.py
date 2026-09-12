@@ -1,4 +1,3 @@
-import json
 import tempfile
 import unittest
 import urllib.error
@@ -64,7 +63,12 @@ class ContractTests(unittest.TestCase):
     def test_outcome_claim_requires_outcome_binding(self):
         self.assertEqual(outcome_claim().outcome, {"phase": "plan"})
         raw = {
-            "job": {"job_id": "job", "kind": "outcome", "repositories": ["owner/repo"], "agent": "codex"},
+            "job": {
+                "job_id": "job",
+                "kind": "outcome",
+                "repositories": ["owner/repo"],
+                "agent": "codex",
+            },
             "lease_id": "lease",
             "credential_version": 1,
             "lease_expires_at": "soon",
@@ -80,7 +84,10 @@ class ContractTests(unittest.TestCase):
     def test_client_uses_outcome_job_endpoint_and_classifies_conflicts(self):
         client = CoreClient("https://api.outcomeci.com", "job", "bootstrap", "outcome")
         error = urllib.error.HTTPError("https://api.outcomeci.com", 409, "error", None, None)
-        with mock.patch("urllib.request.urlopen", side_effect=error), self.assertRaises(CoreError) as raised:
+        with (
+            mock.patch("urllib.request.urlopen", side_effect=error),
+            self.assertRaises(CoreError) as raised,
+        ):
             client.claim_execution()
         self.assertEqual(raised.exception.category, "lease_conflict")
 
