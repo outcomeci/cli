@@ -230,6 +230,13 @@ def _execute(root: Path, config: Path, state: dict[str, Any], *, agent: str | No
     runner, chosen_model = _policy(compiled, phase, agent, model)
     outcome_root = root / ".outcomeci" / "outcomes" / state["run_id"]
     writable_artifacts = _prepare_writable_artifacts(compiled, outcome_root, phase)
+    connection_secrets = {
+        str(connection["auth"]["env"])
+        for connection in compiled["workflow"]["spec"].get("connections", [])
+        if isinstance(connection, dict)
+        and isinstance(connection.get("auth"), dict)
+        and isinstance(connection["auth"].get("env"), str)
+    }
     repository = root.name
     shared = compiled["instructions"]["standup"]["content"]
     instructions = compiled["instructions"]["phases"][phase]["content"]
@@ -253,12 +260,12 @@ repository_id \"local:{repository}\", repository \"{repository}\", a non-empty
 rationale, and a candidates array following the stable role and disposition
 contract above. Use paths relative to this repository.
 """
-    prompt = f"{shared}\n\n{instructions}\n\nThis is a filesystem-backed local Standup. Work in {root}. Write durable artifacts beneath {outcome_root}. During intake, plan, and tasks, do not modify product source files. There is no OutcomeCI Cloud or Digital Twin; inspect the local repository directly. Only use human tools for a hook declared on this current phase with Slack delivery and configured targets. Never discover targets or change hook assignments during execution. Use only readable Slack names; never request or expose provider IDs. Before a wired hook with wait strategy `ask`, ask the requester how long to wait or whether to continue. Deliver it with `oci human request <interaction-id> --run {state['run_id']} --workspace {root}`; add `--continue` only when the requester chose to keep working. Otherwise poll for exactly their bounded duration using `oci human poll <interaction-id> --run {state['run_id']} --wait <seconds> --workspace {root}`. Apply a received response with `oci human accept` and preserve it as outcome context.\n{intake_contract}\n{json.dumps(context, separators=(',', ':'))}"
+    prompt = f"{shared}\n\n{instructions}\n\nThis is a filesystem-backed local Standup. Work in {root}. Write durable artifacts beneath {outcome_root}. During intake, plan, and tasks, do not modify product source files. There is no OutcomeCI Cloud or Digital Twin; inspect the local repository directly. Only use human tools for a hook declared on this current phase with Slack or custom delivery and configured targets. Never discover targets or change hook assignments during execution. Use only readable names; never request or expose provider IDs. Before a wired hook with wait strategy `ask`, ask the requester how long to wait or whether to continue. Deliver it with `oci human request <interaction-id> --run {state['run_id']} --workspace {root}`; add `--continue` only when the requester chose to keep working. Otherwise poll for exactly their bounded duration using `oci human poll <interaction-id> --run {state['run_id']} --wait <seconds> --workspace {root}`. Apply a received response with `oci human accept` and preserve it as outcome context.\n{intake_contract}\n{json.dumps(context, separators=(',', ':'))}"
     state.update({"status": "running", "agent": runner, "model": chosen_model, "workflow_revision": compiled["workflow_revision"]})
     _write(root, state)
     try:
         with serve_capability(root, config, state["run_id"], phase) as capability_env:
-            summary = invoke(runner, chosen_model, prompt, root, 7200, allow_local_auth=True, extra_env=capability_env, writable_paths=writable_artifacts)
+            summary = invoke(runner, chosen_model, prompt, root, 7200, allow_local_auth=True, extra_env=capability_env, writable_paths=writable_artifacts, excluded_env=connection_secrets)
         persisted = _read(root, state["run_id"])
         if persisted.get("status") == "awaiting_input":
             return persisted

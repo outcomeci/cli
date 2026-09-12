@@ -12,8 +12,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 from .config import compile_workflow
-from .humans import accept, poll, request
-from .slack import poll_replies
+from .humans import accept, poll, request, transport_responses
 from .process import ExecutionError
 
 
@@ -38,7 +37,7 @@ class Broker:
         hooks = compiled["instructions"]["phases"][phase]["humans"]
         self.hooks = {
             hook["id"]: hook for timing in ("before", "during", "after") for hook in hooks[timing]
-            if hook.get("delivery", {}).get("type") == "slack" and hook.get("delivery", {}).get("targets")
+            if hook.get("delivery", {}).get("type") in {"slack", "custom"} and hook.get("delivery", {}).get("targets")
         }
         self.root, self.config, self.run_id = root, config, run_id
         self.token = secrets.token_urlsafe(32)
@@ -55,10 +54,14 @@ class Broker:
         if operation == "request":
             return request(self.root, self.config, self.run_id, hook, bool(payload.get("continue_while_waiting")), self.hooks[hook])
         if operation == "poll":
-            return poll(self.root, self.run_id, hook, int(payload.get("wait_seconds", 0)), float(payload.get("interval_seconds", 2)))
+            return poll(self.root, self.config, self.run_id, hook, int(payload.get("wait_seconds", 0)), float(payload.get("interval_seconds", 2)))
         if operation == "accept":
             message = str(payload.get("message", ""))
-            replies = poll_replies(self.root, self.run_id, hook)
+            matches = list((self.root / ".outcomeci" / "outcomes" / self.run_id / "interactions").glob(f"*/{hook}.json"))
+            if len(matches) != 1:
+                raise ExecutionError(f"interaction {hook} was not found for outcome {self.run_id}")
+            interaction = json.loads(matches[0].read_text(encoding="utf-8"))
+            replies = transport_responses(self.root, self.config, interaction)
             if not any(reply.get("message") == message for reply in replies):
                 raise ExecutionError("response was not verified in the configured Slack thread")
             return accept(self.root, self.config, self.run_id, hook, message, bool(payload.get("approve")), bool(payload.get("reject")))

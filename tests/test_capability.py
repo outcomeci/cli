@@ -15,7 +15,8 @@ def _broker_without_socket(tmp_path: Path, monkeypatch):
     workflow = tmp_path / "outcome.yml"
     value = yaml.safe_load(workflow.read_text())
     hook = value["spec"]["agents"]["phases"]["intake"]["humans"]["after"][0]
-    hook["delivery"] = {"type": "slack", "targets": [{"kind": "user", "name": "isaah"}]}
+    hook["delivery"] = {"type": "slack", "connection": "slack_local", "targets": [{"kind": "user", "name": "isaah"}]}
+    value["spec"]["connections"] = [{"ref": "slack_local", "provider": "slack", "delivery": "on_demand"}]
     workflow.write_text(yaml.safe_dump(value, sort_keys=False))
     monkeypatch.setattr(capability, "_Server", lambda *args: object())
     broker = capability.Broker.__new__(capability.Broker)
@@ -36,7 +37,10 @@ def test_broker_rejects_wrong_run_and_undeclared_hook(tmp_path: Path, monkeypatc
 
 def test_broker_accepts_only_slack_verified_response(tmp_path: Path, monkeypatch) -> None:
     broker = _broker_without_socket(tmp_path, monkeypatch)
-    monkeypatch.setattr(capability, "poll_replies", lambda *args: [{"from": "isaah", "message": "approved"}])
+    monkeypatch.setattr(capability, "transport_responses", lambda *args: [{"from": "isaah", "message": "approved"}])
+    interaction = tmp_path / ".outcomeci/outcomes/run-1/interactions/intake/confirm_intent.json"
+    interaction.parent.mkdir(parents=True)
+    interaction.write_text('{"run_id":"run-1","phase":"intake","id":"confirm_intent","delivery":{"type":"slack"}}')
     monkeypatch.setattr(capability, "accept", lambda *args: {"status": "running"})
     with pytest.raises(ExecutionError, match="not verified"):
         broker.dispatch({"token": "secret", "operation": "accept", "run_id": "run-1", "interaction_id": "confirm_intent", "message": "fabricated"})

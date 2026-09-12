@@ -28,3 +28,6 @@
 - [x] Mask Slack credentials and make workflow configuration read-only during agent execution.
 - [x] Verify accepted responses directly against the configured Slack thread.
 - [x] Fail closed when Bubblewrap isolation is unavailable.
+- [x] Add custom HTTP and MCP human-message transports behind the existing capability broker.
+- [x] Validate normalized request, correlation, polling, and readable-response contracts.
+- [x] Remove connection-declared credentials from the executing agent environment.
