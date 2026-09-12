@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..models import ExecutionClaim, ContractError
+from ..models import ContractError, ExecutionClaim
 
 
 class ClaudeAdapter:

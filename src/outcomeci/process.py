@@ -1,4 +1,5 @@
 """Small subprocess and GitHub boundaries for outcome execution."""
+
 from __future__ import annotations
 
 import base64
@@ -22,9 +23,25 @@ class Result:
     stderr: str
 
 
-def command(argv: list[str], *, cwd: Path, timeout: int = 300, input_text: str | None = None, env: dict[str, str] | None = None) -> Result:
+def command(
+    argv: list[str],
+    *,
+    cwd: Path,
+    timeout: int = 300,
+    input_text: str | None = None,
+    env: dict[str, str] | None = None,
+) -> Result:
     try:
-        value = subprocess.run(argv, cwd=cwd, input=input_text, text=True, capture_output=True, timeout=timeout, env=env or os.environ.copy(), check=False)
+        value = subprocess.run(
+            argv,
+            cwd=cwd,
+            input=input_text,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            env=env or os.environ.copy(),
+            check=False,
+        )
     except subprocess.TimeoutExpired as exc:
         raise ExecutionError(f"command timed out after {timeout}s: {argv[0]}", True) from exc
     return Result(value.returncode, value.stdout[-20000:], value.stderr[-20000:])
@@ -46,11 +63,23 @@ class GitHub:
     def run(self, argv: list[str], cwd: Path, timeout: int = 300) -> str:
         result = command(argv, cwd=cwd, timeout=timeout, env=self.env)
         if result.code:
-            raise ExecutionError(f"{argv[0]} failed: {(result.stderr or result.stdout)[-1000:]}", True)
+            raise ExecutionError(
+                f"{argv[0]} failed: {(result.stderr or result.stdout)[-1000:]}", True
+            )
         return result.stdout.strip()
 
     def clone(self, repository: str, path: Path) -> None:
-        result = command(["git", "clone", "--filter=blob:none", f"https://github.com/{repository}.git", str(path)], cwd=path.parent, env=self.env)
+        result = command(
+            [
+                "git",
+                "clone",
+                "--filter=blob:none",
+                f"https://github.com/{repository}.git",
+                str(path),
+            ],
+            cwd=path.parent,
+            env=self.env,
+        )
         if result.code:
             raise ExecutionError(f"git clone failed: {result.stderr[-1000:]}", True)
 
@@ -67,12 +96,22 @@ def invoke(
     writable_paths: list[Path] | None = None,
     excluded_env: set[str] | None = None,
 ) -> str:
-    secrets = {"GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"}
+    secrets = {
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    }
     secrets.update(excluded_env or set())
     env = {key: value for key, value in os.environ.items() if key not in secrets}
     env.update(extra_env or {})
     if agent == "codex":
-        if not allow_local_auth and not os.environ.get("OPENAI_API_KEY") and not os.environ.get("CODEX_HOME"):
+        if (
+            not allow_local_auth
+            and not os.environ.get("OPENAI_API_KEY")
+            and not os.environ.get("CODEX_HOME")
+        ):
             raise ExecutionError("Codex needs OPENAI_API_KEY or an ephemeral CODEX_HOME")
         if os.environ.get("OPENAI_API_KEY"):
             env["OPENAI_API_KEY"] = os.environ["OPENAI_API_KEY"]
@@ -85,7 +124,9 @@ def invoke(
         for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
             if os.environ.get(key):
                 env[key] = os.environ[key]
-        if not allow_local_auth and not any(key in env for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")):
+        if not allow_local_auth and not any(
+            key in env for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
+        ):
             raise ExecutionError("Claude needs ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN")
         argv = ["claude", "--print", "--permission-mode", "acceptEdits"]
         if model:
@@ -126,7 +167,10 @@ def invoke(
         argv = [*wrapper, *argv]
     result = command(argv, cwd=workspace, timeout=timeout, input_text=input_text, env=env)
     if result.code:
-        raise ExecutionError(f"{agent} failed with exit {result.code}: {(result.stderr or result.stdout)[-1000:]}", True)
+        raise ExecutionError(
+            f"{agent} failed with exit {result.code}: {(result.stderr or result.stdout)[-1000:]}",
+            True,
+        )
     return result.stdout.strip()[-4000:]
 
 
@@ -141,12 +185,22 @@ def invoke_conversation(
     allow_local_auth: bool = False,
 ) -> str:
     """Run a read-only turn, resuming the outcome session when available."""
-    secrets = {"GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"}
+    secrets = {
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    }
     env = {key: value for key, value in os.environ.items() if key not in secrets}
     if agent == "codex":
         if os.environ.get("OPENAI_API_KEY"):
             env["OPENAI_API_KEY"] = os.environ["OPENAI_API_KEY"]
-        if not allow_local_auth and not os.environ.get("OPENAI_API_KEY") and not os.environ.get("CODEX_HOME"):
+        if (
+            not allow_local_auth
+            and not os.environ.get("OPENAI_API_KEY")
+            and not os.environ.get("CODEX_HOME")
+        ):
             raise ExecutionError("Codex needs OPENAI_API_KEY or an ephemeral CODEX_HOME")
         base = ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check"]
         if model:
@@ -157,9 +211,18 @@ def invoke_conversation(
         for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
             if os.environ.get(key):
                 env[key] = os.environ[key]
-        if not allow_local_auth and not any(key in env for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")):
+        if not allow_local_auth and not any(
+            key in env for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
+        ):
             raise ExecutionError("Claude needs ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN")
-        argv = ["claude", "--print", "--permission-mode", "manual", "--allowedTools", "Read,Grep,Glob"]
+        argv = [
+            "claude",
+            "--print",
+            "--permission-mode",
+            "manual",
+            "--allowedTools",
+            "Read,Grep,Glob",
+        ]
         if session_id:
             argv += ["--resume", session_id, "--fork-session"]
         if model:
@@ -169,11 +232,19 @@ def invoke_conversation(
     else:
         raise ExecutionError(f"unsupported agent: {agent}")
     result = command(argv, cwd=workspace, timeout=timeout, input_text=input_text, env=env)
-    if agent == "codex" and session_id and result.code and "active writer" in (result.stderr or result.stdout):
+    if (
+        agent == "codex"
+        and session_id
+        and result.code
+        and "active writer" in (result.stderr or result.stdout)
+    ):
         # Codex cannot concurrently resume a session that is still open in an
         # interactive client. A fresh read-only turn can recover its context
         # from the durable outcome artifacts named in the prompt.
         result = command([*base, "-"], cwd=workspace, timeout=timeout, input_text=prompt, env=env)
     if result.code:
-        raise ExecutionError(f"{agent} conversation failed with exit {result.code}: {(result.stderr or result.stdout)[-1000:]}", True)
+        raise ExecutionError(
+            f"{agent} conversation failed with exit {result.code}: {(result.stderr or result.stdout)[-1000:]}",
+            True,
+        )
     return result.stdout.strip()[-12000:]

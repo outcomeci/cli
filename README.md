@@ -231,6 +231,7 @@ and `operations.poll.tool`.
 Credentials remain in the named environment variable on the host side of the
 capability broker. OutcomeCI removes every connection-declared credential from
 the agent environment.
+
 ## Sync a workflow to OutcomeCI Cloud
 
 Authenticate this machine through your signed-in browser:
@@ -276,3 +277,8 @@ selects it explicitly. Credentials live in
 `~/.config/outcomeci/credentials.json` with owner-only permissions and never in
 the outcome repository. Set `OUTCOMECI_API_URL` when testing against a local or
 staging control plane.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the supported Python versions and the
+formatting, lint, test, and package checks used by CI.

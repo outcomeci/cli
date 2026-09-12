@@ -1,14 +1,18 @@
 """Bounded subprocess execution without shell interpolation."""
+
 from __future__ import annotations
+
 import os
 import pty
 import selectors
 import signal
 import subprocess
 import time
+from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
+
 
 @dataclass(frozen=True)
 class ProcessResult:
@@ -16,23 +20,52 @@ class ProcessResult:
     stdout: str
     stderr: str
 
-def run(command: tuple[str, ...], *, cwd: Path, env: dict[str, str], timeout: int, on_output: Callable[[str], None] | None = None, on_tick: Callable[[], None] | None = None, terminal: bool = False, input_provider: Callable[[], str | None] | None = None) -> ProcessResult:
+
+def run(
+    command: tuple[str, ...],
+    *,
+    cwd: Path,
+    env: dict[str, str],
+    timeout: int,
+    on_output: Callable[[str], None] | None = None,
+    on_tick: Callable[[], None] | None = None,
+    terminal: bool = False,
+    input_provider: Callable[[], str | None] | None = None,
+) -> ProcessResult:
     master = slave = None
     if terminal:
         master, slave = pty.openpty()
-        child = subprocess.Popen(command, cwd=cwd, env=env, stdin=slave, stdout=slave, stderr=slave, start_new_session=True, close_fds=True)
+        child = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdin=slave,
+            stdout=slave,
+            stderr=slave,
+            start_new_session=True,
+            close_fds=True,
+        )
         os.close(slave)
         streams = [(master, "stdout")]
     else:
-        child = subprocess.Popen(command, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False, start_new_session=True)
+        child = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=False,
+            start_new_session=True,
+        )
         assert child.stdout is not None and child.stderr is not None
         streams = [(child.stdout.fileno(), "stdout"), (child.stderr.fileno(), "stderr")]
     prior_handlers = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+
     def forward(signum, _frame):
-        try:
+        with suppress(ProcessLookupError):
             os.killpg(child.pid, signum)
-        except ProcessLookupError:
-            pass
+
     for sig in prior_handlers:
         signal.signal(sig, forward)
     selector = selectors.DefaultSelector()
@@ -65,14 +98,14 @@ def run(command: tuple[str, ...], *, cwd: Path, env: dict[str, str], timeout: in
                 if on_output:
                     on_output(chunk.decode("utf-8", errors="replace"))
         returncode = child.wait(timeout=max(0.1, deadline - time.monotonic()))
-    except (TimeoutError, subprocess.TimeoutExpired):
+    except (TimeoutError, subprocess.TimeoutExpired) as error:
         os.killpg(child.pid, signal.SIGTERM)
         try:
             child.wait(timeout=10)
         except subprocess.TimeoutExpired:
             os.killpg(child.pid, signal.SIGKILL)
             child.wait()
-        raise TimeoutError("agent process timed out")
+        raise TimeoutError("agent process timed out") from error
     except BaseException:
         os.killpg(child.pid, signal.SIGTERM)
         try:
@@ -91,4 +124,8 @@ def run(command: tuple[str, ...], *, cwd: Path, env: dict[str, str], timeout: in
             assert child.stdout is not None and child.stderr is not None
             child.stdout.close()
             child.stderr.close()
-    return ProcessResult(returncode, buffers["stdout"].decode(errors="replace"), buffers["stderr"].decode(errors="replace"))
+    return ProcessResult(
+        returncode,
+        buffers["stdout"].decode(errors="replace"),
+        buffers["stderr"].decode(errors="replace"),
+    )

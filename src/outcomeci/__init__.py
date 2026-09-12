@@ -1,4 +1,5 @@
 """OutcomeCI portable workflow runtime."""
+
 from importlib.metadata import PackageNotFoundError, version
 
 try:

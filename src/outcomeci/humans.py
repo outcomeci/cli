@@ -1,4 +1,5 @@
 """Readable human-hook configuration; provider identifiers stay adapter-private."""
+
 from __future__ import annotations
 
 import json
@@ -8,13 +9,23 @@ from typing import Any
 
 import yaml
 
-from .process import ExecutionError
 from .custom import call as call_custom
+from .process import ExecutionError
 from .slack import deliver as deliver_slack
 from .slack import poll_replies
 
 
-def assign(root: Path, config: Path, phase: str, timing: str, interaction_id: str, targets: list[tuple[str, str]], strategy: str, timeout_seconds: int | None, connection: str = "slack_local") -> dict[str, Any]:
+def assign(
+    root: Path,
+    config: Path,
+    phase: str,
+    timing: str,
+    interaction_id: str,
+    targets: list[tuple[str, str]],
+    strategy: str,
+    timeout_seconds: int | None,
+    connection: str = "slack_local",
+) -> dict[str, Any]:
     document = yaml.safe_load(config.read_text(encoding="utf-8"))
     try:
         entries = document["spec"]["agents"]["phases"][phase]["humans"][timing]
@@ -23,20 +34,32 @@ def assign(root: Path, config: Path, phase: str, timing: str, interaction_id: st
     hook = next((item for item in entries if item.get("id") == interaction_id), None)
     if hook is None:
         raise ExecutionError(f"human hook {phase}.{timing}.{interaction_id} was not found")
-    connections = {item.get("ref"): item for item in document["spec"].get("connections", []) if isinstance(item, dict)}
+    connections = {
+        item.get("ref"): item
+        for item in document["spec"].get("connections", [])
+        if isinstance(item, dict)
+    }
     provider = connections.get(connection, {}).get("provider")
     if provider not in {"slack", "custom"}:
         raise ExecutionError(f"human delivery connection {connection} was not found")
-    hook["delivery"] = {"type": provider, "connection": connection, "targets": [
-        {"kind": kind, "name": name.strip().lstrip("@#")} for kind, name in targets
-    ]}
+    hook["delivery"] = {
+        "type": provider,
+        "connection": connection,
+        "targets": [{"kind": kind, "name": name.strip().lstrip("@#")} for kind, name in targets],
+    }
     hook["wait"] = {"strategy": strategy}
     if timeout_seconds is not None:
         hook["wait"]["timeout_seconds"] = timeout_seconds
     temporary = config.with_suffix(".tmp")
     temporary.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
     temporary.replace(config)
-    return {"phase": phase, "timing": timing, "interaction_id": interaction_id, "targets": hook["delivery"]["targets"], "wait": hook["wait"]}
+    return {
+        "phase": phase,
+        "timing": timing,
+        "interaction_id": interaction_id,
+        "targets": hook["delivery"]["targets"],
+        "wait": hook["wait"],
+    }
 
 
 def _custom_responses(config: Path, interaction: dict[str, Any]) -> list[dict[str, str]]:
@@ -44,19 +67,26 @@ def _custom_responses(config: Path, interaction: dict[str, Any]) -> list[dict[st
     correlation_id = interaction.get("delivery_status", {}).get("correlation_id")
     if not correlation_id:
         raise ExecutionError("custom human interaction has no correlation id")
-    result = call_custom(config, "poll", {"correlation_id": correlation_id}, str(delivery.get("connection", "")))
+    result = call_custom(
+        config, "poll", {"correlation_id": correlation_id}, str(delivery.get("connection", ""))
+    )
     responses = result.get("responses", [])
     if not isinstance(responses, list):
         raise ExecutionError("custom human poll must return a responses list")
     normalized = []
     for response in responses:
-        if not isinstance(response, dict) or not all(isinstance(response.get(key), str) and response[key] for key in ("from", "message", "responded_at")):
+        if not isinstance(response, dict) or not all(
+            isinstance(response.get(key), str) and response[key]
+            for key in ("from", "message", "responded_at")
+        ):
             raise ExecutionError("custom human response requires from, message, and responded_at")
         normalized.append({key: response[key] for key in ("from", "message", "responded_at")})
     return normalized
 
 
-def transport_responses(root: Path, config: Path, interaction: dict[str, Any]) -> list[dict[str, str]]:
+def transport_responses(
+    root: Path, config: Path, interaction: dict[str, Any]
+) -> list[dict[str, str]]:
     delivery = interaction.get("delivery", {})
     if delivery.get("type") == "slack":
         return poll_replies(root, str(interaction["run_id"]), str(interaction["id"]))
@@ -65,7 +95,14 @@ def transport_responses(root: Path, config: Path, interaction: dict[str, Any]) -
     raise ExecutionError("human interaction has no pollable delivery")
 
 
-def poll(root: Path, config: Path, run_id: str, interaction_id: str, wait_seconds: int = 0, interval_seconds: float = 2) -> dict[str, Any]:
+def poll(
+    root: Path,
+    config: Path,
+    run_id: str,
+    interaction_id: str,
+    wait_seconds: int = 0,
+    interval_seconds: float = 2,
+) -> dict[str, Any]:
     if not 0 <= wait_seconds <= 3600:
         raise ExecutionError("poll wait must be between 0 and 3600 seconds")
     deadline = time.monotonic() + wait_seconds
@@ -76,7 +113,11 @@ def poll(root: Path, config: Path, run_id: str, interaction_id: str, wait_second
     while True:
         value = json.loads(matches[0].read_text(encoding="utf-8"))
         replies = transport_responses(root, config, value)
-        known = {(item.get("from"), item.get("message"), item.get("responded_at")) for item in value.get("observed_responses", []) if isinstance(item, dict)}
+        known = {
+            (item.get("from"), item.get("message"), item.get("responded_at"))
+            for item in value.get("observed_responses", [])
+            if isinstance(item, dict)
+        }
         for reply in replies:
             marker = (reply.get("from"), reply.get("message"), reply.get("responded_at"))
             if marker not in known:
@@ -84,19 +125,35 @@ def poll(root: Path, config: Path, run_id: str, interaction_id: str, wait_second
                 known.add(marker)
         if replies:
             temporary = matches[0].with_suffix(".tmp")
-            temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            temporary.write_text(
+                json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
             temporary.replace(matches[0])
         status = value.get("status", "unknown")
-        result = {"run_id": run_id, "interaction_id": interaction_id, "status": "responded" if replies else status, "responses": replies}
+        result = {
+            "run_id": run_id,
+            "interaction_id": interaction_id,
+            "status": "responded" if replies else status,
+            "responses": replies,
+        }
         response = value.get("response")
         if isinstance(response, dict):
-            result["response"] = {key: response[key] for key in ("message", "responded_at") if key in response}
+            result["response"] = {
+                key: response[key] for key in ("message", "responded_at") if key in response
+            }
         if status != "pending" or time.monotonic() >= deadline:
             return result
         time.sleep(min(interval_seconds, max(0, deadline - time.monotonic())))
 
 
-def request(root: Path, config: Path, run_id: str, interaction_id: str, continue_while_waiting: bool = False, authoritative_hook: dict[str, Any] | None = None) -> dict[str, Any]:
+def request(
+    root: Path,
+    config: Path,
+    run_id: str,
+    interaction_id: str,
+    continue_while_waiting: bool = False,
+    authoritative_hook: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     from .local import _read, _write, request_input
 
     state = _read(root, run_id)
@@ -118,7 +175,13 @@ def request(root: Path, config: Path, run_id: str, interaction_id: str, continue
     elif delivery.get("type") == "custom":
         existing_correlation = interaction.get("delivery_status", {}).get("correlation_id")
         if isinstance(existing_correlation, str) and existing_correlation:
-            delivered = {"delivered": True, "targets": delivery.get("targets", []), "requests": 1, "correlation_id": existing_correlation, "existing": True}
+            delivered = {
+                "delivered": True,
+                "targets": delivery.get("targets", []),
+                "requests": 1,
+                "correlation_id": existing_correlation,
+                "existing": True,
+            }
         else:
             payload = {
                 "schema_version": "outcomeci.human-request/v1alpha1",
@@ -133,7 +196,12 @@ def request(root: Path, config: Path, run_id: str, interaction_id: str, continue
             correlation_id = result.get("correlation_id")
             if not isinstance(correlation_id, str) or not correlation_id:
                 raise ExecutionError("custom human request must return correlation_id")
-            delivered = {"delivered": True, "targets": delivery.get("targets", []), "requests": 1, "correlation_id": correlation_id}
+            delivered = {
+                "delivered": True,
+                "targets": delivery.get("targets", []),
+                "requests": 1,
+                "correlation_id": correlation_id,
+            }
             interaction["delivery_status"] = {"delivered": True, "correlation_id": correlation_id}
     else:
         raise ExecutionError(f"interaction {interaction_id} has no supported human delivery")
@@ -144,13 +212,30 @@ def request(root: Path, config: Path, run_id: str, interaction_id: str, continue
     if continue_while_waiting or strategy == "continue":
         state = _read(root, run_id)
         state.pop("pending_interaction", None)
-        state.setdefault("open_interactions", []).append({"id": interaction_id, "path": str(path), "phase": interaction.get("phase")})
+        state.setdefault("open_interactions", []).append(
+            {"id": interaction_id, "path": str(path), "phase": interaction.get("phase")}
+        )
         state["status"] = "running"
         _write(root, state)
-    return {"run_id": run_id, "interaction_id": interaction_id, **delivered, "wait": interaction.get("wait", {"strategy": "ask"})}
+    return {
+        "run_id": run_id,
+        "interaction_id": interaction_id,
+        **delivered,
+        "wait": interaction.get("wait", {"strategy": "ask"}),
+    }
 
 
-def accept(root: Path, config: Path, run_id: str, interaction_id: str, message: str, approve: bool = False, reject: bool = False) -> dict[str, Any]:
+def accept(
+    root: Path,
+    config: Path,
+    run_id: str,
+    interaction_id: str,
+    message: str,
+    approve: bool = False,
+    reject: bool = False,
+) -> dict[str, Any]:
     from .local import respond
 
-    return respond(root, config, run_id, interaction_id, message, approve=approve, reject=reject, execute=False)
+    return respond(
+        root, config, run_id, interaction_id, message, approve=approve, reject=reject, execute=False
+    )

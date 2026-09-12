@@ -1,4 +1,5 @@
 """Validation and deterministic compilation for outcome.yml."""
+
 from __future__ import annotations
 
 import fnmatch
@@ -8,8 +9,8 @@ import re
 from pathlib import Path
 from typing import Any
 
-import yaml
 import jsonschema
+import yaml
 
 from . import __version__
 
@@ -39,7 +40,9 @@ def _relative_path(root: Path, relative: Any, field: str) -> Path:
     return path
 
 
-def _reference(root: Path, relative: str, field: str, *, json_value: bool = False) -> dict[str, Any]:
+def _reference(
+    root: Path, relative: str, field: str, *, json_value: bool = False
+) -> dict[str, Any]:
     path = _relative_path(root, relative, field)
     try:
         content = path.read_text(encoding="utf-8")
@@ -47,7 +50,11 @@ def _reference(root: Path, relative: str, field: str, *, json_value: bool = Fals
         raise ConfigError(f"could not read {field} {relative}: {exc}") from exc
     if not content.strip():
         raise ConfigError(f"{field} {relative} is empty")
-    result: dict[str, Any] = {"path": relative, "sha256": hashlib.sha256(content.encode()).hexdigest(), "content": content}
+    result: dict[str, Any] = {
+        "path": relative,
+        "sha256": hashlib.sha256(content.encode()).hexdigest(),
+        "content": content,
+    }
     if json_value:
         try:
             result["value"] = json.loads(content)
@@ -80,7 +87,12 @@ def _contract(value: Any, field: str, *, output: bool) -> dict[str, Any]:
         raise ConfigError(f"{field}.required must be true or false")
     if output:
         path = item.get("path")
-        if not isinstance(path, str) or not path.strip() or Path(path).is_absolute() or ".." in Path(path).parts:
+        if (
+            not isinstance(path, str)
+            or not path.strip()
+            or Path(path).is_absolute()
+            or ".." in Path(path).parts
+        ):
             raise ConfigError(f"{field}.path must remain within the run directory")
         result["path"] = Path(path).as_posix()
     else:
@@ -109,8 +121,14 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
         for index, value in enumerate(entries):
             item = _mapping(value, f"{field}.{timing}[{index}]")
             interaction_id = item.get("id")
-            if not isinstance(interaction_id, str) or not IDENTIFIER.fullmatch(interaction_id) or interaction_id in seen:
-                raise ConfigError(f"human interaction ids must be unique valid identifiers in {field}")
+            if (
+                not isinstance(interaction_id, str)
+                or not IDENTIFIER.fullmatch(interaction_id)
+                or interaction_id in seen
+            ):
+                raise ConfigError(
+                    f"human interaction ids must be unique valid identifiers in {field}"
+                )
             seen.add(interaction_id)
             participant = item.get("participant")
             if isinstance(participant, str):
@@ -127,31 +145,64 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
             purpose = item.get("purpose")
             if not isinstance(purpose, str) or not purpose.strip():
                 raise ConfigError(f"{field}.{timing}[{index}].purpose is required")
-            delivery = _mapping(item.get("delivery", {"type": "local"}), f"{field}.{timing}[{index}].delivery")
+            delivery = _mapping(
+                item.get("delivery", {"type": "local"}), f"{field}.{timing}[{index}].delivery"
+            )
             if delivery.get("type") not in {"local", "slack", "custom"}:
                 raise ConfigError(f"{field}.{timing}[{index}].delivery.type is unsupported")
-            if delivery.get("type") in {"slack", "custom"} and not isinstance(delivery.get("connection"), str):
+            if delivery.get("type") in {"slack", "custom"} and not isinstance(
+                delivery.get("connection"), str
+            ):
                 raise ConfigError(f"{field}.{timing}[{index}].delivery.connection is required")
             targets = delivery.get("targets", [])
             if not isinstance(targets, list):
                 raise ConfigError(f"{field}.{timing}[{index}].delivery.targets must be a list")
             normalized_targets = []
             for target_index, target_value in enumerate(targets):
-                target = _mapping(target_value, f"{field}.{timing}[{index}].delivery.targets[{target_index}]")
+                target = _mapping(
+                    target_value, f"{field}.{timing}[{index}].delivery.targets[{target_index}]"
+                )
                 if target.get("kind") not in {"user", "channel", "group"}:
-                    raise ConfigError(f"{field}.{timing}[{index}].delivery.targets[{target_index}].kind is unsupported")
+                    raise ConfigError(
+                        f"{field}.{timing}[{index}].delivery.targets[{target_index}].kind is unsupported"
+                    )
                 if not isinstance(target.get("name"), str) or not target["name"].strip():
-                    raise ConfigError(f"{field}.{timing}[{index}].delivery.targets[{target_index}].name is required")
-                normalized_targets.append({"kind": target["kind"], "name": target["name"].strip().lstrip("@#")})
+                    raise ConfigError(
+                        f"{field}.{timing}[{index}].delivery.targets[{target_index}].name is required"
+                    )
+                normalized_targets.append(
+                    {"kind": target["kind"], "name": target["name"].strip().lstrip("@#")}
+                )
             if normalized_targets:
                 delivery["targets"] = normalized_targets
-            wait = _mapping(item.get("wait", {"strategy": "ask"}), f"{field}.{timing}[{index}].wait")
+            wait = _mapping(
+                item.get("wait", {"strategy": "ask"}), f"{field}.{timing}[{index}].wait"
+            )
             if wait.get("strategy") not in {"ask", "block", "continue"}:
                 raise ConfigError(f"{field}.{timing}[{index}].wait.strategy is unsupported")
-            if wait.get("timeout_seconds") is not None and (not isinstance(wait["timeout_seconds"], int) or not 0 <= wait["timeout_seconds"] <= 86400):
-                raise ConfigError(f"{field}.{timing}[{index}].wait.timeout_seconds must be between 0 and 86400")
-            normalized = {"id": interaction_id, "participant": participant, "purpose": purpose.strip(), "interaction": interaction, "required": required, "delivery": delivery}
-            normalized["wait"] = {"strategy": wait["strategy"], **({"timeout_seconds": wait["timeout_seconds"]} if wait.get("timeout_seconds") is not None else {})}
+            if wait.get("timeout_seconds") is not None and (
+                not isinstance(wait["timeout_seconds"], int)
+                or not 0 <= wait["timeout_seconds"] <= 86400
+            ):
+                raise ConfigError(
+                    f"{field}.{timing}[{index}].wait.timeout_seconds must be between 0 and 86400"
+                )
+            normalized = {
+                "id": interaction_id,
+                "participant": participant,
+                "purpose": purpose.strip(),
+                "interaction": interaction,
+                "required": required,
+                "delivery": delivery,
+            }
+            normalized["wait"] = {
+                "strategy": wait["strategy"],
+                **(
+                    {"timeout_seconds": wait["timeout_seconds"]}
+                    if wait.get("timeout_seconds") is not None
+                    else {}
+                ),
+            }
             if timing == "during":
                 availability = item.get("availability", "on_demand")
                 if availability not in {"on_demand", "always"}:
@@ -174,15 +225,22 @@ def load(path: Path) -> dict[str, Any]:
     if not isinstance(metadata.get("name"), str) or not metadata["name"].strip():
         raise ConfigError("metadata.name is required")
     spec = _mapping(root.get("spec"), "spec")
-    for field, choices in (("backend", {"outcomeci", "filesystem"}), ("context", {"outcomeci", "http", "filesystem"})):
+    for field, choices in (
+        ("backend", {"outcomeci", "filesystem"}),
+        ("context", {"outcomeci", "http", "filesystem"}),
+    ):
         value = _mapping(spec.get(field, {"provider": "outcomeci"}), f"spec.{field}")
         if value.get("provider", "outcomeci") not in choices:
             raise ConfigError(f"unsupported spec.{field}.provider")
         if field == "context":
             for patterns_name in ("include", "exclude"):
                 patterns = value.get(patterns_name, [])
-                if not isinstance(patterns, list) or not all(isinstance(pattern, str) and pattern.strip() for pattern in patterns):
-                    raise ConfigError(f"spec.context.{patterns_name} must be a list of non-empty glob strings")
+                if not isinstance(patterns, list) or not all(
+                    isinstance(pattern, str) and pattern.strip() for pattern in patterns
+                ):
+                    raise ConfigError(
+                        f"spec.context.{patterns_name} must be a list of non-empty glob strings"
+                    )
 
     instructions = _mapping(spec.get("instructions"), "spec.instructions")
     if len(instructions) != 1:
@@ -215,15 +273,27 @@ def load(path: Path) -> dict[str, Any]:
             raise ConfigError(f"{field}.instructions is required")
         _agent_policy(policy, field)
         needs = policy.get("needs", [])
-        if not isinstance(needs, list) or not all(isinstance(item, str) for item in needs) or len(needs) != len(set(needs)):
+        if (
+            not isinstance(needs, list)
+            or not all(isinstance(item, str) for item in needs)
+            or len(needs) != len(set(needs))
+        ):
             raise ConfigError(f"{field}.needs must be a list of unique phase names")
         expects = _mapping(policy.get("expects", {}), f"{field}.expects")
         raw_inputs, raw_outputs = expects.get("inputs", []), expects.get("outputs", [])
         if not isinstance(raw_inputs, list) or not isinstance(raw_outputs, list):
             raise ConfigError(f"{field}.expects inputs and outputs must be lists")
-        inputs = [_contract(item, f"{field}.expects.inputs[{index}]", output=False) for index, item in enumerate(raw_inputs)]
-        phase_outputs = [_contract(item, f"{field}.expects.outputs[{index}]", output=True) for index, item in enumerate(raw_outputs)]
-        if len({item["name"] for item in inputs}) != len(inputs) or len({item["name"] for item in phase_outputs}) != len(phase_outputs):
+        inputs = [
+            _contract(item, f"{field}.expects.inputs[{index}]", output=False)
+            for index, item in enumerate(raw_inputs)
+        ]
+        phase_outputs = [
+            _contract(item, f"{field}.expects.outputs[{index}]", output=True)
+            for index, item in enumerate(raw_outputs)
+        ]
+        if len({item["name"] for item in inputs}) != len(inputs) or len(
+            {item["name"] for item in phase_outputs}
+        ) != len(phase_outputs):
             raise ConfigError(f"{field} contract names must be unique")
         for item in phase_outputs:
             if item["path"] in output_paths:
@@ -231,7 +301,12 @@ def load(path: Path) -> dict[str, Any]:
             output_paths.add(item["path"])
             outputs[(phase_name, item["name"])] = item
         humans = _human_interactions(policy.get("humans", {}), f"{field}.humans")
-        normalized_phases[phase_name] = {"needs": needs, "inputs": inputs, "outputs": phase_outputs, "humans": humans}
+        normalized_phases[phase_name] = {
+            "needs": needs,
+            "inputs": inputs,
+            "outputs": phase_outputs,
+            "humans": humans,
+        }
 
     for phase_name, phase in normalized_phases.items():
         for dependency in phase["needs"]:
@@ -243,11 +318,17 @@ def load(path: Path) -> dict[str, Any]:
             source = item["from"]
             if source.startswith(("runtime.", "context.")):
                 continue
-            match = re.fullmatch(r"([a-z][a-z0-9_-]{0,62})\.outputs\.([a-z][a-z0-9_-]{0,62})", source)
+            match = re.fullmatch(
+                r"([a-z][a-z0-9_-]{0,62})\.outputs\.([a-z][a-z0-9_-]{0,62})", source
+            )
             if not match or (match.group(1), match.group(2)) not in outputs:
-                raise ConfigError(f"input {phase_name}.{item['name']} has no declared producer: {source}")
+                raise ConfigError(
+                    f"input {phase_name}.{item['name']} has no declared producer: {source}"
+                )
             if match.group(1) not in phase["needs"]:
-                raise ConfigError(f"input {phase_name}.{item['name']} must come from a direct dependency")
+                raise ConfigError(
+                    f"input {phase_name}.{item['name']} must come from a direct dependency"
+                )
 
     indegree = {name: len(value["needs"]) for name, value in normalized_phases.items()}
     remaining = set(normalized_phases)
@@ -259,7 +340,9 @@ def load(path: Path) -> dict[str, Any]:
         levels.append(ready)
         remaining.difference_update(ready)
         for name in remaining:
-            indegree[name] -= sum(dependency in ready for dependency in normalized_phases[name]["needs"])
+            indegree[name] -= sum(
+                dependency in ready for dependency in normalized_phases[name]["needs"]
+            )
 
     connections = spec.get("connections", [])
     if not isinstance(connections, list):
@@ -280,46 +363,81 @@ def load(path: Path) -> dict[str, Any]:
             transport = _mapping(item.get("transport"), f"spec.connections[{index}].transport")
             transport_type = transport.get("type")
             if transport_type == "http":
-                if not isinstance(transport.get("endpoint"), str) or not transport["endpoint"].startswith(("http://", "https://")):
-                    raise ConfigError(f"spec.connections[{index}].transport.endpoint must be an HTTP URL")
+                if not isinstance(transport.get("endpoint"), str) or not transport[
+                    "endpoint"
+                ].startswith(("http://", "https://")):
+                    raise ConfigError(
+                        f"spec.connections[{index}].transport.endpoint must be an HTTP URL"
+                    )
             elif transport_type == "mcp":
                 protocol = transport.get("protocol")
-                if protocol == "streamable_http" and (not isinstance(transport.get("endpoint"), str) or not transport["endpoint"].startswith(("http://", "https://"))):
-                    raise ConfigError(f"spec.connections[{index}].transport.endpoint must be an HTTP URL")
-                if protocol == "stdio" and (not isinstance(transport.get("command"), list) or not transport["command"] or not all(isinstance(part, str) for part in transport["command"])):
-                    raise ConfigError(f"spec.connections[{index}].transport.command must be a non-empty string list")
+                if protocol == "streamable_http" and (
+                    not isinstance(transport.get("endpoint"), str)
+                    or not transport["endpoint"].startswith(("http://", "https://"))
+                ):
+                    raise ConfigError(
+                        f"spec.connections[{index}].transport.endpoint must be an HTTP URL"
+                    )
+                if protocol == "stdio" and (
+                    not isinstance(transport.get("command"), list)
+                    or not transport["command"]
+                    or not all(isinstance(part, str) for part in transport["command"])
+                ):
+                    raise ConfigError(
+                        f"spec.connections[{index}].transport.command must be a non-empty string list"
+                    )
                 if protocol not in {"streamable_http", "stdio"}:
-                    raise ConfigError(f"spec.connections[{index}].transport.protocol is unsupported")
+                    raise ConfigError(
+                        f"spec.connections[{index}].transport.protocol is unsupported"
+                    )
             else:
                 raise ConfigError(f"spec.connections[{index}].transport.type is unsupported")
             operations = _mapping(item.get("operations"), f"spec.connections[{index}].operations")
             for operation in ("request", "poll"):
-                operation_value = _mapping(operations.get(operation), f"spec.connections[{index}].operations.{operation}")
+                operation_value = _mapping(
+                    operations.get(operation), f"spec.connections[{index}].operations.{operation}"
+                )
                 if transport_type == "http" and not isinstance(operation_value.get("path"), str):
-                    raise ConfigError(f"spec.connections[{index}].operations.{operation}.path is required")
+                    raise ConfigError(
+                        f"spec.connections[{index}].operations.{operation}.path is required"
+                    )
                 if transport_type == "mcp" and not isinstance(operation_value.get("tool"), str):
-                    raise ConfigError(f"spec.connections[{index}].operations.{operation}.tool is required")
+                    raise ConfigError(
+                        f"spec.connections[{index}].operations.{operation}.tool is required"
+                    )
             auth = item.get("auth", {})
             if auth:
                 auth = _mapping(auth, f"spec.connections[{index}].auth")
                 if set(auth) - {"env", "header", "scheme"} or not isinstance(auth.get("env"), str):
-                    raise ConfigError(f"spec.connections[{index}].auth must reference an environment variable")
+                    raise ConfigError(
+                        f"spec.connections[{index}].auth must reference an environment variable"
+                    )
             contract = item.get("contract", {})
             if contract:
                 contract = _mapping(contract, f"spec.connections[{index}].contract")
                 if set(contract) - {"request", "poll"}:
-                    raise ConfigError(f"spec.connections[{index}].contract supports only request and poll")
+                    raise ConfigError(
+                        f"spec.connections[{index}].contract supports only request and poll"
+                    )
                 for operation, operation_contract in contract.items():
-                    operation_contract = _mapping(operation_contract, f"spec.connections[{index}].contract.{operation}")
+                    operation_contract = _mapping(
+                        operation_contract, f"spec.connections[{index}].contract.{operation}"
+                    )
                     if set(operation_contract) - {"input", "output"}:
-                        raise ConfigError(f"spec.connections[{index}].contract.{operation} supports only input and output")
+                        raise ConfigError(
+                            f"spec.connections[{index}].contract.{operation} supports only input and output"
+                        )
                     for direction, schema in operation_contract.items():
                         if not isinstance(schema, dict):
-                            raise ConfigError(f"spec.connections[{index}].contract.{operation}.{direction} must be an inline JSON Schema")
+                            raise ConfigError(
+                                f"spec.connections[{index}].contract.{operation}.{direction} must be an inline JSON Schema"
+                            )
                         try:
                             jsonschema.validators.validator_for(schema).check_schema(schema)
                         except jsonschema.SchemaError as exc:
-                            raise ConfigError(f"spec.connections[{index}].contract.{operation}.{direction} is not a valid JSON Schema: {exc.message}") from exc
+                            raise ConfigError(
+                                f"spec.connections[{index}].contract.{operation}.{direction} is not a valid JSON Schema: {exc.message}"
+                            ) from exc
     for phase_name, phase in normalized_phases.items():
         for timing in ("before", "during", "after"):
             for hook in phase["humans"][timing]:
@@ -327,19 +445,37 @@ def load(path: Path) -> dict[str, Any]:
                 if delivery.get("type") in {"slack", "custom"}:
                     ref = delivery["connection"]
                     if connection_providers.get(ref) != delivery["type"]:
-                        raise ConfigError(f"human hook {phase_name}.{hook['id']} references an incompatible connection")
-    root["_graph"] = {"orchestrator": orchestrator_name, "levels": levels, "phases": normalized_phases, "default_policy": default}
+                        raise ConfigError(
+                            f"human hook {phase_name}.{hook['id']} references an incompatible connection"
+                        )
+    root["_graph"] = {
+        "orchestrator": orchestrator_name,
+        "levels": levels,
+        "phases": normalized_phases,
+        "default_policy": default,
+    }
     return root
 
 
 def _excluded(relative: str, patterns: list[str]) -> bool:
-    return any(fnmatch.fnmatch(relative, pattern) or (pattern.endswith("/**") and (relative == pattern[:-3] or relative.startswith(pattern[:-2]))) for pattern in patterns)
+    return any(
+        fnmatch.fnmatch(relative, pattern)
+        or (
+            pattern.endswith("/**")
+            and (relative == pattern[:-3] or relative.startswith(pattern[:-2]))
+        )
+        for pattern in patterns
+    )
 
 
 def _filesystem_context(root: Path, context: dict[str, Any]) -> list[dict[str, Any]]:
     paths: dict[str, Path] = {}
     for pattern in context.get("include", []):
-        matches = (root / pattern[:-3]).rglob("*") if pattern.endswith("/**") and (root / pattern[:-3]).is_dir() else root.glob(pattern)
+        matches = (
+            (root / pattern[:-3]).rglob("*")
+            if pattern.endswith("/**") and (root / pattern[:-3]).is_dir()
+            else root.glob(pattern)
+        )
         for path in matches:
             if path.is_file():
                 relative = path.resolve().relative_to(root.resolve()).as_posix()
@@ -347,7 +483,14 @@ def _filesystem_context(root: Path, context: dict[str, Any]) -> list[dict[str, A
                     paths[relative] = path.resolve()
     if len(paths) > 5000:
         raise ConfigError("filesystem context exceeds 5000 files")
-    return [{"path": relative, "byte_size": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()} for relative, path in sorted(paths.items())]
+    return [
+        {
+            "path": relative,
+            "byte_size": path.stat().st_size,
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        }
+        for relative, path in sorted(paths.items())
+    ]
 
 
 def compile_workflow(path: Path) -> dict[str, Any]:
@@ -356,23 +499,56 @@ def compile_workflow(path: Path) -> dict[str, Any]:
     spec, root = document["spec"], path.parent
     orchestrator_name = graph["orchestrator"]
     orchestrator_config = spec["instructions"][orchestrator_name]
-    orchestrator = _reference(root, orchestrator_config["path"], f"spec.instructions.{orchestrator_name}.path")
+    orchestrator = _reference(
+        root, orchestrator_config["path"], f"spec.instructions.{orchestrator_name}.path"
+    )
     default = graph["default_policy"]
     orchestrator["name"] = orchestrator_name
-    orchestrator["policy"] = {"runner": orchestrator_config.get("runner", default.get("runner")), "model": orchestrator_config.get("model", default.get("model"))}
+    orchestrator["policy"] = {
+        "runner": orchestrator_config.get("runner", default.get("runner")),
+        "model": orchestrator_config.get("model", default.get("model")),
+    }
     phases: dict[str, Any] = {}
     schemas: dict[str, Any] = {}
     for phase_name, contract in graph["phases"].items():
         policy = spec["agents"]["phases"][phase_name]
-        phases[phase_name] = {**_reference(root, policy["instructions"], f"spec.agents.phases.{phase_name}.instructions"), "needs": contract["needs"], "expects": {"inputs": contract["inputs"], "outputs": contract["outputs"]}, "humans": contract["humans"], "policy": {"runner": policy.get("runner", default.get("runner")), "model": policy.get("model", default.get("model"))}}
+        phases[phase_name] = {
+            **_reference(
+                root, policy["instructions"], f"spec.agents.phases.{phase_name}.instructions"
+            ),
+            "needs": contract["needs"],
+            "expects": {"inputs": contract["inputs"], "outputs": contract["outputs"]},
+            "humans": contract["humans"],
+            "policy": {
+                "runner": policy.get("runner", default.get("runner")),
+                "model": policy.get("model", default.get("model")),
+            },
+        }
         for item in (*contract["inputs"], *contract["outputs"]):
             if item.get("schema") and item["schema"] not in schemas:
-                schemas[item["schema"]] = _reference(root, item["schema"], "artifact schema", json_value=True)
+                schemas[item["schema"]] = _reference(
+                    root, item["schema"], "artifact schema", json_value=True
+                )
     normalized = json.loads(json.dumps(document, sort_keys=True, separators=(",", ":")))
     context = spec.get("context", {"provider": "outcomeci"})
-    context_files = _filesystem_context(root, context) if context.get("provider") == "filesystem" else []
+    context_files = (
+        _filesystem_context(root, context) if context.get("provider") == "filesystem" else []
+    )
     # to the role-neutral orchestrator key.
     resolved = {"orchestrator": orchestrator, "phases": phases, "schemas": schemas}
-    revision_input = {"workflow": normalized, "graph": {"levels": graph["levels"]}, "instructions": resolved, "context": {"provider": context.get("provider", "outcomeci"), "files": context_files}}
-    revision = hashlib.sha256(json.dumps(revision_input, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return {"schema_version": "outcomeci.workflow/v1alpha1", "engine_version": "2", "engine_package_version": __version__, "workflow_revision": revision, **revision_input}
+    revision_input = {
+        "workflow": normalized,
+        "graph": {"levels": graph["levels"]},
+        "instructions": resolved,
+        "context": {"provider": context.get("provider", "outcomeci"), "files": context_files},
+    }
+    revision = hashlib.sha256(
+        json.dumps(revision_input, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    return {
+        "schema_version": "outcomeci.workflow/v1alpha1",
+        "engine_version": "2",
+        "engine_package_version": __version__,
+        "workflow_revision": revision,
+        **revision_input,
+    }
