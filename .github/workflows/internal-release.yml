@@ -52,4 +52,4 @@ jobs:
       - name: Authenticate Twine to internal CodeArtifact
         run: aws codeartifact login --tool twine --domain outcomeci --repository python-internal
       - name: Publish the immutable candidate internally
-        run: twine upload --skip-existing dist/*
+        run: twine upload --repository codeartifact --skip-existing dist/*

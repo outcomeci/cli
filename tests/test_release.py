@@ -35,6 +35,7 @@ def test_merge_release_stays_internal_until_promotion() -> None:
     assert "workflow_dispatch:" in internal
     assert "ref: ${{ inputs.tag || github.ref }}" in internal
     assert "codeartifact login --tool twine" in internal
+    assert "twine upload --repository codeartifact" in internal
     assert "workflow_dispatch:" in proof
     assert "REQUESTED_TAG: ${{ inputs.tag }}" in proof
     assert "outcomeci-proof-runner" in proof
