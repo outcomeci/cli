@@ -34,7 +34,7 @@ def _configure(tmp_path: Path) -> Path:
             },
         }
     ]
-    hook = value["spec"]["agents"]["phases"]["intake"]["humans"]["after"][0]
+    hook = value["spec"]["agents"]["phases"]["intake"]["integrations"][0]
     hook["delivery"] = {
         "type": "custom",
         "connection": "people_api",

@@ -25,7 +25,7 @@ def test_assign_writes_only_readable_slack_selectors(tmp_path: Path) -> None:
     )
     hook = yaml.safe_load((tmp_path / "outcome.yml").read_text())["spec"]["agents"]["phases"][
         "intake"
-    ]["humans"]["after"][0]
+    ]["integrations"][0]
     assert result["targets"] == [
         {"kind": "user", "name": "isaah"},
         {"kind": "channel", "name": "product"},

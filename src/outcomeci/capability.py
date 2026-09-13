@@ -15,6 +15,7 @@ from typing import Any
 
 from .config import compile_workflow
 from .humans import accept, poll, request, transport_responses
+from .integrations import IntegrationExecutor
 from .process import ExecutionError
 
 
@@ -44,7 +45,8 @@ class Broker:
             if hook.get("delivery", {}).get("type") in {"slack", "custom"}
             and hook.get("delivery", {}).get("targets")
         }
-        self.root, self.config, self.run_id = root, config, run_id
+        self.root, self.config, self.run_id, self.phase = root, config, run_id, phase
+        self.integrations = IntegrationExecutor(compiled)
         self.token = secrets.token_urlsafe(32)
         self.server = _Server(str(socket_path), _Handler)
         self.server.dispatch = self.dispatch  # type: ignore[attr-defined]
@@ -52,7 +54,16 @@ class Broker:
     def dispatch(self, payload: dict[str, Any]) -> dict[str, Any]:
         if not secrets.compare_digest(str(payload.get("token", "")), self.token):
             raise ExecutionError("invalid outcome capability")
-        if payload.get("run_id") != self.run_id or payload.get("interaction_id") not in self.hooks:
+        if payload.get("run_id") != self.run_id:
+            raise ExecutionError("capability is not authorized for this outcome run")
+        if payload.get("kind") == "integration":
+            inputs = payload.get("inputs")
+            if not isinstance(inputs, dict):
+                raise ExecutionError("integration input must be an object")
+            return self.integrations.execute(
+                str(payload.get("capability", "")), inputs, phase=self.phase
+            )
+        if payload.get("interaction_id") not in self.hooks:
             raise ExecutionError("human hook is not authorized for the current phase")
         operation = payload.get("operation")
         hook = str(payload["interaction_id"])
@@ -138,4 +149,26 @@ def invoke(operation: str, run_id: str, interaction_id: str, **arguments: Any) -
         response = json.loads(client.makefile("r", encoding="utf-8").readline())
     if not response.get("ok"):
         raise ExecutionError(str(response.get("error", "capability request failed")))
+    return response["result"]
+
+
+def invoke_integration(capability: str, inputs: dict[str, Any]) -> dict[str, Any]:
+    run_id = os.environ.get("OUTCOMECI_RUN_ID")
+    socket_path = os.environ.get("OUTCOMECI_CAPABILITY_SOCKET")
+    token = os.environ.get("OUTCOMECI_CAPABILITY_TOKEN")
+    if not run_id or not socket_path or not token:
+        raise ExecutionError("no run-scoped integration capability is available")
+    payload = {
+        "token": token,
+        "kind": "integration",
+        "run_id": run_id,
+        "capability": capability,
+        "inputs": inputs,
+    }
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.connect(socket_path)
+        client.sendall((json.dumps(payload, separators=(",", ":")) + "\n").encode())
+        response = json.loads(client.makefile("r", encoding="utf-8").readline())
+    if not response.get("ok"):
+        raise ExecutionError(str(response.get("error", "integration request failed")))
     return response["result"]

@@ -192,7 +192,14 @@ def _authorized_request(
     return status, value
 
 
-def sync_workflow(path: Path, workspace_id: str, name: str | None, mode: str) -> dict[str, Any]:
+def sync_workflow(
+    path: Path,
+    workspace_id: str,
+    name: str | None,
+    mode: str,
+    *,
+    patch_path: Path | None = None,
+) -> dict[str, Any]:
     path = path.resolve()
     if not path.is_file():
         raise ExecutionError(f"workflow file does not exist: {path}")
@@ -205,6 +212,28 @@ def sync_workflow(path: Path, workspace_id: str, name: str | None, mode: str) ->
     workflow_name = name or str((document.get("metadata") or {}).get("name") or "").strip()
     if not workflow_name:
         raise ExecutionError("workflow name is required; set metadata.name or pass --name")
+    lineage: dict[str, Any] = {}
+    expected_parent_sha256 = None
+    if patch_path is not None:
+        if mode != "version":
+            raise ExecutionError("a lineage patch can only be synced as a new version")
+        try:
+            patch = yaml.safe_load(patch_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError) as exc:
+            raise ExecutionError(f"could not read workflow patch: {exc}") from exc
+        if not isinstance(patch, dict) or patch.get("kind") != "OutcomeWorkflowPatch":
+            raise ExecutionError("lineage patch must be an OutcomeWorkflowPatch")
+        metadata = patch.get("metadata", {})
+        expected_parent_sha256 = metadata.get("parentContentSha256")
+        if not isinstance(expected_parent_sha256, str):
+            raise ExecutionError("lineage patch has no parent content digest")
+        lineage = {
+            "type": "learned_operation",
+            "parent_workflow_revision": metadata.get("parentRevision"),
+            "patch": patch_path.name,
+            "reason": metadata.get("reason"),
+            "derived_from": metadata.get("derivedFrom", {}),
+        }
     files: dict[str, str] = {}
     support_root = path.parent / ".outcomeci"
     if support_root.is_dir():
@@ -214,14 +243,14 @@ def sync_workflow(path: Path, workspace_id: str, name: str | None, mode: str) ->
             for item in support_root.rglob("*")
             if item.is_file() and "outcomes" not in item.relative_to(support_root).parts
         ):
-            content = support.read_bytes()
-            total += len(content)
-            if len(content) > 2 * 1024 * 1024 or total > 20 * 1024 * 1024:
+            support_content = support.read_bytes()
+            total += len(support_content)
+            if len(support_content) > 2 * 1024 * 1024 or total > 20 * 1024 * 1024:
                 raise ExecutionError(
                     "workflow support files exceed the 20 MiB synchronization limit"
                 )
             files[str(Path(".outcomeci") / support.relative_to(support_root))] = base64.b64encode(
-                content
+                support_content
             ).decode()
     status, value = _authorized_request(
         f"/workspaces/{workspace_id}/workflow-revisions",
@@ -233,6 +262,8 @@ def sync_workflow(path: Path, workspace_id: str, name: str | None, mode: str) ->
             "content_type": "json" if suffix == ".json" else "yaml",
             "source_filename": path.name,
             "files": files,
+            "expected_parent_sha256": expected_parent_sha256,
+            "lineage": lineage,
         },
     )
     if status != 201:

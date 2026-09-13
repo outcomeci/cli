@@ -59,6 +59,100 @@ Compiled context records each matched path, size, and SHA-256 hash. Context
 changes therefore produce a new workflow revision. Files remain in place and
 are read by the active local agent; they are not copied into `outcome.yml`.
 
+## Credential-blind API capabilities
+
+An outcome workflow can grant named API operations only to phases that need
+them. It stores a logical credential reference, never its value. The agent
+supplies operation input and receives only explicitly exposed response fields.
+
+The packaged schema is available without network access:
+
+```sh
+oci schema path
+oci schema export ./outcome.schema.json
+```
+
+Pin and verify the fully resolved workflow, including integration packages:
+
+```sh
+oci outcome lock
+oci outcome verify-lock
+oci conformance --workflow ./outcome.yml
+```
+
+```yaml
+spec:
+  agents:
+    phases:
+      intake:
+        instructions: .outcomeci/instructions/intake.md
+        needs: []
+        integrations:
+          - type: api
+            capability: linear.create_issue
+
+  connections:
+    linear:
+      provider: http
+      base_url: https://api.linear.app
+      auth:
+        type: bearer
+        credential: env:LINEAR_API_KEY
+
+  integrations:
+    linear:
+      connection: linear
+      access: {mode: schema}
+      operations:
+        create_issue:
+          description: Create a Linear issue
+          input:
+            type: object
+            required: [query, variables]
+            properties:
+              query: {type: string}
+              variables: {type: object}
+            additionalProperties: false
+          request:
+            method: POST
+            path: /graphql
+            body:
+              query: "{{ input.query }}"
+              variables: "{{ input.variables }}"
+          response:
+            expose:
+              issue: body.data.issueCreate.issue
+              errors: body.errors
+```
+
+```console
+oci integration list --phase intake
+oci integration describe linear.create_issue
+printf '%s' '{"query":"...","variables":{}}' |
+  LINEAR_API_KEY=... oci integration execute linear.create_issue \
+    --phase intake --input-stdin
+```
+
+Parameters stay dynamic while the workflow fixes the origin, method,
+credential, schema, phase grant, and response projection. Local credentials use
+an explicit `env:` reference; cloud runners use a workflow-scoped Vault lease.
+
+The authoring modes are `schema` for declared operations, `openapi` for a
+specification URL plus operation-ID allowlist, and `full` for intentional
+broad discovery against a fixed origin and method allowlist. Full mode grants a
+single `<integration>.request` capability; it can vary relative paths,
+permitted methods, query values, safe headers, and bodies but cannot change the
+origin, credential, or response exposure policy. OpenAPI operations are
+materialized into a child workflow before execution.
+
+### Learned-operation lineage
+
+`oci integration patch propose` turns a discovered request into an
+`OutcomeWorkflowPatch` with its parent revision, run, phase, agent, and
+reason. `oci integration patch apply` rejects stale parents and writes a
+separate child workflow; it never edits the current version. Sync that child
+with `oci workflow sync --version` to create its immutable cloud version.
+
 ## Custom workflows
 
 The default intake, plan, tasks, and implementation shape is a starting point,
@@ -82,19 +176,20 @@ agents:
         outputs:
           - {name: trajectory, path: intake/trajectory.json, media_type: application/json}
           - {name: experience_brief, path: intake/experience.md, media_type: text/markdown}
-      humans:
-        during:
-          - id: clarify_experience
-            participant: product_owner
-            purpose: Resolve a consequential product ambiguity.
-            interaction: consultation
-            required: true
-            availability: on_demand
-            delivery:
-              type: slack
-              connection: slack_local
-              targets: [{kind: user, name: izzy}]
-            wait: {strategy: ask}
+      integrations:
+        - type: human
+          timing: during
+          id: clarify_experience
+          participant: product_owner
+          purpose: Resolve a consequential product ambiguity.
+          interaction: consultation
+          required: true
+          availability: on_demand
+          delivery:
+            type: slack
+            connection: slack_local
+            targets: [{kind: user, name: izzy}]
+          wait: {strategy: ask}
     plan:
       instructions: .outcomeci/instructions/delivery-design.md
       needs: [intake]
@@ -142,23 +237,24 @@ To deliver a human interaction through Slack, declare Slack delivery on the
 phase hook:
 
 ```yaml
-humans:
-  after:
-    - id: confirm_scope
-      participant: requester
-      purpose: Confirm the intent and affected scope before planning.
-      interaction: approval
-      required: true
-      delivery:
-        type: slack
-        connection: slack_local
-        targets:
-          - kind: user
-            name: izzy
-          - kind: channel
-            name: product
-      wait:
-        strategy: ask
+integrations:
+  - type: human
+    timing: after
+    id: confirm_scope
+    participant: requester
+    purpose: Confirm the intent and affected scope before planning.
+    interaction: approval
+    required: true
+    delivery:
+      type: slack
+      connection: slack_local
+      targets:
+        - kind: user
+          name: izzy
+        - kind: channel
+          name: product
+    wait:
+      strategy: ask
 ```
 
 Discover and assign people without copying Slack IDs:

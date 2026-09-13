@@ -28,9 +28,16 @@ def assign(
 ) -> dict[str, Any]:
     document = yaml.safe_load(config.read_text(encoding="utf-8"))
     try:
-        entries = document["spec"]["agents"]["phases"][phase]["humans"][timing]
+        phase_policy = document["spec"]["agents"]["phases"][phase]
     except (KeyError, TypeError) as exc:
         raise ExecutionError(f"human hook {phase}.{timing}.{interaction_id} was not found") from exc
+    entries = [
+        item
+        for item in phase_policy.get("integrations", [])
+        if item.get("type") == "human" and item.get("timing") == timing
+    ]
+    if not entries:
+        entries = phase_policy.get("humans", {}).get(timing, [])
     hook = next((item for item in entries if item.get("id") == interaction_id), None)
     if hook is None:
         raise ExecutionError(f"human hook {phase}.{timing}.{interaction_id} was not found")

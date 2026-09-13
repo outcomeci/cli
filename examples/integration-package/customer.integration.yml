@@ -1,0 +1,29 @@
+apiVersion: outcomeci.dev/v1alpha1
+kind: OutcomeIntegrationPackage
+metadata:
+  name: customer
+  version: 1.0.0
+spec:
+  connections:
+    customer:
+      provider: http
+      base_url: https://api.example.com
+      auth:
+        type: bearer
+        credential: env:CUSTOMER_API_TOKEN
+  integrations:
+    customer:
+      connection: customer
+      access: {mode: schema}
+      operations:
+        lookup:
+          description: Retrieve the safe customer summary.
+          policy: {side_effect: read, approval: none, idempotency: supported}
+          input:
+            type: object
+            required: [customer_id]
+            properties: {customer_id: {type: string}}
+            additionalProperties: false
+          request: {method: GET, path: "/v1/customers/{{ input.customer_id }}"}
+          response:
+            expose: {name: body.name, plan: body.plan}
