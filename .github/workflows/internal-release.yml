@@ -52,4 +52,17 @@ jobs:
       - name: Authenticate Twine to internal CodeArtifact
         run: aws codeartifact login --tool twine --domain outcomeci --repository python-internal
       - name: Publish the immutable candidate internally
-        run: twine upload --repository codeartifact --skip-existing dist/*
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+          if aws codeartifact describe-package-version \
+            --domain outcomeci \
+            --repository python-internal \
+            --format pypi \
+            --package outcomeci-cli \
+            --package-version "$VERSION" >/dev/null 2>&1; then
+            echo "Internal candidate $VERSION already exists; preserving the immutable package."
+            exit 0
+          fi
+          twine upload --repository codeartifact dist/*
