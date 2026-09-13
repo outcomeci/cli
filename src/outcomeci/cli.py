@@ -54,6 +54,7 @@ from .outcome import run as run_outcome
 from .process import ExecutionError
 from .repository import RepositoryError, initialize, update, validate
 from .schema import export_schema, load_schema, schema_path
+from .simulation import run as run_simulation
 from .slack import SlackError
 from .slack import manifest as slack_manifest
 from .slack import setup as setup_slack
@@ -170,6 +171,12 @@ def parser() -> argparse.ArgumentParser:
         item.add_argument("--dir", type=Path, default=Path.cwd())
         if name == "init":
             item.add_argument("--backend", choices=("outcomeci", "filesystem"), default="outcomeci")
+    proof = commands.add_parser("proof", help="Run ecosystem persona durability proofs")
+    proof_commands = proof.add_subparsers(dest="proof_command", required=True)
+    proof_run = proof_commands.add_parser("run")
+    proof_run.add_argument("--definition", type=Path)
+    proof_run.add_argument("--workspace", type=Path, default=Path("/proof"))
+    proof_run.add_argument("--report", type=Path)
     outcome = commands.add_parser("outcome")
     outcome_commands = outcome.add_subparsers(dest="outcome_command", required=True)
     for name in ("validate", "compile"):
@@ -356,6 +363,10 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.command == "proof":
+            result = run_simulation(args.definition, args.workspace, args.report)
+            _print_json(result, sort_keys=True)
+            return 0 if result["status"] == "passed" else 2
         if args.command == "schema":
             if args.schema_command == "path":
                 print(schema_path())

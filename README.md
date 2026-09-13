@@ -41,6 +41,25 @@ The skill coordinates `outcome begin`, `compile`, `validate-artifacts`,
 `advance`, and `status`. Managed OutcomeCI runners continue to use `outcome
 run --claim ...`; both modes share workflow compilation and artifact schemas.
 
+## Ecosystem durability proofs
+
+The separately packaged `proof-runner` treats a versioned persona journey as
+an ecosystem-level test. Its bundled local-first proof starts with an empty
+workspace, initializes OutcomeCI and an encrypted local Vault, executes a
+Vault-backed capability, runs intake through tasks, kills phase processes at
+durable boundaries, and verifies exact recovery:
+
+```console
+oci proof run --workspace ./proof-runs
+docker build -f Dockerfile.proof-runner -t outcomeci-proof-runner .
+docker run --rm --network none --tmpfs /proof:rw,noexec,nosuid,uid=10001,gid=10001,size=128m outcomeci-proof-runner
+```
+
+Pass/fail evidence is written as a machine-readable report and hash-linked
+event ledger. `proof.yml` holds exactly one persona journey. The first release
+ships only the bundled `local-first-v1` definition; mounted customer workflow
+proofs will use the same contract after the reference journey is stable.
+
 Filesystem workflows can pin repository evidence explicitly:
 
 ```yaml
