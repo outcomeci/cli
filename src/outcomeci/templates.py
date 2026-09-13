@@ -34,13 +34,14 @@ spec:
             - name: trajectory
               path: intake/trajectory.json
               media_type: application/json
-        humans:
-          after:
-            - id: confirm_intent
-              participant: requester
-              purpose: Confirm the intent and affected scope before planning.
-              interaction: approval
-              required: true
+        integrations:
+          - type: human
+            timing: after
+            id: confirm_intent
+            participant: requester
+            purpose: Confirm the intent and affected scope before planning.
+            interaction: approval
+            required: true
       plan:
         instructions: .outcomeci/instructions/plan.md
         needs: [intake]

@@ -316,11 +316,18 @@ def _execute(
     outcome_root = root / ".outcomeci" / "outcomes" / state["run_id"]
     writable_artifacts = _prepare_writable_artifacts(compiled, outcome_root, phase)
     connection_secrets = {
-        str(connection["auth"]["env"])
+        name
         for connection in compiled["workflow"]["spec"].get("connections", [])
-        if isinstance(connection, dict)
-        and isinstance(connection.get("auth"), dict)
-        and isinstance(connection["auth"].get("env"), str)
+        if isinstance(connection, dict) and isinstance(connection.get("auth"), dict)
+        for name in [
+            connection["auth"].get("env")
+            or (
+                str(connection["auth"].get("credential", "")).removeprefix("env:")
+                if str(connection["auth"].get("credential", "")).startswith("env:")
+                else ""
+            )
+        ]
+        if isinstance(name, str) and name
     }
     repository = root.name
     shared = compiled["instructions"]["orchestrator"]["content"]
@@ -336,6 +343,7 @@ def _execute(
         "context_files": compiled["context"]["files"],
         "inputs": _input_context(compiled, outcome_root, phase, state["intent"]),
         "outputs": compiled["instructions"]["phases"][phase]["expects"]["outputs"],
+        "capabilities": compiled["instructions"]["phases"][phase].get("capabilities", []),
         "human_context": _human_context(state, outcome_root),
     }
     intake_contract = ""
@@ -347,7 +355,7 @@ repository_id \"local:{repository}\", repository \"{repository}\", a non-empty
 rationale, and a candidates array following the stable role and disposition
 contract above. Use paths relative to this repository.
 """
-    prompt = f"{shared}\n\n{instructions}\n\nThis is a filesystem-backed local Standup. Work in {root}. Write durable artifacts beneath {outcome_root}. During intake, plan, and tasks, do not modify product source files. There is no OutcomeCI Cloud or Digital Twin; inspect the local repository directly. Only use human tools for a hook declared on this current phase with Slack or custom delivery and configured targets. Never discover targets or change hook assignments during execution. Use only readable names; never request or expose provider IDs. Before a wired hook with wait strategy `ask`, ask the requester how long to wait or whether to continue. Deliver it with `oci human request <interaction-id> --run {state['run_id']} --workspace {root}`; add `--continue` only when the requester chose to keep working. Otherwise poll for exactly their bounded duration using `oci human poll <interaction-id> --run {state['run_id']} --wait <seconds> --workspace {root}`. Apply a received response with `oci human accept` and preserve it as outcome context.\n{intake_contract}\n{json.dumps(context, separators=(',', ':'))}"
+    prompt = f"{shared}\n\n{instructions}\n\nThis is a filesystem-backed local Standup. Work in {root}. Write durable artifacts beneath {outcome_root}. During intake, plan, and tasks, do not modify product source files. There is no OutcomeCI Cloud or Digital Twin; inspect the local repository directly. Only execute API capabilities listed for this phase, using `oci integration execute <capability> --phase {phase} --input-stdin`; the capability broker owns credentials and authorization. Only use human tools for a hook declared on this current phase with Slack or custom delivery and configured targets. Never discover targets or change hook assignments during execution. Use only readable names; never request or expose provider IDs. Before a wired hook with wait strategy `ask`, ask the requester how long to wait or whether to continue. Deliver it with `oci human request <interaction-id> --run {state['run_id']} --workspace {root}`; add `--continue` only when the requester chose to keep working. Otherwise poll for exactly their bounded duration using `oci human poll <interaction-id> --run {state['run_id']} --wait <seconds> --workspace {root}`. Apply a received response with `oci human accept` and preserve it as outcome context.\n{intake_contract}\n{json.dumps(context, separators=(',', ':'))}"
     state.update(
         {
             "status": "running",

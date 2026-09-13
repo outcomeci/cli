@@ -206,6 +206,7 @@ def test_before_interaction_is_durable_and_resumes_execution(tmp_path: Path, mon
     workflow = tmp_path / "outcome.yml"
     value = yaml.safe_load(workflow.read_text())
     intake = value["spec"]["agents"]["phases"]["intake"]
+    intake.pop("integrations", None)
     intake["humans"] = {
         "before": [
             {

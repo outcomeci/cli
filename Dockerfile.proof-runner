@@ -1,0 +1,36 @@
+FROM python:3.12-slim AS cli-build
+
+ARG OUTCOMECI_CLI_VERSION=0.0.0
+ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_OUTCOMECI_CLI="${OUTCOMECI_CLI_VERSION}" \
+    SETUPTOOLS_SCM_PRETEND_VERSION="${OUTCOMECI_CLI_VERSION}"
+WORKDIR /source
+COPY pyproject.toml README.md ./
+COPY src ./src
+RUN python -m pip wheel --no-cache-dir --wheel-dir /wheels .
+
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    OUTCOMECI_CONFIG_HOME=/proof/.config/outcomeci
+
+RUN apt-get update \
+    && apt-get upgrade --yes \
+    && apt-get install --yes --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 proof \
+    && useradd --uid 10001 --create-home --gid proof proof \
+    && mkdir /proof \
+    && chown proof:proof /proof
+
+COPY --from=cli-build /wheels /wheels
+RUN python -m pip install --no-cache-dir /wheels/* \
+    && python -m pip check \
+    && python -m pip uninstall --yes pip setuptools \
+    && rm -rf /wheels
+
+USER proof
+WORKDIR /proof
+
+ENTRYPOINT ["oci", "proof", "run"]
+CMD ["--workspace", "/proof"]

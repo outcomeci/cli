@@ -8,6 +8,7 @@ import json
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import jsonschema
 import yaml
@@ -16,6 +17,10 @@ from . import __version__
 
 RUNNERS = {"codex", "claude"}
 INTERACTIONS = {"approval", "review", "consultation", "notification"}
+HTTP_METHODS = {"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"}
+SIDE_EFFECTS = {"read", "create", "update", "delete", "execute"}
+APPROVAL_POLICIES = {"none", "required", "inherit"}
+IDEMPOTENCY_POLICIES = {"none", "supported", "required"}
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9_-]{0,62}$")
 
 
@@ -212,6 +217,270 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
     return result
 
 
+def _phase_integrations(
+    policy: dict[str, Any], field: str
+) -> tuple[list[str], dict[str, list[dict[str, Any]]]]:
+    """Normalize typed phase integrations into the existing runtime graph shape."""
+    capabilities = policy.get("capabilities", [])
+    if not isinstance(capabilities, list) or not all(
+        isinstance(capability, str) and capability.strip() for capability in capabilities
+    ):
+        raise ConfigError(f"{field}.capabilities must be a list of names")
+    capability_names = list(capabilities)
+    raw_humans = _mapping(policy.get("humans", {}), f"{field}.humans")
+    human_groups: dict[str, list[Any]] = {
+        timing: list(raw_humans.get(timing, [])) for timing in ("before", "during", "after")
+    }
+    entries = policy.get("integrations", [])
+    if not isinstance(entries, list):
+        raise ConfigError(f"{field}.integrations must be a list")
+    for index, raw_entry in enumerate(entries):
+        entry_field = f"{field}.integrations[{index}]"
+        entry = _mapping(raw_entry, entry_field)
+        integration_type = entry.get("type")
+        if integration_type == "api":
+            capability = entry.get("capability")
+            if not isinstance(capability, str) or not capability.strip():
+                raise ConfigError(f"{entry_field}.capability is required")
+            capability_names.append(capability.strip())
+        elif integration_type == "human":
+            timing = entry.get("timing")
+            if timing not in human_groups:
+                raise ConfigError(f"{entry_field}.timing must be before, during, or after")
+            human_groups[timing].append(
+                {key: value for key, value in entry.items() if key not in {"type", "timing"}}
+            )
+        else:
+            raise ConfigError(f"{entry_field}.type must be api or human")
+    humans = _human_interactions(human_groups, f"{field}.integrations")
+    return sorted(set(capability_names)), humans
+
+
+def _schema(value: Any, field: str) -> dict[str, Any]:
+    if value is None:
+        value = {"type": "object", "additionalProperties": True}
+    result = _mapping(value, field)
+    try:
+        jsonschema.validators.validator_for(result).check_schema(result)
+    except jsonschema.SchemaError as exc:
+        raise ConfigError(f"{field} is not a valid JSON Schema: {exc.message}") from exc
+    return result
+
+
+def _named_items(value: Any, field: str) -> list[dict[str, Any]]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [_mapping(item, f"{field}[{index}]") for index, item in enumerate(value)]
+    values = _mapping(value, field)
+    return [{"ref": name, **_mapping(item, f"{field}.{name}")} for name, item in values.items()]
+
+
+def _http_origin(value: Any, field: str) -> str:
+    if not isinstance(value, str):
+        raise ConfigError(f"{field} must be an HTTPS URL")
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme not in {"https", "http"}
+        or not parsed.hostname
+        or parsed.path not in {"", "/"}
+    ):
+        raise ConfigError(f"{field} must contain only an HTTP origin")
+    return value.rstrip("/")
+
+
+def _http_auth(value: Any, field: str) -> dict[str, Any]:
+    auth = _mapping(value or {"type": "none"}, field)
+    kind = auth.get("type", "none")
+    if kind not in {"none", "api_key", "basic", "bearer", "oauth2", "oidc"}:
+        raise ConfigError(f"{field}.type is unsupported")
+    result = {"type": kind}
+    if kind != "none":
+        credential = auth.get("credential")
+        if not isinstance(credential, str) or not credential.strip():
+            raise ConfigError(f"{field}.credential is required")
+        result["credential"] = credential.strip()
+    for key in ("header", "query", "scheme", "token_url", "discovery_url", "scope", "audience"):
+        if auth.get(key) is not None:
+            if not isinstance(auth[key], str) or not auth[key].strip():
+                raise ConfigError(f"{field}.{key} must be non-empty")
+            result[key] = auth[key].strip()
+    if kind == "api_key" and not (result.get("header") or result.get("query")):
+        result["header"] = "Authorization"
+        result["scheme"] = "Bearer"
+    if kind == "oauth2" and "token_url" not in result:
+        raise ConfigError(f"{field}.token_url is required")
+    if kind == "oidc" and "discovery_url" not in result:
+        raise ConfigError(f"{field}.discovery_url is required")
+    return result
+
+
+def _operation(value: Any, field: str) -> dict[str, Any]:
+    item = _mapping(value, field)
+    request = _mapping(item.get("request"), f"{field}.request")
+    method = request.get("method")
+    if not isinstance(method, str) or method.upper() not in HTTP_METHODS:
+        raise ConfigError(f"{field}.request.method is unsupported")
+    path = request.get("path")
+    if not isinstance(path, str) or not path.startswith("/") or path.startswith("//"):
+        raise ConfigError(f"{field}.request.path must be a relative absolute-path")
+    response = _mapping(item.get("response", {}), f"{field}.response")
+    expose = response.get("expose", {})
+    if isinstance(expose, list):
+        expose = {entry.rsplit(".", 1)[-1]: entry for entry in expose}
+    expose = _mapping(expose, f"{field}.response.expose")
+    if not all(isinstance(key, str) and isinstance(path, str) for key, path in expose.items()):
+        raise ConfigError(f"{field}.response.expose must map output names to paths")
+    normalized_request = {
+        "method": method.upper(),
+        "path": path,
+        "headers": _mapping(request.get("headers", {}), f"{field}.request.headers"),
+    }
+    for key in ("query", "body"):
+        if key in request:
+            normalized_request[key] = request[key]
+    timeout = request.get("timeout_seconds", 30)
+    if not isinstance(timeout, (int, float)) or not 0 < timeout <= 300:
+        raise ConfigError(f"{field}.request.timeout_seconds must be between 0 and 300")
+    normalized_request["timeout_seconds"] = timeout
+    policy = _mapping(item.get("policy", {}), f"{field}.policy")
+    side_effect = policy.get(
+        "side_effect", "read" if method.upper() in {"GET", "HEAD"} else "execute"
+    )
+    approval = policy.get("approval", "none" if side_effect == "read" else "inherit")
+    idempotency = policy.get(
+        "idempotency",
+        "supported" if method.upper() in {"GET", "HEAD", "PUT", "DELETE"} else "none",
+    )
+    if side_effect not in SIDE_EFFECTS:
+        raise ConfigError(f"{field}.policy.side_effect is unsupported")
+    if approval not in APPROVAL_POLICIES:
+        raise ConfigError(f"{field}.policy.approval is unsupported")
+    if idempotency not in IDEMPOTENCY_POLICIES:
+        raise ConfigError(f"{field}.policy.idempotency is unsupported")
+    return {
+        "description": str(item.get("description", "")).strip(),
+        "input": _schema(item.get("input"), f"{field}.input"),
+        "request": normalized_request,
+        "response": {"expose": expose},
+        "policy": {
+            "side_effect": side_effect,
+            "approval": approval,
+            "idempotency": idempotency,
+        },
+    }
+
+
+def _integrations(spec: dict[str, Any], connections: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    raw = spec.get("integrations", {})
+    values = _mapping(raw, "spec.integrations")
+    result: dict[str, Any] = {}
+    for name, raw_value in values.items():
+        if not isinstance(name, str) or not IDENTIFIER.fullmatch(name):
+            raise ConfigError(f"invalid integration name: {name}")
+        field = f"spec.integrations.{name}"
+        item = _mapping(raw_value, field)
+        connection = item.get("connection")
+        if connection not in connections or connections[connection].get("provider") != "http":
+            raise ConfigError(f"{field}.connection must reference an HTTP connection")
+        access = _mapping(item.get("access", {"mode": "schema"}), f"{field}.access")
+        mode = access.get("mode", "schema")
+        if mode not in {"schema", "openapi", "full"}:
+            raise ConfigError(f"{field}.access.mode is unsupported")
+        normalized_access: dict[str, Any] = {"mode": mode}
+        if mode == "openapi":
+            source = access.get("source")
+            allow = access.get("operations", [])
+            if not isinstance(source, str) or not source.startswith(("https://", "http://")):
+                raise ConfigError(f"{field}.access.source must be an HTTP URL")
+            if not isinstance(allow, list) or not all(isinstance(value, str) for value in allow):
+                raise ConfigError(f"{field}.access.operations must be a string list")
+            normalized_access.update({"source": source, "operations": sorted(set(allow))})
+        if mode == "full":
+            methods = access.get("methods", sorted(HTTP_METHODS))
+            if not isinstance(methods, list) or not methods:
+                raise ConfigError(f"{field}.access.methods must be a non-empty list")
+            methods = [str(method).upper() for method in methods]
+            if any(method not in HTTP_METHODS for method in methods):
+                raise ConfigError(f"{field}.access.methods contains an unsupported method")
+            normalized_access["methods"] = sorted(set(methods))
+            expose = access.get("expose", {"result": "body"})
+            expose = _mapping(expose, f"{field}.access.expose")
+            if not all(
+                isinstance(key, str) and isinstance(path, str) for key, path in expose.items()
+            ):
+                raise ConfigError(f"{field}.access.expose must map output names to paths")
+            normalized_access["expose"] = expose
+        operations = {
+            operation_name: _operation(operation, f"{field}.operations.{operation_name}")
+            for operation_name, operation in _mapping(
+                item.get("operations", {}), f"{field}.operations"
+            ).items()
+        }
+        if mode == "schema" and not operations:
+            raise ConfigError(f"{field}.operations must define at least one operation")
+        result[name] = {
+            "connection": connection,
+            "access": normalized_access,
+            "operations": operations,
+        }
+    return result
+
+
+def _load_integration_packages(path: Path, spec: dict[str, Any]) -> None:
+    packages = spec.get("integration_packages", [])
+    if not isinstance(packages, list):
+        raise ConfigError("spec.integration_packages must be a list")
+    connections = {
+        item["ref"]: {key: value for key, value in item.items() if key != "ref"}
+        for item in _named_items(spec.get("connections", {}), "spec.connections")
+    }
+    integrations = dict(_mapping(spec.get("integrations", {}), "spec.integrations"))
+    normalized: list[dict[str, str]] = []
+    for index, value in enumerate(packages):
+        field = f"spec.integration_packages[{index}]"
+        item = _mapping(value, field)
+        package_path = _relative_path(path.parent, item.get("path"), f"{field}.path")
+        try:
+            content = package_path.read_text(encoding="utf-8")
+            package = _mapping(yaml.safe_load(content), field)
+        except (OSError, yaml.YAMLError) as exc:
+            raise ConfigError(f"could not read integration package {package_path}: {exc}") from exc
+        if package.get("apiVersion") != "outcomeci.dev/v1alpha1" or package.get("kind") != (
+            "OutcomeIntegrationPackage"
+        ):
+            raise ConfigError(f"{field} must contain an OutcomeIntegrationPackage")
+        metadata = _mapping(package.get("metadata"), f"{field}.metadata")
+        name, version = metadata.get("name"), metadata.get("version")
+        if not isinstance(name, str) or not IDENTIFIER.fullmatch(name):
+            raise ConfigError(f"{field}.metadata.name is invalid")
+        if not isinstance(version, str) or not version.strip():
+            raise ConfigError(f"{field}.metadata.version is required")
+        package_spec = _mapping(package.get("spec"), f"{field}.spec")
+        for connection in _named_items(package_spec.get("connections", {}), f"{field}.connections"):
+            ref = connection.pop("ref")
+            if ref in connections:
+                raise ConfigError(f"integration package connection conflicts with {ref}")
+            connections[ref] = connection
+        for integration, definition in _mapping(
+            package_spec.get("integrations", {}), f"{field}.integrations"
+        ).items():
+            if integration in integrations:
+                raise ConfigError(f"integration package conflicts with {integration}")
+            integrations[integration] = definition
+        normalized.append(
+            {
+                "name": name,
+                "version": version.strip(),
+                "path": package_path.relative_to(path.parent.resolve()).as_posix(),
+                "sha256": hashlib.sha256(content.encode()).hexdigest(),
+            }
+        )
+    spec["connections"] = connections
+    spec["integrations"] = integrations
+    spec["integration_packages"] = sorted(normalized, key=lambda item: item["name"])
+
+
 def load(path: Path) -> dict[str, Any]:
     try:
         root = _mapping(yaml.safe_load(path.read_text(encoding="utf-8")), "document")
@@ -225,6 +494,7 @@ def load(path: Path) -> dict[str, Any]:
     if not isinstance(metadata.get("name"), str) or not metadata["name"].strip():
         raise ConfigError("metadata.name is required")
     spec = _mapping(root.get("spec"), "spec")
+    _load_integration_packages(path.resolve(), spec)
     for field, choices in (
         ("backend", {"outcomeci", "filesystem"}),
         ("context", {"outcomeci", "http", "filesystem"}),
@@ -300,12 +570,13 @@ def load(path: Path) -> dict[str, Any]:
                 raise ConfigError(f"duplicate output path: {item['path']}")
             output_paths.add(item["path"])
             outputs[(phase_name, item["name"])] = item
-        humans = _human_interactions(policy.get("humans", {}), f"{field}.humans")
+        capabilities, humans = _phase_integrations(policy, field)
         normalized_phases[phase_name] = {
             "needs": needs,
             "inputs": inputs,
             "outputs": phase_outputs,
             "humans": humans,
+            "capabilities": capabilities,
         }
 
     for phase_name, phase in normalized_phases.items():
@@ -344,9 +615,8 @@ def load(path: Path) -> dict[str, Any]:
                 dependency in ready for dependency in normalized_phases[name]["needs"]
             )
 
-    connections = spec.get("connections", [])
-    if not isinstance(connections, list):
-        raise ConfigError("spec.connections must be a list")
+    connections = _named_items(spec.get("connections", []), "spec.connections")
+    spec["connections"] = connections
     refs: set[str] = set()
     connection_providers: dict[str, str] = {}
     for index, value in enumerate(connections):
@@ -356,9 +626,20 @@ def load(path: Path) -> dict[str, Any]:
             raise ConfigError("connection references must be unique non-empty strings")
         refs.add(ref)
         provider = item.get("provider")
-        if provider not in {"slack", "custom"}:
+        if provider not in {"slack", "custom", "http"}:
             raise ConfigError(f"spec.connections[{index}].provider is unsupported")
         connection_providers[ref] = provider
+        if provider == "http":
+            item["base_url"] = _http_origin(
+                item.get("base_url"), f"spec.connections[{index}].base_url"
+            )
+            item["auth"] = _http_auth(item.get("auth"), f"spec.connections[{index}].auth")
+            allow_private = item.get("allow_private_network", False)
+            if not isinstance(allow_private, bool):
+                raise ConfigError(
+                    f"spec.connections[{index}].allow_private_network must be boolean"
+                )
+            item["allow_private_network"] = allow_private
         if provider == "custom":
             transport = _mapping(item.get("transport"), f"spec.connections[{index}].transport")
             transport_type = transport.get("type")
@@ -438,7 +719,32 @@ def load(path: Path) -> dict[str, Any]:
                             raise ConfigError(
                                 f"spec.connections[{index}].contract.{operation}.{direction} is not a valid JSON Schema: {exc.message}"
                             ) from exc
+    normalized_integrations = _integrations(spec, {item["ref"]: item for item in connections})
+    spec["integrations"] = normalized_integrations
+    available_capabilities = (
+        {
+            f"{integration}.{operation}"
+            for integration, value in normalized_integrations.items()
+            for operation in value["operations"]
+        }
+        | {
+            f"{integration}.request"
+            for integration, value in normalized_integrations.items()
+            if value["access"]["mode"] == "full"
+        }
+        | {
+            f"{integration}.{re.sub(r'[^a-z0-9_-]+', '_', operation.lower()).strip('_')}"
+            for integration, value in normalized_integrations.items()
+            if value["access"]["mode"] == "openapi"
+            for operation in value["access"]["operations"]
+        }
+    )
     for phase_name, phase in normalized_phases.items():
+        unknown_capabilities = set(phase["capabilities"]) - available_capabilities
+        if unknown_capabilities:
+            raise ConfigError(
+                f"phase {phase_name} references unknown capabilities: {', '.join(sorted(unknown_capabilities))}"
+            )
         for timing in ("before", "during", "after"):
             for hook in phase["humans"][timing]:
                 delivery = hook["delivery"]
@@ -519,6 +825,7 @@ def compile_workflow(path: Path) -> dict[str, Any]:
             "needs": contract["needs"],
             "expects": {"inputs": contract["inputs"], "outputs": contract["outputs"]},
             "humans": contract["humans"],
+            "capabilities": contract["capabilities"],
             "policy": {
                 "runner": policy.get("runner", default.get("runner")),
                 "model": policy.get("model", default.get("model")),

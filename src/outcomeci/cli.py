@@ -10,18 +10,31 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
+import yaml
+
 from . import __version__
 from .capability import invoke as invoke_capability
+from .capability import invoke_integration
 from .cloud import auth_status as cloud_auth_status
 from .cloud import login as cloud_login
 from .cloud import login_with_key as cloud_login_with_key
 from .cloud import logout as cloud_logout
 from .cloud import sync_workflow, vault_request
 from .config import ConfigError, compile_workflow
+from .conformance import run as run_conformance
 from .humans import accept as accept_human_input
 from .humans import assign as assign_human_hook
 from .humans import poll as poll_human_input
 from .humans import request as request_human_input
+from .integrations import (
+    IntegrationError,
+    IntegrationExecutor,
+    doctor,
+    import_openapi,
+    local_credential_resolver,
+)
+from .integrations import apply_patch as apply_integration_patch
+from .integrations import propose_patch as propose_integration_patch
 from .local import advance as advance_local_outcome
 from .local import begin as begin_local_outcome
 from .local import compile_context, validate_artifacts
@@ -32,9 +45,16 @@ from .local import respond as respond_local_outcome
 from .local import retry as retry_local_outcome
 from .local import start as start_local_outcome
 from .local import status as local_outcome_status
+from .local_vault import initialize as initialize_local_vault
+from .local_vault import list_entries as list_local_vault_entries
+from .local_vault import put as put_local_vault_entry
+from .locking import verify_lock, write_lock
+from .mcp_server import serve as serve_mcp
 from .outcome import run as run_outcome
 from .process import ExecutionError
 from .repository import RepositoryError, initialize, update, validate
+from .schema import export_schema, load_schema, schema_path
+from .simulation import run as run_simulation
 from .slack import SlackError
 from .slack import manifest as slack_manifest
 from .slack import setup as setup_slack
@@ -74,6 +94,16 @@ def parser() -> argparse.ArgumentParser:
     )
     root.add_argument("--version", action="version", version=f"oci {__version__}")
     commands = root.add_subparsers(dest="command", required=True)
+    schema = commands.add_parser("schema", help="Inspect the versioned outcome.yml schema")
+    schema_commands = schema.add_subparsers(dest="schema_command", required=True)
+    schema_commands.add_parser("path", help="Print the packaged schema path")
+    schema_commands.add_parser("print", help="Print the current schema")
+    schema_export = schema_commands.add_parser("export", help="Export the current schema")
+    schema_export.add_argument("output", type=Path)
+    conformance = commands.add_parser(
+        "conformance", help="Run the portable OutcomeCI runtime contract checks"
+    )
+    conformance.add_argument("--workflow", type=Path)
     auth = commands.add_parser("auth", help="Authenticate with OutcomeCI Cloud")
     auth_commands = auth.add_subparsers(dest="auth_command", required=True)
     auth_login = auth_commands.add_parser("login")
@@ -94,6 +124,9 @@ def parser() -> argparse.ArgumentParser:
     workflow_sync.add_argument("file", type=Path)
     workflow_sync.add_argument("--workspace", required=True)
     workflow_sync.add_argument("--name")
+    workflow_sync.add_argument(
+        "--patch", type=Path, help="OutcomeWorkflowPatch that produced this version"
+    )
     workflow_mode = workflow_sync.add_mutually_exclusive_group(required=True)
     workflow_mode.add_argument("--create", action="store_true")
     workflow_mode.add_argument("--version", action="store_true")
@@ -122,11 +155,28 @@ def parser() -> argparse.ArgumentParser:
     vault_revoke = vault_commands.add_parser("revoke")
     vault_revoke.add_argument("entry_id")
     vault_revoke.add_argument("--workspace", required=True)
+    local_vault = vault_commands.add_parser("local", help="Manage an encrypted offline Vault")
+    local_vault_commands = local_vault.add_subparsers(dest="local_vault_command", required=True)
+    local_vault_init = local_vault_commands.add_parser("init")
+    _add_workspace_argument(local_vault_init)
+    local_vault_list = local_vault_commands.add_parser("list")
+    _add_workspace_argument(local_vault_list)
+    local_vault_put = local_vault_commands.add_parser("put")
+    local_vault_put.add_argument("path")
+    local_vault_put.add_argument("--value")
+    local_vault_put.add_argument("--value-stdin", action="store_true")
+    _add_workspace_argument(local_vault_put)
     for name in ("init", "update", "validate", "status"):
         item = commands.add_parser(name)
         item.add_argument("--dir", type=Path, default=Path.cwd())
         if name == "init":
             item.add_argument("--backend", choices=("outcomeci", "filesystem"), default="outcomeci")
+    proof = commands.add_parser("proof", help="Run ecosystem persona durability proofs")
+    proof_commands = proof.add_subparsers(dest="proof_command", required=True)
+    proof_run = proof_commands.add_parser("run")
+    proof_run.add_argument("--definition", type=Path)
+    proof_run.add_argument("--workspace", type=Path, default=Path("/proof"))
+    proof_run.add_argument("--report", type=Path)
     outcome = commands.add_parser("outcome")
     outcome_commands = outcome.add_subparsers(dest="outcome_command", required=True)
     for name in ("validate", "compile"):
@@ -136,6 +186,14 @@ def parser() -> argparse.ArgumentParser:
             item.add_argument("--phase")
             item.add_argument("--run")
             item.add_argument("--workspace", type=Path, default=Path.cwd())
+    lock_command = outcome_commands.add_parser("lock", help="Pin resolved workflow contracts")
+    lock_command.add_argument("config", nargs="?", type=Path, default=Path("outcome.yml"))
+    lock_command.add_argument("--output", type=Path, default=Path("outcome.lock"))
+    verify_lock_command = outcome_commands.add_parser(
+        "verify-lock", help="Verify outcome.lock against the current workflow"
+    )
+    verify_lock_command.add_argument("config", nargs="?", type=Path, default=Path("outcome.yml"))
+    verify_lock_command.add_argument("--lock", type=Path, default=Path("outcome.lock"))
     run = outcome_commands.add_parser("run")
     run.add_argument("--claim", required=True, type=Path)
     run.add_argument("--workspace", type=Path, default=Path("/workspace"))
@@ -224,6 +282,64 @@ def parser() -> argparse.ArgumentParser:
     twin_search.add_argument("--component-limit", type=int, default=20)
     integration = commands.add_parser("integration")
     integration_commands = integration.add_subparsers(dest="integration_command", required=True)
+    integration_list = integration_commands.add_parser(
+        "list", help="List authorized API capabilities"
+    )
+    integration_list.add_argument("--phase")
+    _add_workflow_arguments(integration_list)
+    integration_describe = integration_commands.add_parser(
+        "describe", help="Describe one API capability without exposing credentials"
+    )
+    integration_describe.add_argument("capability")
+    _add_workflow_arguments(integration_describe)
+    integration_execute = integration_commands.add_parser(
+        "execute", help="Execute a workflow-authorized API capability"
+    )
+    integration_execute.add_argument("capability")
+    integration_execute.add_argument("--phase", required=True)
+    integration_execute.add_argument("--input", default="{}")
+    integration_execute.add_argument("--input-stdin", action="store_true")
+    _add_workflow_arguments(integration_execute)
+    integration_dry_run = integration_commands.add_parser(
+        "dry-run", help="Show authorized API and human effects without executing them"
+    )
+    integration_dry_run.add_argument("--phase", required=True)
+    _add_workflow_arguments(integration_dry_run)
+    integration_doctor = integration_commands.add_parser(
+        "doctor", help="Diagnose integration configuration and credential references"
+    )
+    integration_doctor.add_argument(
+        "--connectivity", action="store_true", help="Also check configured HTTP origins"
+    )
+    _add_workflow_arguments(integration_doctor)
+    integration_mcp = integration_commands.add_parser(
+        "mcp", help="Serve phase-authorized integrations as MCP tools over stdio"
+    )
+    integration_mcp.add_argument("--phase", required=True)
+    _add_workflow_arguments(integration_mcp)
+    integration_import = integration_commands.add_parser(
+        "import-openapi", help="Propose declared operations from an OpenAPI allowlist"
+    )
+    integration_import.add_argument("integration")
+    integration_import.add_argument("--output", type=Path, required=True)
+    _add_workflow_arguments(integration_import)
+    integration_patch = integration_commands.add_parser(
+        "patch", help="Create or apply a version-producing workflow patch"
+    )
+    patch_commands = integration_patch.add_subparsers(dest="patch_command", required=True)
+    patch_propose = patch_commands.add_parser("propose")
+    patch_propose.add_argument("capability")
+    patch_propose.add_argument("--definition", type=Path, required=True)
+    patch_propose.add_argument("--reason", required=True)
+    patch_propose.add_argument("--run", required=True)
+    patch_propose.add_argument("--phase", required=True)
+    patch_propose.add_argument("--agent", required=True)
+    patch_propose.add_argument("--output", type=Path, required=True)
+    _add_workflow_arguments(patch_propose)
+    patch_apply = patch_commands.add_parser("apply")
+    patch_apply.add_argument("patch", type=Path)
+    patch_apply.add_argument("--output", type=Path, required=True)
+    _add_workflow_arguments(patch_apply)
     slack = integration_commands.add_parser("slack")
     slack_commands = slack.add_subparsers(dest="slack_command", required=True)
     slack_setup = slack_commands.add_parser("setup")
@@ -247,6 +363,22 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.command == "proof":
+            result = run_simulation(args.definition, args.workspace, args.report)
+            _print_json(result, sort_keys=True)
+            return 0 if result["status"] == "passed" else 2
+        if args.command == "schema":
+            if args.schema_command == "path":
+                print(schema_path())
+            elif args.schema_command == "print":
+                _print_json(load_schema(), sort_keys=True)
+            else:
+                print(export_schema(args.output))
+            return 0
+        if args.command == "conformance":
+            result = run_conformance(args.workflow.resolve() if args.workflow else None)
+            _print_json(result, sort_keys=True)
+            return 0 if result["conformant"] else 2
         if args.command == "auth":
             if args.auth_command == "login":
                 if args.key_stdin:
@@ -265,11 +397,31 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "workflow":
             result = sync_workflow(
-                args.file, args.workspace, args.name, "create" if args.create else "version"
+                args.file,
+                args.workspace,
+                args.name,
+                "create" if args.create else "version",
+                patch_path=args.patch,
             )
             _print_json(result)
             return 0
         if args.command == "vault":
+            if args.vault_command == "local":
+                workspace = args.workspace.resolve()
+                if args.local_vault_command == "init":
+                    _print_json(initialize_local_vault(workspace))
+                elif args.local_vault_command == "list":
+                    _print_json(list_local_vault_entries(workspace), sort_keys=True)
+                else:
+                    value = (
+                        sys.stdin.read()
+                        if args.value_stdin
+                        else args.value
+                        if args.value is not None
+                        else getpass.getpass("Secret value: ")
+                    )
+                    _print_json(put_local_vault_entry(workspace, args.path, value))
+                return 0
             if args.vault_command == "list":
                 result = vault_request(args.workspace, "list")
             elif args.vault_command in {"put", "rotate"}:
@@ -346,6 +498,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                         },
                     }
             _print_json(result, sort_keys=True)
+        elif args.command == "outcome" and args.outcome_command == "lock":
+            result = write_lock(args.config.resolve(), args.output.resolve())
+            _print_json(
+                {
+                    "lock": str(args.output.resolve()),
+                    "workflow_revision": result["workflow_revision"],
+                },
+                sort_keys=True,
+            )
+        elif args.command == "outcome" and args.outcome_command == "verify-lock":
+            _print_json(verify_lock(args.config.resolve(), args.lock.resolve()), sort_keys=True)
         elif args.command == "outcome" and args.outcome_command == "run":
             _print_json(run_outcome(args.claim, args.workspace), compact=True)
         elif args.command == "outcome" and args.outcome_command == "start":
@@ -567,6 +730,92 @@ def main(argv: Sequence[str] | None = None) -> int:
                     sort_keys=True,
                 )
             )
+        elif args.command == "integration" and args.integration_command in {
+            "list",
+            "describe",
+            "execute",
+            "dry-run",
+            "doctor",
+            "mcp",
+        }:
+            compiled = compile_workflow(_workflow_path(args))
+            executor = IntegrationExecutor(
+                compiled, resolver=local_credential_resolver(_workflow_path(args).parent)
+            )
+            if args.integration_command == "list":
+                _print_json({"capabilities": executor.capabilities(args.phase)}, sort_keys=True)
+            elif args.integration_command == "describe":
+                _print_json(executor.describe(args.capability), sort_keys=True)
+            elif args.integration_command == "dry-run":
+                _print_json(executor.dry_run(args.phase), sort_keys=True)
+            elif args.integration_command == "doctor":
+                result = doctor(
+                    compiled,
+                    connectivity=args.connectivity,
+                    resolver=local_credential_resolver(_workflow_path(args).parent),
+                )
+                _print_json(result, sort_keys=True)
+                return 0 if result["ok"] else 2
+            elif args.integration_command == "mcp":
+                serve_mcp(executor, args.phase)
+            else:
+                raw = sys.stdin.read() if args.input_stdin else args.input
+                try:
+                    inputs = json.loads(raw)
+                except json.JSONDecodeError as exc:
+                    raise ExecutionError("integration input must be valid JSON") from exc
+                if not isinstance(inputs, dict):
+                    raise ExecutionError("integration input must be a JSON object")
+                result = (
+                    invoke_integration(args.capability, inputs)
+                    if os.environ.get("OUTCOMECI_CAPABILITY_SOCKET")
+                    else executor.execute(args.capability, inputs, phase=args.phase)
+                )
+                _print_json(result, sort_keys=True)
+        elif args.command == "integration" and args.integration_command == "import-openapi":
+            result = import_openapi(_workflow_path(args), args.integration)
+            args.output.write_text(yaml.safe_dump(result, sort_keys=False), encoding="utf-8")
+            _print_json(
+                {
+                    "patch": str(args.output),
+                    "parent_revision": result["metadata"]["parentRevision"],
+                    "operations": sorted(result["spec"]["operations"]["add"]),
+                },
+                sort_keys=True,
+            )
+        elif args.command == "integration" and args.integration_command == "patch":
+            config = _workflow_path(args)
+            if args.patch_command == "propose":
+                try:
+                    definition = yaml.safe_load(args.definition.read_text(encoding="utf-8"))
+                except (OSError, yaml.YAMLError) as exc:
+                    raise ExecutionError(f"could not read operation definition: {exc}") from exc
+                if not isinstance(definition, dict):
+                    raise ExecutionError("operation definition must be a YAML mapping")
+                integration_name, separator, operation_name = args.capability.partition(".")
+                if not separator:
+                    raise ExecutionError("capability must be integration.operation")
+                result = propose_integration_patch(
+                    config,
+                    integration_name,
+                    operation_name,
+                    definition,
+                    reason=args.reason,
+                    run=args.run,
+                    phase=args.phase,
+                    agent=args.agent,
+                )
+                args.output.write_text(yaml.safe_dump(result, sort_keys=False), encoding="utf-8")
+                _print_json(
+                    {
+                        "patch": str(args.output),
+                        "parent_revision": result["metadata"]["parentRevision"],
+                    }
+                )
+            else:
+                _print_json(
+                    apply_integration_patch(config, args.patch, args.output), sort_keys=True
+                )
         elif args.command == "integration" and args.integration_command == "slack":
             if args.slack_command == "setup":
                 print(
@@ -589,6 +838,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             elif args.slack_command == "manifest":
                 _print_json(slack_manifest(args.source or args.project), compact=True)
         return 0
+    except IntegrationError as exc:
+        print(json.dumps({"error": exc.as_dict()}, sort_keys=True), file=sys.stderr)
+        return 1 if exc.retryable else 2
     except (ConfigError, RepositoryError, TwinError, ExecutionError, SlackError) as exc:
         print(f"oci: {exc}", file=sys.stderr)
         return 1 if isinstance(exc, ExecutionError) and exc.retryable else 2

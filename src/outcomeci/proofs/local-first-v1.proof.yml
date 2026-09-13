@@ -1,0 +1,50 @@
+apiVersion: outcomeci.dev/v1alpha1
+kind: OutcomeProof
+metadata:
+  name: local-first-v1
+  version: 1.0.0
+spec:
+  persona:
+    name: local_first_user
+    version: 1.0.0
+    starting_state:
+      account: none
+      workspace: empty
+      network: offline
+      credentials: none
+  journey:
+    - {id: initialize, action: workspace.initialize}
+    - {id: initialize_vault, action: vault.initialize}
+    - {id: connect_service, action: vault.put}
+    - {id: configure_workflow, action: workflow.configure}
+    - {id: validate_workflow, action: workflow.validate}
+    - {id: exercise_vault, action: integration.execute}
+    - id: begin_outcome
+      action: outcome.begin
+      with: {intent: Improve the local-first onboarding experience}
+    - {id: complete_intake, action: outcome.execute, with: {phase: intake}}
+    - {id: confirm_intake, action: human.respond}
+    - {id: advance_to_plan, action: outcome.advance, with: {phase: plan}}
+    - {id: complete_plan, action: outcome.execute, with: {phase: plan}}
+    - {id: advance_to_tasks, action: outcome.advance, with: {phase: tasks}}
+    - {id: complete_tasks, action: outcome.execute, with: {phase: tasks}}
+  faults:
+    - after: complete_intake.artifacts_written
+      inject: process.kill
+      occurrence: first_attempt
+    - after: complete_plan.artifacts_written
+      inject: process.kill
+      occurrence: first_attempt
+  assertions:
+    - workflow.compiles
+    - vault.decrypts_after_restart
+    - credentials.never_exposed
+    - integration.uses_vault_reference
+    - completed_phases.are_unique
+    - human_responses.persist
+    - artifacts.match_contracts
+    - recovery.is_bounded
+    - final_status.ready_for_implementation
+  output:
+    report: proof-report.json
+    ledger: proof-events.jsonl

@@ -1,0 +1,48 @@
+name: Publish internal release candidate
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: internal-release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install build twine
+      - run: python -m build
+      - name: Verify tag matches the immutable package
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import email, os, pathlib, sys, zipfile
+          expected = os.environ["TAG"].removeprefix("v")
+          wheel = next(pathlib.Path("dist").glob("*.whl"))
+          with zipfile.ZipFile(wheel) as archive:
+              metadata = next(name for name in archive.namelist() if name.endswith(".dist-info/METADATA"))
+              actual = email.message_from_bytes(archive.read(metadata))["Version"]
+          if expected != actual:
+              sys.exit(f"tag {expected} does not match package {actual}")
+          PY
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.RUNNER_IMAGE_AWS_ROLE_ARN }}
+          aws-region: us-east-1
+      - name: Authenticate Twine to internal CodeArtifact
+        run: aws codeartifact login --tool twine --domain outcomeci --repository python-internal
+      - name: Publish the immutable candidate internally
+        run: twine upload --skip-existing dist/*

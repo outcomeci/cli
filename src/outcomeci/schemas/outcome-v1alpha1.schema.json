@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://outcomeci.com/schemas/outcome-v1alpha1.schema.json",
+  "title": "OutcomeCI Outcome Workflow",
+  "type": "object",
+  "required": ["apiVersion", "kind", "metadata", "spec"],
+  "properties": {
+    "apiVersion": {"const": "outcomeci.dev/v1alpha1"},
+    "kind": {"const": "OutcomeWorkflow"},
+    "metadata": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {"name": {"$ref": "#/$defs/identifier"}},
+      "additionalProperties": true
+    },
+    "spec": {
+      "type": "object",
+      "required": ["instructions", "agents"],
+      "properties": {
+        "backend": {"type": "object"},
+        "context": {"type": "object"},
+        "instructions": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 1,
+          "additionalProperties": {"$ref": "#/$defs/instruction"}
+        },
+        "agents": {
+          "type": "object",
+          "required": ["phases"],
+          "properties": {
+            "default": {"$ref": "#/$defs/agent"},
+            "phases": {
+              "type": "object",
+              "minProperties": 1,
+              "additionalProperties": {"$ref": "#/$defs/phase"}
+            }
+          },
+          "additionalProperties": true
+        },
+        "connections": {"oneOf": [{"type": "array"}, {"type": "object"}]},
+        "integration_packages": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["path"],
+            "properties": {"path": {"type": "string", "minLength": 1}},
+            "additionalProperties": false
+          }
+        },
+        "integrations": {"type": "object"}
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "identifier": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,62}$"},
+    "agent": {
+      "type": "object",
+      "properties": {
+        "runner": {"enum": ["codex", "claude"]},
+        "model": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": true
+    },
+    "instruction": {
+      "oneOf": [
+        {"type": "string", "minLength": 1},
+        {
+          "type": "object",
+          "required": ["path"],
+          "properties": {"path": {"type": "string", "minLength": 1}},
+          "additionalProperties": true
+        }
+      ]
+    },
+    "phase": {
+      "type": "object",
+      "required": ["instructions"],
+      "properties": {
+        "instructions": {"type": "string", "minLength": 1},
+        "runner": {"enum": ["codex", "claude"]},
+        "model": {"type": "string", "minLength": 1},
+        "needs": {"type": "array", "items": {"$ref": "#/$defs/identifier"}, "uniqueItems": true},
+        "expects": {"type": "object"},
+        "integrations": {
+          "type": "array",
+          "items": {"oneOf": [{"$ref": "#/$defs/apiIntegration"}, {"$ref": "#/$defs/humanIntegration"}]}
+        },
+        "capabilities": {"type": "array", "items": {"type": "string"}},
+        "humans": {"type": "object"}
+      },
+      "additionalProperties": true
+    },
+    "apiIntegration": {
+      "type": "object",
+      "required": ["type", "capability"],
+      "properties": {
+        "type": {"const": "api"},
+        "capability": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,62}\\.[a-z][a-z0-9_-]{0,62}$"}
+      },
+      "additionalProperties": false
+    },
+    "humanIntegration": {
+      "type": "object",
+      "required": ["type", "timing", "id", "participant", "purpose", "interaction"],
+      "properties": {
+        "type": {"const": "human"},
+        "timing": {"enum": ["before", "during", "after"]},
+        "id": {"$ref": "#/$defs/identifier"},
+        "participant": {"oneOf": [{"type": "string"}, {"type": "object"}]},
+        "purpose": {"type": "string", "minLength": 1},
+        "interaction": {"enum": ["approval", "review", "consultation", "notification"]},
+        "required": {"type": "boolean"},
+        "delivery": {"type": "object"},
+        "wait": {"type": "object"},
+        "availability": {"enum": ["on_demand", "always"]}
+      },
+      "additionalProperties": false
+    }
+  }
+}

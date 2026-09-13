@@ -10,7 +10,6 @@ concurrency:
 
 permissions:
   contents: write
-  actions: write
 
 jobs:
   release:
@@ -46,11 +45,3 @@ jobs:
           git push origin "$TAG"
           echo "released=true" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-      - name: Publish package and update Homebrew
-        if: steps.version.outputs.released == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.version.outputs.tag }}
-        run: |
-          gh workflow run publish.yml --ref main -f tag="$TAG"
-          gh workflow run homebrew.yml --ref main -f tag="$TAG"

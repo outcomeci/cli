@@ -1,0 +1,30 @@
+# Tasks: Credential-blind integration executor
+
+- [ ] T001 [US1] Extend workflow validation and compilation in `src/outcomeci/config.py`
+- [ ] T002 [US1] Add credential resolver, auth adapters, safe transport, and projection in `src/outcomeci/integrations.py`
+- [ ] T003 [US1] Add list, describe, and execute commands in `src/outcomeci/cli.py`
+- [ ] T004 [US1] Add execution boundary tests in `tests/test_integrations.py`
+- [ ] T005 [US2] Add schema, OpenAPI, and full-access compilation contracts in `src/outcomeci/config.py`
+- [ ] T006 [US2] Add origin, method, private-network, and runtime override rejection tests in `tests/test_integrations.py`
+- [ ] T007 [US3] Add patch proposal and optimistic application primitives in `src/outcomeci/integrations.py`
+- [ ] T008 [US3] Add patch CLI commands and lineage tests in `src/outcomeci/cli.py` and `tests/test_integrations.py`
+- [x] T009 Document the authoring and security model in `README.md`
+- [x] T010 Run formatting, lint, type-neutral compilation, and the full CLI test suite
+- [x] T011 Record the ecosystem consumption roadmap in `ECOSYSTEM_ROADMAP.md`
+- [x] T012 Publish and package a versioned `outcome.yml` JSON Schema
+- [x] T013 Add CLI schema discovery and export commands
+- [x] T014 Unify API capabilities and human hooks as typed phase integrations
+- [x] T015 Update generated templates and current-version docs to emit typed integrations
+- [x] T016 Add side-effect, approval, and idempotency metadata to operations
+- [x] T017 Add migration, schema, policy, and CLI tests
+- [x] T018 Add a credential-blind phase dry-run
+- [x] T019 Add integration configuration, credential-reference, and connectivity diagnostics
+- [x] T020 Add stable, credential-safe integration error envelopes
+- [x] T021 Add reproducible `outcome.lock` generation and verification
+- [x] T022 Add locally reusable, versioned integration packages pinned by the lock
+- [x] T023 Project phase-authorized capabilities through a credential-blind MCP server
+- [x] T024 Add a baseline runtime conformance command and runnable example
+- [x] T025 Document compatibility guarantees and the productionized runtime surface
+- [x] T026 Add encrypted local Vault lifecycle and credential resolution for offline runners
+- [x] T027 Mask local Vault keys from agent subprocesses and cloud synchronization
+- [x] T028 Document offline CLI and container operation

@@ -20,6 +20,19 @@ def test_publish_uses_trusted_publishing() -> None:
     assert "environment: pypi" in source
     assert "outcomeci/spareparts-changelog@v0" in source
     assert "releases/outcomeci-cli/" in source
+    assert "codeartifact login --tool pip" in source
+    assert "python -m build" not in source
+    assert "gh workflow run homebrew.yml" in source
+
+
+def test_merge_release_stays_internal_until_promotion() -> None:
+    semantic = (ROOT / ".github/workflows/semantic-release.yml").read_text()
+    internal = (ROOT / ".github/workflows/internal-release.yml").read_text()
+    proof = (ROOT / ".github/workflows/proof-runner-container.yml").read_text()
+    assert "gh workflow run publish.yml" not in semantic
+    assert "codeartifact login --tool twine" in internal
+    assert "outcomeci-proof-runner" in proof
+    assert "docker push" in proof
 
 
 def test_homebrew_release_targets_outcomeci_package_and_tap() -> None:

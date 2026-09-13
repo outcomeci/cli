@@ -14,7 +14,7 @@ def _broker_without_socket(tmp_path: Path, monkeypatch):
     initialize(tmp_path, "filesystem")
     workflow = tmp_path / "outcome.yml"
     value = yaml.safe_load(workflow.read_text())
-    hook = value["spec"]["agents"]["phases"]["intake"]["humans"]["after"][0]
+    hook = value["spec"]["agents"]["phases"]["intake"]["integrations"][0]
     hook["delivery"] = {
         "type": "slack",
         "connection": "slack_local",

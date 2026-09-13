@@ -79,6 +79,29 @@ def test_secure_execution_masks_connection_defined_credentials(monkeypatch, tmp_
     assert "PEOPLE_TOKEN" not in calls[0]
 
 
+def test_secure_execution_hides_local_vault_key_file(monkeypatch, tmp_path: Path) -> None:
+    calls = []
+    key = tmp_path / "vault.key"
+    key.write_text("private")
+    monkeypatch.setenv("OUTCOMECI_VAULT_KEY_FILE", str(key))
+    monkeypatch.setattr(
+        process.shutil, "which", lambda name: "/usr/bin/bwrap" if name == "bwrap" else None
+    )
+    monkeypatch.setattr(
+        process,
+        "command",
+        lambda argv, **kwargs: (
+            calls.append((argv, kwargs["env"])) or process.Result(0, "complete", "")
+        ),
+    )
+    process.invoke("codex", None, "prompt", tmp_path, 10, allow_local_auth=True, writable_paths=[])
+    argv, environment = calls[0]
+    assert "OUTCOMECI_VAULT_KEY_FILE" not in environment
+    assert ["--ro-bind", "/dev/null", str(key)] in [
+        argv[index : index + 3] for index in range(len(argv) - 2)
+    ]
+
+
 def test_managed_codex_still_requires_injected_auth(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.delenv("CODEX_HOME", raising=False)

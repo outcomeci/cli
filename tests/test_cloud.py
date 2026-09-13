@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import stat
 from pathlib import Path
@@ -76,6 +77,7 @@ def test_revoked_workspace_key_is_not_sent_to_refresh_endpoint(tmp_path: Path, m
 def test_sync_validates_and_sends_explicit_create_mode(tmp_path: Path, monkeypatch) -> None:
     initialize(tmp_path, "filesystem")
     workflow = tmp_path / "outcome.yml"
+    (tmp_path / ".outcomeci/vault.enc").write_text("encrypted-local-vault")
     captured = {}
 
     def request(path, *, method="GET", body=None):
@@ -92,7 +94,38 @@ def test_sync_validates_and_sends_explicit_create_mode(tmp_path: Path, monkeypat
     assert captured["path"] == "/workspaces/workspace_1/workflow-revisions"
     assert captured["body"]["mode"] == "create"
     assert captured["body"]["content_type"] == "yaml"
+    assert captured["body"]["content"].startswith("apiVersion:")
     assert ".outcomeci/constitution.md" in captured["body"]["files"]
+    assert ".outcomeci/vault.enc" not in captured["body"]["files"]
+
+
+def test_sync_sends_patch_lineage_for_new_version(tmp_path: Path, monkeypatch) -> None:
+    initialize(tmp_path, "filesystem")
+    workflow = tmp_path / "outcome.yml"
+    digest = hashlib.sha256(workflow.read_bytes()).hexdigest()
+    patch = tmp_path / "patch.yml"
+    patch.write_text(
+        "apiVersion: outcomeci.dev/v1alpha1\n"
+        "kind: OutcomeWorkflowPatch\n"
+        "metadata:\n"
+        "  parentRevision: compiled-parent\n"
+        f"  parentContentSha256: {digest}\n"
+        "  reason: Pin discovered operation\n"
+        "  derivedFrom: {run: run-1, phase: intake, agent: codex}\n"
+        "spec: {operations: {add: {}}}\n",
+        encoding="utf-8",
+    )
+    captured = {}
+
+    def request(path, *, method="GET", body=None):
+        captured.update(path=path, method=method, body=body)
+        return 201, {"revision": 2}
+
+    monkeypatch.setattr(cloud, "_authorized_request", request)
+    cloud.sync_workflow(workflow, "workspace_1", "code-outcome", "version", patch_path=patch)
+    assert captured["body"]["expected_parent_sha256"] == digest
+    assert captured["body"]["lineage"]["parent_workflow_revision"] == "compiled-parent"
+    assert captured["body"]["lineage"]["derived_from"]["run"] == "run-1"
 
 
 def test_logout_revokes_before_removing_local_credentials(tmp_path: Path, monkeypatch) -> None:
