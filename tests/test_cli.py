@@ -53,6 +53,34 @@ def test_outcome_lock_commands(tmp_path: Path, capsys) -> None:
     assert json.loads(capsys.readouterr().out)["valid"] is True
 
 
+def test_local_vault_commands_are_offline_and_never_print_values(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    monkeypatch.setenv("OUTCOMECI_CONFIG_HOME", str(tmp_path / "config"))
+    assert main(["vault", "local", "init", "--workspace", str(tmp_path)]) == 0
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                "vault",
+                "local",
+                "put",
+                "linear/api_key",
+                "--value",
+                "top-secret",
+                "--workspace",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    assert "top-secret" not in capsys.readouterr().out
+    assert main(["vault", "local", "list", "--workspace", str(tmp_path)]) == 0
+    output = capsys.readouterr().out
+    assert "linear/api_key" in output
+    assert "top-secret" not in output
+
+
 def test_update_refreshes_managed_skills_but_preserves_workflow(tmp_path: Path) -> None:
     initialize(tmp_path, "filesystem")
     workflow = tmp_path / "outcome.yml"

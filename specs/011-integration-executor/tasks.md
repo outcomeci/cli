@@ -25,3 +25,6 @@
 - [x] T023 Project phase-authorized capabilities through a credential-blind MCP server
 - [x] T024 Add a baseline runtime conformance command and runnable example
 - [x] T025 Document compatibility guarantees and the productionized runtime surface
+- [x] T026 Add encrypted local Vault lifecycle and credential resolution for offline runners
+- [x] T027 Mask local Vault keys from agent subprocesses and cloud synchronization
+- [x] T028 Document offline CLI and container operation

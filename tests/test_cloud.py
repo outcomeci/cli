@@ -77,6 +77,7 @@ def test_revoked_workspace_key_is_not_sent_to_refresh_endpoint(tmp_path: Path, m
 def test_sync_validates_and_sends_explicit_create_mode(tmp_path: Path, monkeypatch) -> None:
     initialize(tmp_path, "filesystem")
     workflow = tmp_path / "outcome.yml"
+    (tmp_path / ".outcomeci/vault.enc").write_text("encrypted-local-vault")
     captured = {}
 
     def request(path, *, method="GET", body=None):
@@ -95,6 +96,7 @@ def test_sync_validates_and_sends_explicit_create_mode(tmp_path: Path, monkeypat
     assert captured["body"]["content_type"] == "yaml"
     assert captured["body"]["content"].startswith("apiVersion:")
     assert ".outcomeci/constitution.md" in captured["body"]["files"]
+    assert ".outcomeci/vault.enc" not in captured["body"]["files"]
 
 
 def test_sync_sends_patch_lineage_for_new_version(tmp_path: Path, monkeypatch) -> None:

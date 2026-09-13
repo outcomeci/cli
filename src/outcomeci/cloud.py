@@ -241,7 +241,9 @@ def sync_workflow(
         for support in sorted(
             item
             for item in support_root.rglob("*")
-            if item.is_file() and "outcomes" not in item.relative_to(support_root).parts
+            if item.is_file()
+            and "outcomes" not in item.relative_to(support_root).parts
+            and item.name != "vault.enc"
         ):
             support_content = support.read_bytes()
             total += len(support_content)

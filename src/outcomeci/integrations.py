@@ -77,6 +77,17 @@ def environment_resolver(reference: str) -> Mapping[str, str] | str:
     return value
 
 
+def local_credential_resolver(root: Path) -> CredentialResolver:
+    def resolve(reference: str) -> Mapping[str, str] | str:
+        if reference.startswith("vault:"):
+            from .local_vault import resolve as resolve_local_vault
+
+            return resolve_local_vault(root, reference)
+        return environment_resolver(reference)
+
+    return resolve
+
+
 def _lookup(value: Any, path: str) -> Any:
     current = value
     for part in path.split(".") if path else []:
@@ -465,7 +476,12 @@ class IntegrationExecutor:
         }
 
 
-def doctor(compiled: dict[str, Any], *, connectivity: bool = False) -> dict[str, Any]:
+def doctor(
+    compiled: dict[str, Any],
+    *,
+    connectivity: bool = False,
+    resolver: CredentialResolver | None = None,
+) -> dict[str, Any]:
     """Inspect configuration and optional reachability without disclosing credentials."""
     checks: list[dict[str, Any]] = []
     for connection in compiled["workflow"]["spec"].get("connections", []):
@@ -474,8 +490,14 @@ def doctor(compiled: dict[str, Any], *, connectivity: bool = False) -> dict[str,
         auth = connection["auth"]
         reference = auth.get("credential")
         configured = True
-        if isinstance(reference, str) and reference.startswith("env:"):
-            configured = bool(os.environ.get(reference.removeprefix("env:")))
+        if isinstance(reference, str):
+            if resolver is not None:
+                try:
+                    resolver(reference)
+                except ExecutionError:
+                    configured = False
+            elif reference.startswith("env:"):
+                configured = bool(os.environ.get(reference.removeprefix("env:")))
         checks.append(
             {
                 "check": "credential_reference",

@@ -26,7 +26,13 @@ from .humans import accept as accept_human_input
 from .humans import assign as assign_human_hook
 from .humans import poll as poll_human_input
 from .humans import request as request_human_input
-from .integrations import IntegrationError, IntegrationExecutor, doctor, import_openapi
+from .integrations import (
+    IntegrationError,
+    IntegrationExecutor,
+    doctor,
+    import_openapi,
+    local_credential_resolver,
+)
 from .integrations import apply_patch as apply_integration_patch
 from .integrations import propose_patch as propose_integration_patch
 from .local import advance as advance_local_outcome
@@ -39,6 +45,9 @@ from .local import respond as respond_local_outcome
 from .local import retry as retry_local_outcome
 from .local import start as start_local_outcome
 from .local import status as local_outcome_status
+from .local_vault import initialize as initialize_local_vault
+from .local_vault import list_entries as list_local_vault_entries
+from .local_vault import put as put_local_vault_entry
 from .locking import verify_lock, write_lock
 from .mcp_server import serve as serve_mcp
 from .outcome import run as run_outcome
@@ -145,6 +154,17 @@ def parser() -> argparse.ArgumentParser:
     vault_revoke = vault_commands.add_parser("revoke")
     vault_revoke.add_argument("entry_id")
     vault_revoke.add_argument("--workspace", required=True)
+    local_vault = vault_commands.add_parser("local", help="Manage an encrypted offline Vault")
+    local_vault_commands = local_vault.add_subparsers(dest="local_vault_command", required=True)
+    local_vault_init = local_vault_commands.add_parser("init")
+    _add_workspace_argument(local_vault_init)
+    local_vault_list = local_vault_commands.add_parser("list")
+    _add_workspace_argument(local_vault_list)
+    local_vault_put = local_vault_commands.add_parser("put")
+    local_vault_put.add_argument("path")
+    local_vault_put.add_argument("--value")
+    local_vault_put.add_argument("--value-stdin", action="store_true")
+    _add_workspace_argument(local_vault_put)
     for name in ("init", "update", "validate", "status"):
         item = commands.add_parser(name)
         item.add_argument("--dir", type=Path, default=Path.cwd())
@@ -375,6 +395,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_json(result)
             return 0
         if args.command == "vault":
+            if args.vault_command == "local":
+                workspace = args.workspace.resolve()
+                if args.local_vault_command == "init":
+                    _print_json(initialize_local_vault(workspace))
+                elif args.local_vault_command == "list":
+                    _print_json(list_local_vault_entries(workspace), sort_keys=True)
+                else:
+                    value = (
+                        sys.stdin.read()
+                        if args.value_stdin
+                        else args.value
+                        if args.value is not None
+                        else getpass.getpass("Secret value: ")
+                    )
+                    _print_json(put_local_vault_entry(workspace, args.path, value))
+                return 0
             if args.vault_command == "list":
                 result = vault_request(args.workspace, "list")
             elif args.vault_command in {"put", "rotate"}:
@@ -692,7 +728,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             "mcp",
         }:
             compiled = compile_workflow(_workflow_path(args))
-            executor = IntegrationExecutor(compiled)
+            executor = IntegrationExecutor(
+                compiled, resolver=local_credential_resolver(_workflow_path(args).parent)
+            )
             if args.integration_command == "list":
                 _print_json({"capabilities": executor.capabilities(args.phase)}, sort_keys=True)
             elif args.integration_command == "describe":
@@ -700,7 +738,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             elif args.integration_command == "dry-run":
                 _print_json(executor.dry_run(args.phase), sort_keys=True)
             elif args.integration_command == "doctor":
-                result = doctor(compiled, connectivity=args.connectivity)
+                result = doctor(
+                    compiled,
+                    connectivity=args.connectivity,
+                    resolver=local_credential_resolver(_workflow_path(args).parent),
+                )
                 _print_json(result, sort_keys=True)
                 return 0 if result["ok"] else 2
             elif args.integration_command == "mcp":

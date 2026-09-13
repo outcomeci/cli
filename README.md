@@ -80,6 +80,23 @@ oci outcome verify-lock
 oci conformance --workflow ./outcome.yml
 ```
 
+For an entirely offline runtime, create an encrypted local Vault and reference
+logical paths from connections:
+
+```sh
+oci vault local init
+oci vault local put linear/api_key
+oci vault local list
+```
+
+```yaml
+auth: {type: bearer, credential: vault:linear/api_key}
+```
+
+The encrypted workspace file and its AES-256-GCM key are stored separately.
+Containers receive the key through a read-only file mounted at the path named
+by `OUTCOMECI_VAULT_KEY_FILE`; agent sandboxes cannot read that mount.
+
 ```yaml
 spec:
   agents:

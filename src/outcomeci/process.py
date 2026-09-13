@@ -102,6 +102,7 @@ def invoke(
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "CLAUDE_CODE_OAUTH_TOKEN",
+        "OUTCOMECI_VAULT_KEY_FILE",
     }
     secrets.update(excluded_env or set())
     env = {key: value for key, value in os.environ.items() if key not in secrets}
@@ -161,6 +162,9 @@ def invoke(
         for agent_home in (Path.home() / ".codex", Path.home() / ".claude"):
             if agent_home.exists():
                 wrapper += ["--bind", str(agent_home), str(agent_home)]
+        vault_key = os.environ.get("OUTCOMECI_VAULT_KEY_FILE")
+        if vault_key and Path(vault_key).is_file():
+            wrapper += ["--ro-bind", "/dev/null", str(Path(vault_key).resolve())]
         for writable in writable_paths:
             wrapper += ["--bind", str(writable), str(writable)]
         wrapper += ["--"]

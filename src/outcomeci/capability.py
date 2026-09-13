@@ -15,7 +15,7 @@ from typing import Any
 
 from .config import compile_workflow
 from .humans import accept, poll, request, transport_responses
-from .integrations import IntegrationExecutor
+from .integrations import IntegrationExecutor, local_credential_resolver
 from .process import ExecutionError
 
 
@@ -46,7 +46,7 @@ class Broker:
             and hook.get("delivery", {}).get("targets")
         }
         self.root, self.config, self.run_id, self.phase = root, config, run_id, phase
-        self.integrations = IntegrationExecutor(compiled)
+        self.integrations = IntegrationExecutor(compiled, resolver=local_credential_resolver(root))
         self.token = secrets.token_urlsafe(32)
         self.server = _Server(str(socket_path), _Handler)
         self.server.dispatch = self.dispatch  # type: ignore[attr-defined]
