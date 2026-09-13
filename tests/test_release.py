@@ -30,7 +30,13 @@ def test_merge_release_stays_internal_until_promotion() -> None:
     internal = (ROOT / ".github/workflows/internal-release.yml").read_text()
     proof = (ROOT / ".github/workflows/proof-runner-container.yml").read_text()
     assert "gh workflow run publish.yml" not in semantic
+    assert "gh workflow run internal-release.yml" in semantic
+    assert "gh workflow run proof-runner-container.yml" in semantic
+    assert "workflow_dispatch:" in internal
+    assert "ref: ${{ inputs.tag || github.ref }}" in internal
     assert "codeartifact login --tool twine" in internal
+    assert "workflow_dispatch:" in proof
+    assert "REQUESTED_TAG: ${{ inputs.tag }}" in proof
     assert "outcomeci-proof-runner" in proof
     assert "docker push" in proof
 

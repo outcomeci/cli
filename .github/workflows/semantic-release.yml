@@ -9,6 +9,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
+  actions: write
   contents: write
 
 jobs:
@@ -45,3 +46,11 @@ jobs:
           git push origin "$TAG"
           echo "released=true" >> "$GITHUB_OUTPUT"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+      - name: Publish tagged candidates internally
+        if: steps.version.outputs.released == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          gh workflow run internal-release.yml --ref main -f tag="$TAG"
+          gh workflow run proof-runner-container.yml --ref main -f tag="$TAG"
