@@ -23,17 +23,34 @@ def _fake_invoke(agent: str, model: str | None, prompt: str, workspace: Path, ti
         assert revision
         target = root / "intake" / "trajectory.json"
         target.parent.mkdir(parents=True)
-        target.write_text(json.dumps({
-            "schema_version": "1",
-            "ontology_revision_id": revision.group(1),
-            "targets": [{"repository_id": f"local:{workspace.name}", "repository": workspace.name, "rationale": "local repository", "candidates": []}],
-        }))
+        target.write_text(
+            json.dumps(
+                {
+                    "schema_version": "1",
+                    "ontology_revision_id": revision.group(1),
+                    "targets": [
+                        {
+                            "repository_id": f"local:{workspace.name}",
+                            "repository": workspace.name,
+                            "rationale": "local repository",
+                            "candidates": [],
+                        }
+                    ],
+                }
+            )
+        )
     elif "# Plan phase" in prompt:
-        for path in (root / "specs" / workspace.name / "spec.md", root / "plans" / workspace.name / "plan.md"):
+        for path in (
+            root / "specs" / workspace.name / "spec.md",
+            root / "plans" / workspace.name / "plan.md",
+        ):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("complete\n")
     elif "# Tasks phase" in prompt:
-        for path in (root / "tasks" / "repositories" / f"{workspace.name}.md", root / "tasks" / "tasks.md"):
+        for path in (
+            root / "tasks" / "repositories" / f"{workspace.name}.md",
+            root / "tasks" / "tasks.md",
+        ):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text("complete\n")
     return "phase complete"
@@ -42,7 +59,9 @@ def _fake_invoke(agent: str, model: str | None, prompt: str, workspace: Path, ti
 def test_local_start_and_continue_through_tasks(tmp_path: Path, monkeypatch) -> None:
     initialize(tmp_path, "filesystem")
     monkeypatch.setattr(local, "invoke", _fake_invoke)
-    monkeypatch.setattr(local, "_transcripts", lambda *args: {"usage_records": 0, "files": [], "usage": []})
+    monkeypatch.setattr(
+        local, "_transcripts", lambda *args: {"usage_records": 0, "files": [], "usage": []}
+    )
 
     state = local.start(tmp_path, tmp_path / "outcome.yml", "Improve local onboarding")
     assert state["status"] == "awaiting_input"
@@ -80,7 +99,14 @@ def test_interactive_session_lifecycle(tmp_path: Path) -> None:
     validated = local.validate_artifacts(tmp_path, tmp_path / "outcome.yml", state["run_id"])
     assert validated["status"] == "awaiting_input"
 
-    answered = local.respond(tmp_path, tmp_path / "outcome.yml", state["run_id"], "confirm_intent", "The scope is correct.", approve=True)
+    answered = local.respond(
+        tmp_path,
+        tmp_path / "outcome.yml",
+        state["run_id"],
+        "confirm_intent",
+        "The scope is correct.",
+        approve=True,
+    )
     assert answered["status"] == "awaiting_confirmation"
     advanced = local.advance(tmp_path, tmp_path / "outcome.yml", state["run_id"], True)
     assert advanced["phase"] == "plan"
@@ -104,7 +130,9 @@ def test_declared_json_schema_is_enforced(tmp_path: Path) -> None:
     compiled = local.compile_workflow(tmp_path / "outcome.yml")
     contract = compiled["instructions"]["phases"]["intake"]["expects"]["outputs"][0]
     contract["schema"] = ".outcomeci/schemas/test.json"
-    compiled["instructions"]["schemas"][contract["schema"]] = {"value": {"type": "object", "required": ["intent"]}}
+    compiled["instructions"]["schemas"][contract["schema"]] = {
+        "value": {"type": "object", "required": ["intent"]}
+    }
     outcome = tmp_path / ".outcomeci" / "outcomes" / "test"
     artifact = outcome / contract["path"]
     artifact.parent.mkdir(parents=True)
@@ -119,15 +147,34 @@ def test_before_interaction_is_durable_and_resumes_execution(tmp_path: Path, mon
     value = yaml.safe_load(workflow.read_text())
     intake = value["spec"]["agents"]["phases"]["intake"]
     intake["humans"] = {
-        "before": [{"id": "confirm_direction", "participant": "requester", "purpose": "Stop a bad direction.", "interaction": "approval"}],
-        "during": [{"id": "ask_expert", "participant": "domain_expert", "purpose": "Resolve domain questions.", "interaction": "consultation", "availability": "on_demand"}],
+        "before": [
+            {
+                "id": "confirm_direction",
+                "participant": "requester",
+                "purpose": "Stop a bad direction.",
+                "interaction": "approval",
+            }
+        ],
+        "during": [
+            {
+                "id": "ask_expert",
+                "participant": "domain_expert",
+                "purpose": "Resolve domain questions.",
+                "interaction": "consultation",
+                "availability": "on_demand",
+            }
+        ],
     }
     workflow.write_text(yaml.safe_dump(value, sort_keys=False))
     monkeypatch.setattr(local, "invoke", _fake_invoke)
-    monkeypatch.setattr(local, "_transcripts", lambda *args: {"usage_records": 0, "files": [], "usage": []})
+    monkeypatch.setattr(
+        local, "_transcripts", lambda *args: {"usage_records": 0, "files": [], "usage": []}
+    )
     state = local.start(tmp_path, workflow, "Improve onboarding")
     assert state["status"] == "awaiting_input"
     request = Path(state["pending_interaction"]["path"])
     assert json.loads(request.read_text())["timing"] == "before"
-    state = local.respond(tmp_path, workflow, state["run_id"], "confirm_direction", "Proceed.", approve=True)
+    state = local.respond(
+        tmp_path, workflow, state["run_id"], "confirm_direction", "Proceed.", approve=True
+    )
     assert state["status"] == "awaiting_confirmation"

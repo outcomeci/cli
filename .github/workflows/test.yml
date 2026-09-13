@@ -6,6 +6,18 @@ on:
     branches: [main]
 
 jobs:
+  quality:
+    name: formatting and lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - run: pip install -e '.[test]'
+      - run: ruff format --check src tests
+      - run: ruff check src tests
+
   pytest:
     name: pytest on Python ${{ matrix.python-version }}
     runs-on: ubuntu-latest

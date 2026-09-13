@@ -58,3 +58,8 @@ spec:
 Compiled context records each matched path, size, and SHA-256 hash. Context
 changes therefore produce a new workflow revision. Files remain in place and
 are read by the active local agent; they are not copied into `outcome.yml`.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the supported Python versions and the
+formatting, lint, test, and package checks used by CI.

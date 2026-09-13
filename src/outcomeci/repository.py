@@ -1,4 +1,5 @@
 """OutcomeCI repository lifecycle."""
+
 from __future__ import annotations
 
 from pathlib import Path
@@ -44,7 +45,9 @@ def update(root: Path) -> list[str]:
 
 def validate(root: Path) -> dict:
     if (root / ".sp").exists():
-        raise RepositoryError("legacy .sp context is not supported; initialize a clean OutcomeCI repository")
+        raise RepositoryError(
+            "legacy .sp context is not supported; initialize a clean OutcomeCI repository"
+        )
     try:
         return compile_workflow(root / "outcome.yml")
     except ConfigError as exc:

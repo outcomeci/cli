@@ -1,4 +1,5 @@
 """Small subprocess and GitHub boundaries for outcome execution."""
+
 from __future__ import annotations
 
 import base64
@@ -21,9 +22,25 @@ class Result:
     stderr: str
 
 
-def command(argv: list[str], *, cwd: Path, timeout: int = 300, input_text: str | None = None, env: dict[str, str] | None = None) -> Result:
+def command(
+    argv: list[str],
+    *,
+    cwd: Path,
+    timeout: int = 300,
+    input_text: str | None = None,
+    env: dict[str, str] | None = None,
+) -> Result:
     try:
-        value = subprocess.run(argv, cwd=cwd, input=input_text, text=True, capture_output=True, timeout=timeout, env=env or os.environ.copy(), check=False)
+        value = subprocess.run(
+            argv,
+            cwd=cwd,
+            input=input_text,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            env=env or os.environ.copy(),
+            check=False,
+        )
     except subprocess.TimeoutExpired as exc:
         raise ExecutionError(f"command timed out after {timeout}s: {argv[0]}", True) from exc
     return Result(value.returncode, value.stdout[-20000:], value.stderr[-20000:])
@@ -45,17 +62,35 @@ class GitHub:
     def run(self, argv: list[str], cwd: Path, timeout: int = 300) -> str:
         result = command(argv, cwd=cwd, timeout=timeout, env=self.env)
         if result.code:
-            raise ExecutionError(f"{argv[0]} failed: {(result.stderr or result.stdout)[-1000:]}", True)
+            raise ExecutionError(
+                f"{argv[0]} failed: {(result.stderr or result.stdout)[-1000:]}", True
+            )
         return result.stdout.strip()
 
     def clone(self, repository: str, path: Path) -> None:
-        result = command(["git", "clone", "--filter=blob:none", f"https://github.com/{repository}.git", str(path)], cwd=path.parent, env=self.env)
+        result = command(
+            [
+                "git",
+                "clone",
+                "--filter=blob:none",
+                f"https://github.com/{repository}.git",
+                str(path),
+            ],
+            cwd=path.parent,
+            env=self.env,
+        )
         if result.code:
             raise ExecutionError(f"git clone failed: {result.stderr[-1000:]}", True)
 
 
 def invoke(agent: str, model: str | None, prompt: str, workspace: Path, timeout: int) -> str:
-    secrets = {"GITHUB_TOKEN", "GH_TOKEN", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"}
+    secrets = {
+        "GITHUB_TOKEN",
+        "GH_TOKEN",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "CLAUDE_CODE_OAUTH_TOKEN",
+    }
     env = {key: value for key, value in os.environ.items() if key not in secrets}
     if agent == "codex":
         if not os.environ.get("OPENAI_API_KEY") and not os.environ.get("CODEX_HOME"):
@@ -82,6 +117,8 @@ def invoke(agent: str, model: str | None, prompt: str, workspace: Path, timeout:
         raise ExecutionError(f"unsupported agent: {agent}")
     result = command(argv, cwd=workspace, timeout=timeout, input_text=input_text, env=env)
     if result.code:
-        raise ExecutionError(f"{agent} failed with exit {result.code}: {(result.stderr or result.stdout)[-1000:]}", True)
+        raise ExecutionError(
+            f"{agent} failed with exit {result.code}: {(result.stderr or result.stdout)[-1000:]}",
+            True,
+        )
     return result.stdout.strip()[-4000:]
-
