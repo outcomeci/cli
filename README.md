@@ -13,6 +13,24 @@ Repository context and workflow instructions live in `.outcomeci/`. The same
 `outcome.yml` contract can run locally or use OutcomeCI Cloud for managed state,
 Digital Twin context, expert messaging, credentials, and runners.
 
+Every workflow declares at least one trigger. Local interactive execution uses
+an explicit manual trigger; managed workflows may start from durable events:
+
+```yaml
+spec:
+  triggers:
+    manual:
+      type: manual
+    inbound_email:
+      type: email.received
+      filters:
+        subject_prefix: Customer outcome
+```
+
+Phase inputs reference the immutable trigger payload with
+`from: trigger.inbound_email`. Email payloads contain safe metadata and
+encrypted artifact references, not plaintext attachments or encryption keys.
+
 To run the discovery phases with a locally installed Codex or Claude Code:
 
 ```console
@@ -57,8 +75,20 @@ docker run --rm --network none --tmpfs /proof:rw,noexec,nosuid,uid=10001,gid=100
 
 Pass/fail evidence is written as a machine-readable report and hash-linked
 event ledger. `proof.yml` holds exactly one persona journey. The first release
-ships only the bundled `local-first-v1` definition; mounted customer workflow
-proofs will use the same contract after the reference journey is stable.
+ships `local-first-v1` for offline runtime durability and `email-trigger-v1`
+for managed ingress. The managed proof uses only a workspace API key and sends
+a fixed MIME message through the real SES ingress:
+
+```console
+export OUTCOMECI_PROOF_API_URL=https://staging-api.outcomeci.com
+export OUTCOMECI_PROOF_WORKSPACE_ID=workspace_example
+read -rsp "Workspace API key: " OUTCOMECI_PROOF_API_KEY
+export OUTCOMECI_PROOF_API_KEY
+oci proof run --name email-trigger-v1 --workspace ./proof-runs
+```
+
+It waits for encrypted artifact persistence, exactly-once workflow invocation,
+and real metered usage, then prints a redacted `email received` receipt.
 
 Filesystem workflows can pin repository evidence explicitly:
 

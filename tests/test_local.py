@@ -121,6 +121,16 @@ def test_interactive_session_lifecycle(tmp_path: Path) -> None:
     assert advanced["status"] == "awaiting_agent"
 
 
+def test_manual_execution_requires_manual_trigger(tmp_path: Path) -> None:
+    initialize(tmp_path, "filesystem")
+    path = tmp_path / "outcome.yml"
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["triggers"] = {"mail": {"type": "email.received"}}
+    path.write_text(yaml.safe_dump(value, sort_keys=False))
+    with pytest.raises(ExecutionError, match="manual trigger"):
+        local.begin(tmp_path, path, "This must arrive by email")
+
+
 def test_ready_set_supports_parallel_phases_and_join(tmp_path: Path) -> None:
     initialize(tmp_path, "filesystem")
     compiled = local.compile_workflow(tmp_path / "outcome.yml")

@@ -1,0 +1,37 @@
+apiVersion: outcomeci.dev/v1alpha1
+kind: OutcomeProof
+metadata:
+  name: email-trigger-v1
+  version: 1.0.0
+spec:
+  persona:
+    name: managed_email_user
+    version: 1.0.0
+    starting_state:
+      account: authenticated
+      workspace: isolated
+      network: managed_cloud
+      credentials: workspace_api_key
+  journey:
+    - {id: initialize, action: workspace.initialize}
+    - {id: authenticate, action: cloud.authenticate}
+    - {id: configure_workflow, action: workflow.configure_email}
+    - {id: validate_workflow, action: workflow.validate}
+    - {id: synchronize_workflow, action: workflow.sync}
+    - {id: send_email, action: email.send}
+    - {id: wait_for_trigger, action: email.wait, with: {timeout_seconds: 180}}
+    - {id: log_receipt, action: console.log}
+  faults: []
+  assertions:
+    - email.ingress_processed
+    - email.triggered_exactly_once
+    - email.artifacts_encrypted
+    - email.usage_metered
+    - email.cost_attributed
+    - email.content_not_exposed
+    - workflow.completed
+    - workflow.receipt_logged
+    - recovery.is_bounded
+  output:
+    report: proof-report.json
+    ledger: proof-events.jsonl

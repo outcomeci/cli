@@ -29,6 +29,7 @@ def workflow(tmp_path: Path) -> Path:
         "kind": "OutcomeWorkflow",
         "metadata": {"name": "delivery"},
         "spec": {
+            "triggers": {"manual": {"type": "manual"}},
             "backend": {"provider": "filesystem"},
             "context": {"provider": "filesystem", "include": []},
             "instructions": {"standup": {"path": ".outcomeci/instructions/standup.md"}},

@@ -54,6 +54,7 @@ from .outcome import run as run_outcome
 from .process import ExecutionError
 from .repository import RepositoryError, initialize, update, validate
 from .schema import export_schema, load_schema, schema_path
+from .simulation import bundled_definition
 from .simulation import run as run_simulation
 from .slack import SlackError
 from .slack import manifest as slack_manifest
@@ -174,7 +175,9 @@ def parser() -> argparse.ArgumentParser:
     proof = commands.add_parser("proof", help="Run ecosystem persona durability proofs")
     proof_commands = proof.add_subparsers(dest="proof_command", required=True)
     proof_run = proof_commands.add_parser("run")
-    proof_run.add_argument("--definition", type=Path)
+    proof_source = proof_run.add_mutually_exclusive_group()
+    proof_source.add_argument("--definition", type=Path)
+    proof_source.add_argument("--name", choices=("local-first-v1", "email-trigger-v1"))
     proof_run.add_argument("--workspace", type=Path, default=Path("/proof"))
     proof_run.add_argument("--report", type=Path)
     outcome = commands.add_parser("outcome")
@@ -364,7 +367,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         if args.command == "proof":
-            result = run_simulation(args.definition, args.workspace, args.report)
+            definition = args.definition or (bundled_definition(args.name) if args.name else None)
+            result = run_simulation(definition, args.workspace, args.report)
             _print_json(result, sort_keys=True)
             return 0 if result["status"] == "passed" else 2
         if args.command == "schema":

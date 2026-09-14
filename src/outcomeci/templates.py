@@ -5,6 +5,9 @@ kind: OutcomeWorkflow
 metadata:
   name: default
 spec:
+  triggers:
+    manual:
+      type: manual
   backend:
     provider: outcomeci
   context:

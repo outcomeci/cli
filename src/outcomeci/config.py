@@ -21,6 +21,7 @@ HTTP_METHODS = {"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"}
 SIDE_EFFECTS = {"read", "create", "update", "delete", "execute"}
 APPROVAL_POLICIES = {"none", "required", "inherit"}
 IDEMPOTENCY_POLICIES = {"none", "supported", "required"}
+TRIGGER_TYPES = {"manual", "email.received"}
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9_-]{0,62}$")
 
 
@@ -276,6 +277,61 @@ def _named_items(value: Any, field: str) -> list[dict[str, Any]]:
     return [{"ref": name, **_mapping(item, f"{field}.{name}")} for name, item in values.items()]
 
 
+def _triggers(value: Any) -> dict[str, dict[str, Any]]:
+    raw = _mapping(value, "spec.triggers")
+    if not raw:
+        raise ConfigError("spec.triggers must define at least one trigger")
+    normalized: dict[str, dict[str, Any]] = {}
+    for name, trigger_value in raw.items():
+        field = f"spec.triggers.{name}"
+        if not isinstance(name, str) or not IDENTIFIER.fullmatch(name):
+            raise ConfigError("trigger names must be valid identifiers")
+        trigger = _mapping(trigger_value, field)
+        trigger_type = trigger.get("type")
+        if trigger_type not in TRIGGER_TYPES:
+            raise ConfigError(f"{field}.type is unsupported")
+        unknown = set(trigger) - {"type", "filters"}
+        if unknown:
+            raise ConfigError(f"{field} has unknown fields: {', '.join(sorted(unknown))}")
+        filters = _mapping(trigger.get("filters", {}), f"{field}.filters")
+        if trigger_type == "manual" and filters:
+            raise ConfigError(f"{field}.filters are not supported for manual triggers")
+        allowed_filters = {"senders", "subject_prefix"}
+        unknown_filters = set(filters) - allowed_filters
+        if unknown_filters:
+            raise ConfigError(
+                f"{field}.filters has unknown fields: {', '.join(sorted(unknown_filters))}"
+            )
+        senders = filters.get("senders", [])
+        if not isinstance(senders, list) or not all(
+            isinstance(sender, str) and sender.strip() for sender in senders
+        ):
+            raise ConfigError(f"{field}.filters.senders must be a list of email addresses")
+        subject_prefix = filters.get("subject_prefix")
+        if subject_prefix is not None and (
+            not isinstance(subject_prefix, str) or not subject_prefix.strip()
+        ):
+            raise ConfigError(f"{field}.filters.subject_prefix must be non-empty")
+        normalized[name] = {
+            "type": trigger_type,
+            **(
+                {
+                    "filters": {
+                        **({"senders": sorted(set(senders))} if senders else {}),
+                        **(
+                            {"subject_prefix": subject_prefix.strip()}
+                            if isinstance(subject_prefix, str)
+                            else {}
+                        ),
+                    }
+                }
+                if filters
+                else {}
+            ),
+        }
+    return normalized
+
+
 def _http_origin(value: Any, field: str) -> str:
     if not isinstance(value, str):
         raise ConfigError(f"{field} must be an HTTPS URL")
@@ -495,6 +551,8 @@ def load(path: Path) -> dict[str, Any]:
         raise ConfigError("metadata.name is required")
     spec = _mapping(root.get("spec"), "spec")
     _load_integration_packages(path.resolve(), spec)
+    triggers = _triggers(spec.get("triggers"))
+    spec["triggers"] = triggers
     for field, choices in (
         ("backend", {"outcomeci", "filesystem"}),
         ("context", {"outcomeci", "http", "filesystem"}),
@@ -588,6 +646,13 @@ def load(path: Path) -> dict[str, Any]:
         for item in phase["inputs"]:
             source = item["from"]
             if source.startswith(("runtime.", "context.")):
+                continue
+            if source.startswith("trigger."):
+                trigger_name = source.removeprefix("trigger.")
+                if trigger_name not in triggers:
+                    raise ConfigError(
+                        f"input {phase_name}.{item['name']} references unknown trigger {trigger_name}"
+                    )
                 continue
             match = re.fullmatch(
                 r"([a-z][a-z0-9_-]{0,62})\.outputs\.([a-z][a-z0-9_-]{0,62})", source
@@ -759,6 +824,7 @@ def load(path: Path) -> dict[str, Any]:
         "levels": levels,
         "phases": normalized_phases,
         "default_policy": default,
+        "triggers": triggers,
     }
     return root
 
@@ -848,6 +914,7 @@ def compile_workflow(path: Path) -> dict[str, Any]:
         "graph": {"levels": graph["levels"]},
         "instructions": resolved,
         "context": {"provider": context.get("provider", "outcomeci"), "files": context_files},
+        "triggers": graph["triggers"],
     }
     revision = hashlib.sha256(
         json.dumps(revision_input, sort_keys=True, separators=(",", ":")).encode()

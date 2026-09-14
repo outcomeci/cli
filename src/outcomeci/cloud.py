@@ -192,6 +192,26 @@ def _authorized_request(
     return status, value
 
 
+def start_email_trigger_proof(workspace_id: str) -> dict[str, Any]:
+    status, value = _authorized_request(
+        f"/workspaces/{workspace_id}/email-trigger-proofs", method="POST", body={}
+    )
+    if status != 202 or not isinstance(value, dict):
+        detail = value.get("detail") if isinstance(value, dict) else None
+        raise ExecutionError(str(detail or "could not start email trigger proof"))
+    return value
+
+
+def get_email_trigger_proof(workspace_id: str, proof_id: str) -> dict[str, Any]:
+    status, value = _authorized_request(
+        f"/workspaces/{workspace_id}/email-trigger-proofs/{proof_id}"
+    )
+    if status != 200 or not isinstance(value, dict):
+        detail = value.get("detail") if isinstance(value, dict) else None
+        raise ExecutionError(str(detail or "could not read email trigger proof"))
+    return value
+
+
 def sync_workflow(
     path: Path,
     workspace_id: str,

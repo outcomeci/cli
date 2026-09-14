@@ -8,6 +8,7 @@ import json
 import os
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -15,6 +16,12 @@ from typing import Any
 import httpx
 import yaml
 
+from .cloud import (
+    get_email_trigger_proof,
+    login_with_key,
+    start_email_trigger_proof,
+    sync_workflow,
+)
 from .config import compile_workflow
 from .integrations import IntegrationExecutor, local_credential_resolver
 from .local import advance, begin, compile_context, respond, validate_artifacts
@@ -77,6 +84,30 @@ def _configure(root: Path) -> None:
     }
     intake = spec["agents"]["phases"]["intake"]
     intake["integrations"].insert(0, {"type": "api", "capability": "simulation.verify"})
+    path.write_text(yaml.safe_dump(workflow, sort_keys=False), encoding="utf-8")
+
+
+def _configure_email(root: Path) -> None:
+    path = root / "outcome.yml"
+    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+    proof_name = root.parent.name.replace("_", "-")
+    workflow["metadata"]["name"] = f"email-{proof_name}"[:100]
+    workflow["spec"]["backend"] = {"provider": "outcomeci"}
+    workflow["spec"]["context"] = {"provider": "outcomeci"}
+    workflow["spec"]["triggers"] = {
+        "inbound_email": {
+            "type": "email.received",
+            "filters": {"subject_prefix": "OutcomeCI email trigger proof"},
+        }
+    }
+    intake = workflow["spec"]["agents"]["phases"]["intake"]
+    intake["expects"]["inputs"] = [
+        {
+            "name": "email",
+            "from": "trigger.inbound_email",
+            "media_type": "application/json",
+        }
+    ]
     path.write_text(yaml.safe_dump(workflow, sort_keys=False), encoding="utf-8")
 
 
@@ -157,6 +188,43 @@ def _materialize(root: Path, phase: str) -> dict[str, Any]:
 
 def _assertions(root: Path, request: dict[str, Any]) -> dict[str, Any]:
     context = _read(root)
+    if context.get("email_proof") is not None:
+        proof = context["email_proof"]
+        events = proof.get("events", [])
+        logs = [event for event in events if event.get("event_type") == "console.logged"]
+        usage = proof.get("usage", [])
+        checks = {
+            "email.ingress_processed": proof.get("ingress_status") == "processed",
+            "email.triggered_exactly_once": proof.get("invocation_count") == 1
+            and len([event for event in events if event.get("event_type") == "trigger.received"])
+            == 1,
+            "email.artifacts_encrypted": int(proof.get("artifact_count", 0)) >= 2,
+            "email.usage_metered": {item.get("meter") for item in usage}
+            >= {"email_inbound_message", "email_inbound_chunk", "email_outbound_recipient"},
+            "email.cost_attributed": all(
+                item.get("internal_cost_usd") is not None
+                and item.get("customer_charge_usd") is not None
+                for item in usage
+            ),
+            "email.content_not_exposed": "This generated message" not in json.dumps(proof),
+            "workflow.completed": proof.get("invocation_status") == "completed",
+            "workflow.receipt_logged": len(logs) == 1,
+            "recovery.is_bounded": int(request.get("recoveries", 0)) == 0,
+        }
+        expected = request.get("expected", [])
+        failed = [name for name in expected if not checks.get(name, False)]
+        if failed:
+            raise ExecutionError(f"failed durability assertions: {', '.join(failed)}")
+        context["final_state"] = {
+            "status": proof["status"],
+            "proof_id": proof["proof_id"],
+            "usage": usage,
+        }
+        _write(root, context)
+        return {
+            "status": "passed",
+            "assertions": [{"name": name, "passed": checks[name]} for name in expected],
+        }
     run_id = context["run_id"]
     run = json.loads((root / ".outcomeci/outcomes" / run_id / "run.json").read_text())
     token = str(resolve_vault(root, "vault:simulation/api_token"))
@@ -254,6 +322,72 @@ def execute(action: str, root: Path, request: dict[str, Any], fault: bool) -> di
             approve=True,
         )
         return {"status": result["status"]}
+    if action == "cloud.authenticate":
+        api_url = os.environ.get("OUTCOMECI_PROOF_API_URL", "").strip()
+        api_key = os.environ.get("OUTCOMECI_PROOF_API_KEY", "").strip()
+        workspace_id = os.environ.get("OUTCOMECI_PROOF_WORKSPACE_ID", "").strip()
+        if not api_url or not api_key or not workspace_id:
+            raise ExecutionError(
+                "email proof requires OUTCOMECI_PROOF_API_URL, OUTCOMECI_PROOF_API_KEY, and OUTCOMECI_PROOF_WORKSPACE_ID"
+            )
+        login_with_key(api_url, api_key)
+        context["workspace_id"] = workspace_id
+        _write(root, context)
+        return {"status": "authenticated", "workspace_id": workspace_id}
+    if action == "workflow.configure_email":
+        _configure_email(root)
+        return {"status": "configured"}
+    if action == "workflow.sync":
+        compiled = compile_workflow(root / "outcome.yml")
+        result = sync_workflow(
+            root / "outcome.yml",
+            context["workspace_id"],
+            None,
+            "create",
+        )
+        context["workflow_revision"] = compiled["workflow_revision"]
+        _write(root, context)
+        return {"status": "synchronized", "revision": result.get("revision")}
+    if action == "email.send":
+        result = start_email_trigger_proof(context["workspace_id"])
+        context["email_proof_id"] = result["proof_id"]
+        _write(root, context)
+        return {"status": result["status"], "proof_id": result["proof_id"]}
+    if action == "email.wait":
+        timeout = int(request.get("timeout_seconds", 180))
+        deadline = time.monotonic() + min(max(timeout, 1), 600)
+        while time.monotonic() < deadline:
+            result = get_email_trigger_proof(context["workspace_id"], context["email_proof_id"])
+            if result.get("status") in {"completed", "failed"}:
+                context["email_proof"] = result
+                _write(root, context)
+                if result["status"] == "failed":
+                    raise ExecutionError("email trigger proof failed")
+                return {
+                    "status": "completed",
+                    "artifact_count": result.get("artifact_count"),
+                    "usage_meters": [item["meter"] for item in result.get("usage", [])],
+                }
+            time.sleep(2)
+        raise ExecutionError("email trigger proof timed out")
+    if action == "console.log":
+        proof = context.get("email_proof") or {}
+        event = next(
+            (
+                item
+                for item in proof.get("events", [])
+                if item.get("event_type") == "console.logged"
+            ),
+            None,
+        )
+        if event is None:
+            raise ExecutionError("email receipt log is unavailable")
+        payload = event.get("payload", {})
+        print(
+            f"email received proof={proof.get('proof_id')} "
+            f"attachments={payload.get('attachment_count', 0)}"
+        )
+        return {"status": "logged", "message": "email received"}
     if action == "outcome.advance":
         result = advance(root, root / "outcome.yml", context["run_id"], True)
         if result["phase"] != request["phase"]:

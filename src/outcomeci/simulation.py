@@ -30,6 +30,12 @@ ALLOWED_ACTIONS = {
     "outcome.execute",
     "human.respond",
     "outcome.advance",
+    "cloud.authenticate",
+    "workflow.configure_email",
+    "workflow.sync",
+    "email.send",
+    "email.wait",
+    "console.log",
 }
 ALLOWED_ASSERTIONS = {
     "workflow.compiles",
@@ -41,11 +47,19 @@ ALLOWED_ASSERTIONS = {
     "artifacts.match_contracts",
     "recovery.is_bounded",
     "final_status.ready_for_implementation",
+    "email.ingress_processed",
+    "email.triggered_exactly_once",
+    "email.artifacts_encrypted",
+    "email.usage_metered",
+    "email.cost_attributed",
+    "email.content_not_exposed",
+    "workflow.completed",
+    "workflow.receipt_logged",
 }
 
 
-def bundled_definition() -> Path:
-    return Path(str(files("outcomeci").joinpath("proofs/local-first-v1.proof.yml")))
+def bundled_definition(name: str = "local-first-v1") -> Path:
+    return Path(str(files("outcomeci").joinpath(f"proofs/{name}.proof.yml")))
 
 
 def load_definition(path: Path) -> dict[str, Any]:
@@ -152,7 +166,17 @@ def _step(
     ]
     if fault:
         argv.append("--fault-after-write")
-    env = {**os.environ, "OUTCOMECI_CONFIG_HOME": str(config_home)}
+    source_root = str(Path(__file__).resolve().parents[1])
+    inherited_pythonpath = os.environ.get("PYTHONPATH", "")
+    env = {
+        **os.environ,
+        "OUTCOMECI_CONFIG_HOME": str(config_home),
+        "PYTHONPATH": (
+            f"{source_root}{os.pathsep}{inherited_pythonpath}"
+            if inherited_pythonpath
+            else source_root
+        ),
+    }
     return subprocess.run(argv, text=True, capture_output=True, env=env, check=False)
 
 

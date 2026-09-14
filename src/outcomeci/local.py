@@ -445,6 +445,8 @@ def start(
     if not intent.strip():
         raise ExecutionError("intent is required")
     compiled = compile_workflow(config)
+    if not any(trigger["type"] == "manual" for trigger in compiled["triggers"].values()):
+        raise ExecutionError("workflow does not declare a manual trigger")
     first = _ready(compiled, [])[0]
     state = {
         "schema_version": 2,
@@ -467,6 +469,8 @@ def begin(root: Path, config: Path, intent: str) -> dict[str, Any]:
     if not intent.strip():
         raise ExecutionError("intent is required")
     compiled = compile_workflow(config)
+    if not any(trigger["type"] == "manual" for trigger in compiled["triggers"].values()):
+        raise ExecutionError("workflow does not declare a manual trigger")
     if compiled["workflow"]["spec"]["backend"].get("provider") != "filesystem":
         raise ExecutionError(
             "interactive local execution requires spec.backend.provider: filesystem"
