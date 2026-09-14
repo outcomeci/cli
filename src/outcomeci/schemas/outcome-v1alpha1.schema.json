@@ -15,8 +15,14 @@
     },
     "spec": {
       "type": "object",
-      "required": ["instructions", "agents"],
+      "required": ["triggers", "instructions", "agents"],
       "properties": {
+        "triggers": {
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {"$ref": "#/$defs/identifier"},
+          "additionalProperties": {"$ref": "#/$defs/trigger"}
+        },
         "backend": {"type": "object"},
         "context": {"type": "object"},
         "instructions": {
@@ -56,6 +62,22 @@
   "additionalProperties": true,
   "$defs": {
     "identifier": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,62}$"},
+    "trigger": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {"enum": ["manual", "email.received"]},
+        "filters": {
+          "type": "object",
+          "properties": {
+            "senders": {"type": "array", "items": {"type": "string", "minLength": 1}},
+            "subject_prefix": {"type": "string", "minLength": 1}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "agent": {
       "type": "object",
       "properties": {

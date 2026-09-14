@@ -22,6 +22,7 @@ def _workflow(tmp_path: Path) -> Path:
         "kind": "OutcomeWorkflow",
         "metadata": {"name": "custom"},
         "spec": {
+            "triggers": {"manual": {"type": "manual"}},
             "backend": {"provider": "filesystem"},
             "context": {"provider": "filesystem"},
             "instructions": {
@@ -130,6 +131,7 @@ def _workflow(tmp_path: Path) -> Path:
 def test_compiles_fan_out_graph_and_effective_agent_policies(tmp_path: Path) -> None:
     compiled = compile_workflow(_workflow(tmp_path))
     assert compiled["graph"]["levels"] == [["intake"], ["product", "technical"], ["plan"]]
+    assert compiled["triggers"] == {"manual": {"type": "manual"}}
     assert compiled["instructions"]["orchestrator"]["policy"] == {
         "runner": "codex",
         "model": "gpt-orchestrator",
@@ -146,6 +148,29 @@ def test_compiles_fan_out_graph_and_effective_agent_policies(tmp_path: Path) -> 
         compiled["instructions"]["schemas"][".outcomeci/schemas/packet.json"]["value"]["type"]
         == "object"
     )
+
+
+def test_requires_a_trigger(tmp_path: Path) -> None:
+    path = _workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    del value["spec"]["triggers"]
+    path.write_text(yaml.safe_dump(value, sort_keys=False))
+    with pytest.raises(ConfigError, match="spec.triggers"):
+        compile_workflow(path)
+
+
+def test_email_trigger_can_feed_a_phase(tmp_path: Path) -> None:
+    path = _workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["triggers"] = {
+        "inbound_email": {"type": "email.received", "filters": {"subject_prefix": "Proof"}}
+    }
+    value["spec"]["agents"]["phases"]["intake"]["expects"]["inputs"][0]["from"] = (
+        "trigger.inbound_email"
+    )
+    path.write_text(yaml.safe_dump(value, sort_keys=False))
+    compiled = compile_workflow(path)
+    assert compiled["triggers"]["inbound_email"]["type"] == "email.received"
 
 
 @pytest.mark.parametrize(
