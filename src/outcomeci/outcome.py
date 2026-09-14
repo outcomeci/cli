@@ -102,7 +102,7 @@ def _claim(path: Path) -> dict[str, Any]:
         not isinstance(value, dict)
         or not required <= set(value)
         or not isinstance(value["phase"], str)
-        or value["agent"] not in {"codex", "claude"}
+        or value["agent"] not in {"codex", "claude", "opencode"}
     ):
         raise ExecutionError("invalid outcome claim")
     if not isinstance(value["targets"], list) or (
@@ -217,8 +217,11 @@ def _sessions(agent: str) -> list[Path]:
         configured = os.environ.get("CODEX_HOME")
         root = Path(configured).expanduser() if configured else Path.home() / ".codex"
         found = root.glob("sessions/**/*.jsonl") if root.is_dir() else []
-    else:
+    elif agent == "claude":
         root = Path(os.environ.get("HOME", "")) / ".claude" / "projects"
+        found = root.glob("**/*.jsonl") if root.is_dir() else []
+    else:
+        root = Path(os.environ.get("HOME", "")) / ".local" / "share" / "opencode"
         found = root.glob("**/*.jsonl") if root.is_dir() else []
     return sorted(
         path for path in found if path.is_file() and path.stat().st_size <= 50 * 1024 * 1024

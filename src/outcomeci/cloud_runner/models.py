@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import urlparse
 
-Provider = Literal["codex", "claude"]
+Provider = Literal["codex", "claude", "opencode"]
 OUTCOME_PHASES = (
     "intake",
     "repository_selection",
@@ -54,7 +54,7 @@ def core_url(value: Any, allow_insecure: bool) -> str:
 
 
 def provider(value: Any) -> Provider:
-    if value not in ("codex", "claude"):
+    if value not in ("codex", "claude", "opencode"):
         raise ContractError("invalid provider")
     return value
 
@@ -117,6 +117,7 @@ class ExecutionClaim:
     github_token: str
     auth_json: dict[str, Any] | None
     oauth_token: str | None
+    api_key: str | None
     timeout_seconds: int
     outcome_run: Any = None
     outcome: Any = None
@@ -152,10 +153,16 @@ class ExecutionClaim:
             raise ContractError("invalid lease")
         auth_json = hydration.get("auth_json") if selected == "codex" else None
         oauth_token = hydration.get("oauth_token") if selected == "claude" else None
+        api_key = hydration.get("api_key") if selected == "opencode" else None
         if selected == "codex" and not isinstance(auth_json, dict):
             raise ContractError("invalid Codex hydration")
         if selected == "claude":
             oauth_token = string(oauth_token, "Claude credential", 32768)
+        if selected == "opencode":
+            api_key = string(api_key, "OpenRouter API key", 32768)
+            model = job.get("model")
+            if not isinstance(model, str) or not model.startswith("openrouter/"):
+                raise ContractError("invalid OpenCode model")
         outcome = raw.get("outcome")
         if job.get("kind") == "outcome" and not isinstance(outcome, dict):
             raise ContractError("invalid outcome binding")
@@ -176,6 +183,7 @@ class ExecutionClaim:
             github_token,
             auth_json,
             oauth_token,
+            api_key,
             timeout,
             outcome_run,
             outcome,
