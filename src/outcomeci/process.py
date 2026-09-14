@@ -102,6 +102,7 @@ def invoke(
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "CLAUDE_CODE_OAUTH_TOKEN",
+        "OPENROUTER_API_KEY",
         "OUTCOMECI_VAULT_KEY_FILE",
     }
     secrets.update(excluded_env or set())
@@ -133,6 +134,15 @@ def invoke(
         if model:
             argv += ["--model", model]
         argv += [prompt]
+        input_text = None
+    elif agent == "opencode":
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            raise ExecutionError("OpenCode needs an injected OPENROUTER_API_KEY")
+        if not model or not model.startswith("openrouter/"):
+            raise ExecutionError("OpenCode needs an explicit openrouter/<model> selection")
+        env["OPENROUTER_API_KEY"] = api_key
+        argv = ["opencode", "run", "--pure", "--auto", "--format", "json", "--model", model, prompt]
         input_text = None
     else:
         raise ExecutionError(f"unsupported agent: {agent}")
@@ -195,6 +205,7 @@ def invoke_conversation(
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "CLAUDE_CODE_OAUTH_TOKEN",
+        "OPENROUTER_API_KEY",
     }
     env = {key: value for key, value in os.environ.items() if key not in secrets}
     if agent == "codex":
@@ -232,6 +243,15 @@ def invoke_conversation(
         if model:
             argv += ["--model", model]
         argv += [prompt]
+        input_text = None
+    elif agent == "opencode":
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            raise ExecutionError("OpenCode needs an injected OPENROUTER_API_KEY")
+        if not model or not model.startswith("openrouter/"):
+            raise ExecutionError("OpenCode needs an explicit openrouter/<model> selection")
+        env["OPENROUTER_API_KEY"] = api_key
+        argv = ["opencode", "run", "--pure", "--format", "json", "--model", model, prompt]
         input_text = None
     else:
         raise ExecutionError(f"unsupported agent: {agent}")

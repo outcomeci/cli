@@ -109,6 +109,35 @@ def test_managed_codex_still_requires_injected_auth(monkeypatch, tmp_path: Path)
         process.invoke("codex", None, "prompt", tmp_path, 10)
 
 
+def test_opencode_uses_only_injected_openrouter_key(monkeypatch, tmp_path: Path) -> None:
+    calls = []
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-secret")
+    monkeypatch.setattr(
+        process,
+        "command",
+        lambda argv, **kwargs: (
+            calls.append((argv, kwargs["env"])) or process.Result(0, "complete", "")
+        ),
+    )
+    assert (
+        process.invoke("opencode", "openrouter/anthropic/claude-sonnet-4", "prompt", tmp_path, 10)
+        == "complete"
+    )
+    argv, environment = calls[0]
+    assert argv == [
+        "opencode",
+        "run",
+        "--pure",
+        "--auto",
+        "--format",
+        "json",
+        "--model",
+        "openrouter/anthropic/claude-sonnet-4",
+        "prompt",
+    ]
+    assert environment["OPENROUTER_API_KEY"] == "openrouter-secret"
+
+
 def test_codex_conversation_resumes_session_read_only(monkeypatch, tmp_path: Path) -> None:
     calls = []
     monkeypatch.setattr(

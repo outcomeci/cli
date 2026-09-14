@@ -15,7 +15,7 @@ import yaml
 
 from . import __version__
 
-RUNNERS = {"codex", "claude"}
+RUNNERS = {"codex", "claude", "opencode"}
 INTERACTIONS = {"approval", "review", "consultation", "notification"}
 HTTP_METHODS = {"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"}
 SIDE_EFFECTS = {"read", "create", "update", "delete", "execute"}
@@ -75,9 +75,11 @@ def _agent_policy(value: Any, field: str) -> dict[str, Any]:
     item = _mapping(value or {}, field)
     runner, model = item.get("runner"), item.get("model")
     if runner is not None and runner not in RUNNERS:
-        raise ConfigError(f"{field}.runner must be codex or claude")
+        raise ConfigError(f"{field}.runner must be codex, claude, or opencode")
     if model is not None and (not isinstance(model, str) or not model.strip()):
         raise ConfigError(f"{field}.model must be non-empty")
+    if runner == "opencode" and (not isinstance(model, str) or not model.startswith("openrouter/")):
+        raise ConfigError(f"{field}.model must use openrouter/provider/model for OpenCode")
     return {key: item[key] for key in ("runner", "model") if item.get(key) is not None}
 
 

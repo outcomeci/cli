@@ -17,6 +17,8 @@ def outcome_claim(provider: str = "codex") -> ExecutionClaim:
     }
     if provider == "claude":
         hydration = {"provider": provider, "oauth_token": "claude-secret"}
+    elif provider == "opencode":
+        hydration = {"provider": provider, "api_key": "openrouter-secret"}
     return ExecutionClaim.parse(
         {
             "job": {
@@ -24,6 +26,7 @@ def outcome_claim(provider: str = "codex") -> ExecutionClaim:
                 "kind": "outcome",
                 "repositories": ["owner/state", "owner/product"],
                 "agent": provider,
+                "model": "openrouter/anthropic/claude-sonnet-4" if provider == "opencode" else None,
             },
             "lease_id": "lease_1",
             "credential_version": 3,
@@ -98,6 +101,38 @@ class FlowTests(unittest.TestCase):
             self.assertFalse(root.exists())
         self.assertEqual(client.completions, [("completion", {"result": result})])
         self.assertEqual(client.heartbeats[0][2], "preparing")
+
+    def test_opencode_hydrates_openrouter_key_in_private_home(self):
+        claim = outcome_claim("opencode")
+        client = FakeClient(claim)
+        result = {"status": "completed", "manifest": {}, "artifact_paths": []}
+        with tempfile.TemporaryDirectory() as parent:
+            root, workspace = Path(parent) / "private", Path(parent) / "workspace"
+            root.mkdir()
+            workspace.mkdir()
+
+            def fake_run(command, *, cwd, env, timeout, on_tick):
+                self.assertEqual(env["OPENROUTER_API_KEY"], "openrouter-secret")
+                self.assertEqual(env["HOME"], str(root / "opencode"))
+                return ProcessResult(0, json.dumps(result), "")
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"AGENT_PRIVATE_ROOT": parent, "AGENT_WORK_ROOT": str(workspace)},
+                    clear=False,
+                ),
+                mock.patch("outcomeci.cloud_runner.main.tempfile.mkdtemp", return_value=str(root)),
+                mock.patch("outcomeci.cloud_runner.main.run", side_effect=fake_run),
+            ):
+                self.assertEqual(
+                    execute(
+                        Launch("outcome", "job_1", "boot", "https://api.outcomeci.com"),
+                        client,
+                    ),
+                    0,
+                )
+            self.assertFalse(root.exists())
 
 
 if __name__ == "__main__":
