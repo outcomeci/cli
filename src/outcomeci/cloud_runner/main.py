@@ -10,6 +10,7 @@ import sys
 import tempfile
 import time
 from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
 
 from .client import CoreClient, CoreError
@@ -171,6 +172,33 @@ def authorize(launch: Launch, client: CoreClient) -> int:
 def execute(launch: Launch, client: CoreClient) -> int:
     claim = client.claim_execution()
     adapter = ADAPTERS[claim.provider]
+    workflow_phase = str(claim.outcome.get("phase") or "unknown")
+    log_sequence = 0
+
+    def lifecycle(
+        event_type: str,
+        message: str,
+        *,
+        level: str = "info",
+        metadata: dict[str, str | int | float | bool | None] | None = None,
+    ) -> None:
+        nonlocal log_sequence
+        log_sequence += 1
+        with suppress(CoreError):
+            client.log(
+                claim.completion_token,
+                {
+                    "sequence": log_sequence,
+                    "phase": workflow_phase,
+                    "level": level,
+                    "event_type": event_type,
+                    "message": message,
+                    "metadata": metadata or {},
+                    "occurred_at": datetime.now(UTC).isoformat(),
+                },
+            )
+
+    lifecycle("runner.claimed", "Runner claimed the workflow phase.")
     root = Path(
         tempfile.mkdtemp(
             prefix="oci-outcome-", dir=os.environ.get("AGENT_PRIVATE_ROOT", "/home/runner")
@@ -214,6 +242,11 @@ def execute(launch: Launch, client: CoreClient) -> int:
             heartbeat()
 
         heartbeat()
+        lifecycle(
+            "agent.started",
+            "Coding agent started.",
+            metadata={"provider": claim.provider},
+        )
         result = run(
             claim.command, cwd=workspace, env=env, timeout=claim.timeout_seconds, on_tick=tick
         )
@@ -226,24 +259,44 @@ def execute(launch: Launch, client: CoreClient) -> int:
                 "completed",
             }:
                 raise ContractError("invalid outcome result")
+            lifecycle(
+                "agent.completed",
+                "Coding agent completed the workflow phase.",
+                metadata={"status": str(outcome_result["status"])},
+            )
             client.complete(claim.completion_token, {"result": outcome_result})
             return 0
         except (ContractError, json.JSONDecodeError):
             category, retryable = classify_failure(
                 result.stdout + result.stderr, authorization=False, cancelled=result.returncode < 0
             )
+            lifecycle(
+                "agent.failed",
+                "Coding agent did not complete the workflow phase.",
+                level="error",
+                metadata={"category": category, "retryable": retryable},
+            )
             client.fail(claim.completion_token, category, retryable, claim.lease_id)
             return result.returncode or 1
     except TimeoutError:
+        lifecycle("runner.timed_out", "Workflow phase timed out.", level="error")
         reconcile_failure(client, claim, "agent_timeout", True)
         raise
     except CoreError as error:
+        lifecycle(
+            "runner.failed",
+            "Runner could not communicate with the control plane.",
+            level="error",
+            metadata={"category": error.category, "retryable": error.retryable},
+        )
         reconcile_failure(client, claim, error.category, error.retryable)
         raise
     except (ContractError, KeyError, json.JSONDecodeError):
+        lifecycle("runner.invalid_job", "Runner rejected the workflow job.", level="error")
         reconcile_failure(client, claim, "invalid_job", False)
         raise
     except Exception:
+        lifecycle("runner.failed", "Runner encountered an internal failure.", level="error")
         reconcile_failure(client, claim, "internal_failure", True)
         raise
     finally:

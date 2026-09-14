@@ -48,6 +48,7 @@ class FakeClient:
         self.completions: list[tuple] = []
         self.failures: list[tuple] = []
         self.heartbeats: list[tuple] = []
+        self.logs: list[tuple] = []
 
     def claim_execution(self):
         return self.claim
@@ -61,6 +62,9 @@ class FakeClient:
 
     def fail(self, *args):
         self.failures.append(args)
+
+    def log(self, *args):
+        self.logs.append(args)
 
 
 class FlowTests(unittest.TestCase):
@@ -101,6 +105,14 @@ class FlowTests(unittest.TestCase):
             self.assertFalse(root.exists())
         self.assertEqual(client.completions, [("completion", {"result": result})])
         self.assertEqual(client.heartbeats[0][2], "preparing")
+        self.assertEqual(
+            [entry[1]["event_type"] for entry in client.logs],
+            ["runner.claimed", "agent.started", "agent.completed"],
+        )
+        self.assertEqual([entry[1]["sequence"] for entry in client.logs], [1, 2, 3])
+        self.assertTrue(all(entry[1]["phase"] == "plan" for entry in client.logs))
+        self.assertNotIn("github-token", json.dumps(client.logs))
+        self.assertNotIn("job-token", json.dumps(client.logs))
 
     def test_opencode_hydrates_openrouter_key_in_private_home(self):
         claim = outcome_claim("opencode")

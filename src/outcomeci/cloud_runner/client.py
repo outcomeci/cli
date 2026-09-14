@@ -96,6 +96,9 @@ class CoreClient:
             raise CoreError("invalid_core_response")
         return result
 
+    def log(self, session_token: str, payload: dict[str, Any]) -> None:
+        self._post("logs", payload, session_token)
+
     def fail(
         self, session_token: str, category: str, retryable: bool, lease_id: str | None = None
     ) -> None:
