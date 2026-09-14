@@ -44,6 +44,17 @@ def test_merge_release_stays_internal_until_promotion() -> None:
     assert "docker push" in proof
 
 
+def test_outcome_runner_uses_only_immutable_ecr_tags() -> None:
+    source = (ROOT / ".github/workflows/runner-container.yml").read_text()
+    ecr_metadata = source.split("Generate immutable ECR image metadata", 1)[1].split(
+        "Publish immutable image", 1
+    )[0]
+
+    assert "type=sha" in ecr_metadata
+    assert "type=semver" in ecr_metadata
+    assert "type=ref,event=branch" not in ecr_metadata
+
+
 def test_homebrew_release_targets_outcomeci_package_and_tap() -> None:
     source = (ROOT / ".github/workflows/homebrew.yml").read_text()
     assert "pypi.org/pypi/outcomeci-cli/" in source

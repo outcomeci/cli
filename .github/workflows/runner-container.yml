@@ -64,16 +64,23 @@ jobs:
         if: github.event_name != 'pull_request'
         id: ecr
         uses: aws-actions/amazon-ecr-login@v2
-      - name: Generate image metadata
+      - name: Generate GHCR image metadata
         if: github.event_name != 'pull_request'
-        id: meta
+        id: ghcr_meta
         uses: docker/metadata-action@v5
         with:
-          images: |
-            ${{ env.IMAGE }}
-            ${{ steps.ecr.outputs.registry }}/outcomeci-outcome-runner
+          images: ${{ env.IMAGE }}
           tags: |
             type=ref,event=branch
+            type=semver,pattern={{version}}
+            type=sha
+      - name: Generate immutable ECR image metadata
+        if: github.event_name != 'pull_request'
+        id: ecr_meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.ecr.outputs.registry }}/outcomeci-outcome-runner
+          tags: |
             type=semver,pattern={{version}}
             type=sha
       - name: Publish immutable image
@@ -83,8 +90,10 @@ jobs:
           context: .
           file: Dockerfile.runner
           push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          tags: |
+            ${{ steps.ghcr_meta.outputs.tags }}
+            ${{ steps.ecr_meta.outputs.tags }}
+          labels: ${{ steps.ghcr_meta.outputs.labels }}
           platforms: linux/amd64,linux/arm64
           build-args: OUTCOMECI_CLI_VERSION=0.0.0
           cache-from: type=gha,scope=outcome-runner
