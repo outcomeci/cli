@@ -315,8 +315,46 @@ existing app. The generated project lives in `.outcomeci/integrations/slack/`.
 Human hooks use short-lived `slack api` calls, so they need no public webhook,
 long-running listener, or OutcomeCI backend.
 
-Slack credentials remain in Slack CLI's own credential store. OutcomeCI adds
-only this non-secret reference to `outcome.yml`:
+By default, Slack credentials remain in Slack CLI's own credential store. When
+ready to use the installed app from an HTTP workflow integration, sync its bot
+token into an encrypted local Vault or an authenticated cloud workspace Vault:
+
+```console
+oci integration slack sync-credentials --local
+oci integration slack sync-credentials --cloud workspace_… --workflow WORKFLOW_ID
+```
+
+`--workspace PATH` selects the workflow directory containing the generated Slack
+app (defaults to the current directory). For a different local destination, add
+`--vault-workspace PATH`. Use `--team TEAM_ID_OR_DOMAIN` when multiple workspaces
+have installed the app. Local Vault initialization is automatic. Both destinations
+use `slack/bot-token` unless you supply `--path`; repeat syncs replace the local
+value or create a new cloud secret version. Cloud rotation preserves existing
+workflow grants unless `--workflow` is explicitly supplied, which replaces them.
+New cloud secrets have no workflow grants unless you supply them.
+
+The command refreshes Slack CLI authorization, obtains the selected installed
+app's bot token through the same Slack installation API used by `slack api --app`,
+and verifies its app and workspace before storing it. It uses the installed app's
+scopes, never edited local scopes. Tokens stay out of output, command arguments,
+and temporary files. This relies on Slack's `apps.developerInstall` API; Slack CLI
+credentials and that API may change between Slack versions. If authorization
+has expired and cannot refresh, run `slack login` and retry.
+
+An HTTP connection can then use the stored credential:
+
+```yaml
+slack:
+  provider: http
+  base_url: https://slack.com
+  auth: {type: bearer, credential: "vault:slack/bot-token"}
+```
+
+Syncing does not modify workflow connections or enable a cloud runner to read
+a local Vault. Local execution uses the local Vault; cloud execution needs the
+cloud secret and a grant for its workflow.
+
+For human hooks, OutcomeCI adds only this non-secret reference to `outcome.yml`:
 
 ```yaml
 connections:
