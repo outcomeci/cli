@@ -14,6 +14,8 @@ import jsonschema
 import yaml
 
 from . import __version__
+from .contracts import ContractError, contract_schema, validate_contract
+from .security import private_path
 
 RUNNERS = {"codex", "claude", "opencode"}
 INTERACTIONS = {"approval", "review", "consultation", "notification"}
@@ -21,7 +23,7 @@ HTTP_METHODS = {"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"}
 SIDE_EFFECTS = {"read", "create", "update", "delete", "execute"}
 APPROVAL_POLICIES = {"none", "required", "inherit"}
 IDEMPOTENCY_POLICIES = {"none", "supported", "required"}
-TRIGGER_TYPES = {"manual", "email.received"}
+TRIGGER_TYPES = {"manual", "email.received", "webhook.received"}
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9_-]{0,62}$")
 
 
@@ -39,10 +41,14 @@ def _relative_path(root: Path, relative: Any, field: str) -> Path:
     if not isinstance(relative, str) or not relative.strip():
         raise ConfigError(f"{field} must be a non-empty path")
     path = (root / relative).resolve()
+    if private_path(relative):
+        raise ConfigError(f"{field} references a credential-bearing or broker-private path")
     try:
-        path.relative_to(root.resolve())
+        resolved_relative = path.relative_to(root.resolve())
     except ValueError as exc:
         raise ConfigError(f"{field} escapes the repository") from exc
+    if private_path(resolved_relative):
+        raise ConfigError(f"{field} references a credential-bearing or broker-private path")
     return path
 
 
@@ -66,8 +72,12 @@ def _reference(
             result["value"] = json.loads(content)
         except json.JSONDecodeError as exc:
             raise ConfigError(f"{field} {relative} is not valid JSON") from exc
-        if not isinstance(result["value"], dict):
+        if not isinstance(result["value"], (dict, bool)):
             raise ConfigError(f"{field} {relative} must contain a JSON object")
+        try:
+            jsonschema.validators.validator_for(result["value"]).check_schema(result["value"])
+        except jsonschema.SchemaError as exc:
+            raise ConfigError(f"{field} {relative} is not a valid JSON Schema") from exc
     return result
 
 
@@ -109,6 +119,14 @@ def _contract(value: Any, field: str, *, output: bool) -> dict[str, Any]:
             raise ConfigError(f"{field}.from is required")
         result["from"] = source
     if item.get("schema") is not None:
+        schema = item["schema"]
+        if isinstance(schema, (dict, bool)):
+            try:
+                jsonschema.validators.validator_for(schema).check_schema(schema)
+            except jsonschema.SchemaError as exc:
+                raise ConfigError(f"{field}.schema is not a valid JSON Schema") from exc
+        elif not isinstance(schema, str) or not schema.strip():
+            raise ConfigError(f"{field}.schema must be a schema path or inline JSON Schema")
         result["schema"] = item["schema"]
     if isinstance(item.get("description"), str) and item["description"].strip():
         result["description"] = item["description"].strip()
@@ -292,6 +310,11 @@ def _triggers(value: Any) -> dict[str, dict[str, Any]]:
         trigger_type = trigger.get("type")
         if trigger_type not in TRIGGER_TYPES:
             raise ConfigError(f"{field}.type is unsupported")
+        if trigger_type == "webhook.received":
+            from .webhooks import validate_delivery_config
+
+            normalized[name] = {"type": trigger_type, **validate_delivery_config(trigger)}
+            continue
         unknown = set(trigger) - {"type", "filters"}
         if unknown:
             raise ConfigError(f"{field} has unknown fields: {', '.join(sorted(unknown))}")
@@ -442,10 +465,40 @@ def _integrations(spec: dict[str, Any], connections: dict[str, dict[str, Any]]) 
         if connection not in connections or connections[connection].get("provider") != "http":
             raise ConfigError(f"{field}.connection must reference an HTTP connection")
         access = _mapping(item.get("access", {"mode": "schema"}), f"{field}.access")
+        if set(access) - {
+            "mode",
+            "source",
+            "operations",
+            "methods",
+            "expose",
+            "max_requests",
+            "opaque_identifiers",
+        }:
+            raise ConfigError(f"{field}.access contains unsupported fields")
         mode = access.get("mode", "schema")
         if mode not in {"schema", "openapi", "full"}:
             raise ConfigError(f"{field}.access.mode is unsupported")
         normalized_access: dict[str, Any] = {"mode": mode}
+        if "max_requests" in access:
+            limit = access["max_requests"]
+            if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
+                raise ConfigError(f"{field}.access.max_requests must be an integer from 1 to 1000")
+            normalized_access["max_requests"] = limit
+        if "opaque_identifiers" in access:
+            if not isinstance(access["opaque_identifiers"], bool):
+                raise ConfigError(f"{field}.access.opaque_identifiers must be true or false")
+            normalized_access["opaque_identifiers"] = access["opaque_identifiers"]
+        reviewer = item.get("policy")
+        if reviewer is not None:
+            reviewer = _mapping(reviewer, f"{field}.policy")
+            if set(reviewer) - {"instructions", "runner", "model"}:
+                raise ConfigError(f"{field}.policy contains unsupported fields")
+            if (
+                not isinstance(reviewer.get("instructions"), str)
+                or not reviewer["instructions"].strip()
+            ):
+                raise ConfigError(f"{field}.policy.instructions is required")
+            _agent_policy(reviewer, f"{field}.policy")
         if mode == "openapi":
             source = access.get("source")
             allow = access.get("operations", [])
@@ -481,6 +534,7 @@ def _integrations(spec: dict[str, Any], connections: dict[str, dict[str, Any]]) 
             "connection": connection,
             "access": normalized_access,
             "operations": operations,
+            **({"policy": reviewer} if reviewer is not None else {}),
         }
     return result
 
@@ -572,7 +626,27 @@ def load(path: Path) -> dict[str, Any]:
                         f"spec.context.{patterns_name} must be a list of non-empty glob strings"
                     )
 
-    instructions = _mapping(spec.get("instructions"), "spec.instructions")
+    agents = _mapping(spec.get("agents", {}), "spec.agents")
+    typed = "orchestrator" in agents
+    if typed:
+        if "instructions" in spec:
+            raise ConfigError("use only spec.agents.orchestrator, not both orchestrator forms")
+        configured = _mapping(agents["orchestrator"], "spec.agents.orchestrator")
+        if set(configured) - {"instructions", "runner", "model"}:
+            raise ConfigError("spec.agents.orchestrator contains unsupported fields")
+        if (
+            not isinstance(configured.get("instructions"), str)
+            or not configured["instructions"].strip()
+        ):
+            raise ConfigError("spec.agents.orchestrator.instructions is required")
+        instructions = {
+            "orchestrator": {
+                "path": configured["instructions"],
+                **_agent_policy(configured, "spec.agents.orchestrator"),
+            }
+        }
+    else:
+        instructions = _mapping(spec.get("instructions"), "spec.instructions")
     if len(instructions) != 1:
         raise ConfigError("spec.instructions must define exactly one orchestrator")
     orchestrator_name, orchestrator_value = next(iter(instructions.items()))
@@ -586,7 +660,6 @@ def load(path: Path) -> dict[str, Any]:
         raise ConfigError(f"spec.instructions.{orchestrator_name}.path is required")
     _agent_policy(orchestrator, f"spec.instructions.{orchestrator_name}")
 
-    agents = _mapping(spec.get("agents", {}), "spec.agents")
     default = _agent_policy(agents.get("default", {}), "spec.agents.default")
     phases = _mapping(agents.get("phases", {}), "spec.agents.phases")
     if not phases:
@@ -599,6 +672,12 @@ def load(path: Path) -> dict[str, Any]:
             raise ConfigError(f"invalid outcome phase: {phase_name}")
         field = f"spec.agents.phases.{phase_name}"
         policy = _mapping(raw_policy, field)
+        if typed or "type" in policy:
+            try:
+                validate_contract("agent", policy)
+            except ContractError as exc:
+                raise ConfigError(f"{field}: {exc}") from exc
+        with_values = _mapping(policy.get("with", {}), f"{field}.with")
         if not isinstance(policy.get("instructions"), str):
             raise ConfigError(f"{field}.instructions is required")
         _agent_policy(policy, field)
@@ -632,6 +711,8 @@ def load(path: Path) -> dict[str, Any]:
             outputs[(phase_name, item["name"])] = item
         capabilities, humans = _phase_integrations(policy, field)
         normalized_phases[phase_name] = {
+            "type": "agent",
+            "with": with_values,
             "needs": needs,
             "inputs": inputs,
             "outputs": phase_outputs,
@@ -823,6 +904,7 @@ def load(path: Path) -> dict[str, Any]:
                         )
     root["_graph"] = {
         "orchestrator": orchestrator_name,
+        "orchestrator_config": orchestrator,
         "levels": levels,
         "phases": normalized_phases,
         "default_policy": default,
@@ -853,7 +935,9 @@ def _filesystem_context(root: Path, context: dict[str, Any]) -> list[dict[str, A
         for path in matches:
             if path.is_file():
                 relative = path.resolve().relative_to(root.resolve()).as_posix()
-                if not _excluded(relative, context.get("exclude", [])):
+                if not private_path(relative) and not _excluded(
+                    relative, context.get("exclude", [])
+                ):
                     paths[relative] = path.resolve()
     if len(paths) > 5000:
         raise ConfigError("filesystem context exceeds 5000 files")
@@ -872,7 +956,7 @@ def compile_workflow(path: Path) -> dict[str, Any]:
     graph = document.pop("_graph")
     spec, root = document["spec"], path.parent
     orchestrator_name = graph["orchestrator"]
-    orchestrator_config = spec["instructions"][orchestrator_name]
+    orchestrator_config = graph["orchestrator_config"]
     orchestrator = _reference(
         root, orchestrator_config["path"], f"spec.instructions.{orchestrator_name}.path"
     )
@@ -891,6 +975,8 @@ def compile_workflow(path: Path) -> dict[str, Any]:
                 root, policy["instructions"], f"spec.agents.phases.{phase_name}.instructions"
             ),
             "needs": contract["needs"],
+            "type": contract["type"],
+            "with": contract["with"],
             "expects": {"inputs": contract["inputs"], "outputs": contract["outputs"]},
             "humans": contract["humans"],
             "capabilities": contract["capabilities"],
@@ -899,18 +985,56 @@ def compile_workflow(path: Path) -> dict[str, Any]:
                 "model": policy.get("model", default.get("model")),
             },
         }
-        for item in (*contract["inputs"], *contract["outputs"]):
-            if item.get("schema") and item["schema"] not in schemas:
-                schemas[item["schema"]] = _reference(
-                    root, item["schema"], "artifact schema", json_value=True
-                )
+        for direction in ("inputs", "outputs"):
+            for item in contract[direction]:
+                if direction == "inputs" and item["from"].startswith("trigger."):
+                    trigger_type = graph["triggers"][item["from"].removeprefix("trigger.")]["type"]
+                    if trigger_type != "manual":
+                        inherited = contract_schema(trigger_type)
+                        if "schema" in item:
+                            raise ConfigError(
+                                f"{phase_name}.{item['name']} inherits its trigger schema; do not override it"
+                            )
+                        item["schema"] = inherited
+                if isinstance(item.get("schema"), (dict, bool)):
+                    value = item["schema"]
+                    content = json.dumps(value, sort_keys=True, separators=(",", ":"))
+                    key = f"inline:{phase_name}:{direction}:{item['name']}"
+                    schemas[key] = {
+                        "content": content,
+                        "sha256": hashlib.sha256(content.encode()).hexdigest(),
+                        "value": value,
+                    }
+                    item["schema"] = key
+                elif item.get("schema") and item["schema"] not in schemas:
+                    schemas[item["schema"]] = _reference(
+                        root, item["schema"], "artifact schema", json_value=True
+                    )
     normalized = json.loads(json.dumps(document, sort_keys=True, separators=(",", ":")))
     context = spec.get("context", {"provider": "outcomeci"})
     context_files = (
         _filesystem_context(root, context) if context.get("provider") == "filesystem" else []
     )
     # to the role-neutral orchestrator key.
-    resolved = {"orchestrator": orchestrator, "phases": phases, "schemas": schemas}
+    reviewers = {}
+    for name, integration in spec.get("integrations", {}).items():
+        if integration.get("policy"):
+            reviewer = integration["policy"]
+            reviewers[name] = {
+                **_reference(
+                    root, reviewer["instructions"], f"spec.integrations.{name}.policy.instructions"
+                ),
+                "policy": {
+                    "runner": reviewer.get("runner", default.get("runner")),
+                    "model": reviewer.get("model", default.get("model")),
+                },
+            }
+    resolved = {
+        "orchestrator": orchestrator,
+        "phases": phases,
+        "schemas": schemas,
+        "integration_policies": reviewers,
+    }
     revision_input = {
         "workflow": normalized,
         "graph": {"levels": graph["levels"]},

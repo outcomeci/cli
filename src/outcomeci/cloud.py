@@ -17,6 +17,7 @@ import yaml
 
 from .config import compile_workflow
 from .process import ExecutionError
+from .security import private_path
 
 
 def credentials_path() -> Path:
@@ -263,7 +264,7 @@ def sync_workflow(
             for item in support_root.rglob("*")
             if item.is_file()
             and "outcomes" not in item.relative_to(support_root).parts
-            and item.name != "vault.enc"
+            and not private_path(item.relative_to(support_root))
         ):
             support_content = support.read_bytes()
             total += len(support_content)

@@ -15,7 +15,11 @@
     },
     "spec": {
       "type": "object",
-      "required": ["triggers", "instructions", "agents"],
+      "required": ["triggers", "agents"],
+      "oneOf": [
+        {"required": ["instructions"], "properties": {"agents": {"not": {"required": ["orchestrator"]}}}},
+        {"not": {"required": ["instructions"]}, "properties": {"agents": {"required": ["orchestrator"]}}}
+      ],
       "properties": {
         "triggers": {
           "type": "object",
@@ -36,12 +40,23 @@
           "required": ["phases"],
           "properties": {
             "default": {"$ref": "#/$defs/agent"},
+            "orchestrator": {
+              "type": "object",
+              "required": ["instructions"],
+              "properties": {
+                "instructions": {"type": "string", "minLength": 1},
+                "runner": {"enum": ["codex", "claude", "opencode"]},
+                "model": {"type": "string", "minLength": 1}
+              },
+              "additionalProperties": false
+            },
             "phases": {
               "type": "object",
               "minProperties": 1,
               "additionalProperties": {"$ref": "#/$defs/phase"}
             }
           },
+          "allOf": [{"if": {"required": ["orchestrator"]}, "then": {"properties": {"phases": {"additionalProperties": {"required": ["type"]}}}}}],
           "additionalProperties": true
         },
         "connections": {"oneOf": [{"type": "array"}, {"type": "object"}]},
@@ -66,7 +81,8 @@
       "type": "object",
       "required": ["type"],
       "properties": {
-        "type": {"enum": ["manual", "email.received"]},
+        "type": {"enum": ["manual", "email.received", "webhook.received"]},
+        "delivery": {"enum": ["queued"]},
         "filters": {
           "type": "object",
           "properties": {
@@ -81,7 +97,7 @@
     "agent": {
       "type": "object",
       "properties": {
-        "runner": {"enum": ["codex", "claude"]},
+        "runner": {"enum": ["codex", "claude", "opencode"]},
         "model": {"type": "string", "minLength": 1}
       },
       "additionalProperties": true
@@ -101,8 +117,10 @@
       "type": "object",
       "required": ["instructions"],
       "properties": {
+        "type": {"const": "agent"},
+        "with": {"type": "object"},
         "instructions": {"type": "string", "minLength": 1},
-        "runner": {"enum": ["codex", "claude"]},
+        "runner": {"enum": ["codex", "claude", "opencode"]},
         "model": {"type": "string", "minLength": 1},
         "needs": {"type": "array", "items": {"$ref": "#/$defs/identifier"}, "uniqueItems": true},
         "expects": {"type": "object"},

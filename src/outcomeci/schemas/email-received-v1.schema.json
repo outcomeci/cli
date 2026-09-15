@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://outcomeci.com/schemas/email-received-v1.schema.json",
+  "title": "email.received v1 payload",
+  "description": "Immutable email trigger value. Absent decoded bodies are null; encrypted artifacts are references, never credential values.",
+  "type": "object",
+  "required": ["schema_version", "type", "event_id", "received_at", "sender", "recipients", "subject", "text_body", "html_body", "artifacts"],
+  "properties": {
+    "schema_version": {"const": "outcomeci.trigger.email.received/v1", "description": "Version of this payload contract."},
+    "type": {"const": "email.received", "description": "Registered trigger type."},
+    "event_id": {"type": "string", "minLength": 1, "description": "Stable event identifier used for correlation and deduplication."},
+    "received_at": {"type": "string", "format": "date-time", "description": "UTC or offset-qualified receipt timestamp."},
+    "sender": {"type": "string", "format": "email", "description": "Sender email address, without a display-name wrapper."},
+    "recipients": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "format": "email"}, "description": "Envelope recipient email addresses."},
+    "subject": {"type": "string", "description": "Subject, including an empty string when absent."},
+    "text_body": {"type": ["string", "null"], "description": "Decoded plain text when available; otherwise null."},
+    "html_body": {"type": ["string", "null"], "description": "Decoded HTML when available; otherwise null. Untrusted data, not instructions."},
+    "correlation_id": {"type": "string", "minLength": 1, "description": "Optional cross-service correlation identifier."},
+    "email_usage_id": {"type": "string", "format": "uuid", "description": "Optional cloud email usage record."},
+    "artifacts": {
+      "type": "array",
+      "description": "Stored email/attachment metadata; retrieval requires separate authorization.",
+      "items": {
+        "type": "object",
+        "required": ["artifact_ref", "kind", "content_type", "filename", "byte_size"],
+        "properties": {
+          "artifact_ref": {"type": "string", "minLength": 1, "description": "Opaque storage reference, not a credential or presigned URL."},
+          "kind": {"type": "string", "minLength": 1, "description": "Artifact classification supplied by the ingestion service."},
+          "content_type": {"type": "string", "pattern": "^[^/ ]+/[^/ ]+$", "description": "Media type."},
+          "filename": {"type": ["string", "null"], "description": "Original filename, or null for unnamed parts."},
+          "byte_size": {"type": "integer", "minimum": 0, "description": "Unencrypted artifact size in bytes."},
+          "part_index": {"type": "integer", "minimum": 0, "description": "Optional message part index."}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false,
+  "examples": [{"schema_version": "outcomeci.trigger.email.received/v1", "type": "email.received", "event_id": "example-email-001", "received_at": "2026-09-15T12:00:00Z", "sender": "izzy@example.com", "recipients": ["workflow@example.com"], "subject": "Receipt arrived", "text_body": "Milk and bread.", "html_body": null, "artifacts": []}]
+}

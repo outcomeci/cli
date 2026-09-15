@@ -9,6 +9,10 @@ def test_manifest_has_one_backend_independent_shape(tmp_path: Path) -> None:
     outcome = tmp_path / ".outcomeci" / "outcomes" / "run-1"
     outcome.mkdir(parents=True)
     (outcome / "standup.md").write_text("standup\n")
+    (outcome / ".broker").mkdir()
+    (outcome / ".broker" / "journal.json").write_text(
+        '{"references":{"izzy":"private-provider-id"}}'
+    )
     common = {
         "outcome_root": outcome,
         "artifact_base": tmp_path,
@@ -43,3 +47,4 @@ def test_manifest_has_one_backend_independent_shape(tmp_path: Path) -> None:
     assert local["backend"].keys() == managed["backend"].keys()
     assert local["context"].keys() == managed["context"].keys()
     assert local["phase_contract"] is None
+    assert all(".broker" not in path for path in local["artifacts"])

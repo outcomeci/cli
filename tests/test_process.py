@@ -36,13 +36,12 @@ def test_secure_execution_masks_slack_and_mounts_only_outcome_writable(
         "codex", None, "prompt", tmp_path, 10, allow_local_auth=True, writable_paths=[artifact]
     )
     argv = calls[0]
-    assert argv[:7] == [
+    assert argv[:6] == [
         "/usr/bin/bwrap",
         "--die-with-parent",
         "--new-session",
         "--unshare-pid",
-        "--ro-bind",
-        "/",
+        "--tmpfs",
         "/",
     ]
     assert any(

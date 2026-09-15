@@ -112,7 +112,9 @@ def initialize(root: Path) -> dict[str, Any]:
     ignore = root / ".gitignore"
     content = ignore.read_text(encoding="utf-8") if ignore.exists() else ""
     if ".outcomeci/vault.enc" not in content.splitlines():
-        ignore.write_text(content.rstrip() + "\n.outcomeci/vault.enc\n", encoding="utf-8")
+        ignore.write_text(
+            content.rstrip() + "\n.outcomeci/vault.enc\n.outcomeci/.broker/\n", encoding="utf-8"
+        )
     return {"initialized": True, "vault": str(path), "key_file": str(key_path)}
 
 

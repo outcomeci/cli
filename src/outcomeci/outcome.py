@@ -20,6 +20,7 @@ from jsonschema import validate as validate_json
 from .config import compile_workflow
 from .manifest import build_manifest
 from .process import ExecutionError, GitHub, invoke
+from .security import private_path
 
 
 def _slug(value: str) -> str:
@@ -143,7 +144,11 @@ def _managed_state(state: Path, backend: dict[str, Any]) -> None:
 
 def _managed_artifacts(state: Path, outcome_root: Path) -> list[dict[str, Any]]:
     result, total = [], 0
-    for path in sorted(item for item in outcome_root.rglob("*") if item.is_file()):
+    for path in sorted(
+        item
+        for item in outcome_root.rglob("*")
+        if item.is_file() and not private_path(item.relative_to(outcome_root))
+    ):
         content = path.read_bytes()
         total += len(content)
         if len(content) > 2 * 1024 * 1024 or total > 20 * 1024 * 1024:

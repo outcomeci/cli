@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from .security import private_path
+
 SCHEMA_VERSION = "outcomeci.outcome-manifest/v1alpha1"
 
 
@@ -32,7 +34,9 @@ def build_manifest(
     artifacts = sorted(
         str(path.relative_to(artifact_base))
         for path in outcome_root.rglob("*")
-        if path.is_file() and path.name not in {"manifest.json", "run.json"}
+        if path.is_file()
+        and path.name not in {"manifest.json", "run.json"}
+        and not private_path(path.relative_to(outcome_root))
     )
     return {
         "schema_version": SCHEMA_VERSION,
