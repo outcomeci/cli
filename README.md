@@ -13,6 +13,32 @@ Repository context and workflow instructions live in `.outcomeci/`. The same
 `outcome.yml` contract can run locally or use OutcomeCI Cloud for managed state,
 Digital Twin context, expert messaging, credentials, and runners.
 
+## Local HTTP tunnel preview
+
+The development tunnel service exposes explicitly approved loopback HTTP ports.
+Authenticate to the local API, then keep the client running in the foreground:
+
+```console
+oci tunnel start --workspace WORKSPACE_ID --target http://127.0.0.1:3000 --public
+oci tunnel status --workspace WORKSPACE_ID
+oci tunnel stop --workspace WORKSPACE_ID
+```
+
+The client downloads frpc 0.71.0 from its official release and verifies its pinned
+checksum. Its configuration stays in a private broker directory, not workflow
+artifacts. Session credentials never appear in status or agent context. Ctrl+C
+revokes that exact session; reconnect does not extend the lease. The default
+duration is 15 minutes, with `--ttl-seconds` up to one hour.
+
+Local testing requires the separate local tunnel service: send
+`Host: ASSIGNED_HOSTNAME` to `http://127.0.0.1:7402`. Cloud sessions use HTTPS
+under `tunnel.outcomeci.com` (staging: `staging.tunnel.outcomeci.com`) once the
+environment is deployed. Public client connections use WSS with system CA
+trust roots and explicit hostname verification; insecure remote TCP is rejected.
+User application WebSocket upgrades remain unsupported. `--public`
+acknowledges exposure; a hard-to-guess hostname is not authentication. SQS queued
+workflow triggers remain independent.
+
 Every workflow declares at least one trigger. Local interactive execution uses
 an explicit manual trigger; managed workflows may start from durable events:
 

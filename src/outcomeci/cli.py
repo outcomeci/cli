@@ -97,6 +97,15 @@ def parser() -> argparse.ArgumentParser:
     )
     root.add_argument("--version", action="version", version=f"oci {__version__}")
     commands = root.add_subparsers(dest="command", required=True)
+    tunnel = commands.add_parser("tunnel", help="Expose an approved local HTTP target")
+    tunnel_commands = tunnel.add_subparsers(dest="tunnel_command", required=True)
+    for name in ("start", "status", "stop"):
+        action = tunnel_commands.add_parser(name)
+        action.add_argument("--workspace", required=True)
+        if name == "start":
+            action.add_argument("--target", required=True)
+            action.add_argument("--ttl-seconds", type=int, default=900)
+            action.add_argument("--public", action="store_true", help="Acknowledge public exposure")
     schema = commands.add_parser("schema", help="Inspect the versioned outcome.yml schema")
     schema_commands = schema.add_subparsers(dest="schema_command", required=True)
     schema_path_command = schema_commands.add_parser("path", help="Print the packaged schema path")
@@ -139,7 +148,7 @@ def parser() -> argparse.ArgumentParser:
     workflow_commands = workflow.add_subparsers(dest="workflow_command", required=True)
     workflow_sync = workflow_commands.add_parser("sync")
     workflow_listen = workflow_commands.add_parser(
-        "listen", help="Execute queued or forwarded webhooks locally"
+        "listen", help="Execute queued workflow triggers locally"
     )
     workflow_listen.add_argument("--workspace", required=True, help="Cloud workspace identifier")
     workflow_listen.add_argument("--workflow", required=True, help="Cloud workflow identifier")
@@ -401,6 +410,20 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.command == "tunnel":
+            from . import tunnels
+
+            if args.tunnel_command == "start":
+                tunnels.start(
+                    args.workspace, args.target, ttl_seconds=args.ttl_seconds, public=args.public
+                )
+            else:
+                _print_json(
+                    tunnels.status(args.workspace)
+                    if args.tunnel_command == "status"
+                    else tunnels.stop(args.workspace)
+                )
+            return 0
         if args.command == "proof":
             definition = args.definition or (bundled_definition(args.name) if args.name else None)
             result = run_simulation(definition, args.workspace, args.report)
