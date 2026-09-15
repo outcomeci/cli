@@ -7,6 +7,7 @@ import os
 import secrets
 import socket
 import socketserver
+import tempfile
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -16,6 +17,7 @@ from typing import Any
 from .config import compile_workflow
 from .humans import accept, poll, request, transport_responses
 from .integrations import IntegrationExecutor, local_credential_resolver
+from .policy import PolicyExecutor
 from .process import ExecutionError
 
 
@@ -35,8 +37,10 @@ class _Handler(socketserver.StreamRequestHandler):
 
 
 class Broker:
-    def __init__(self, root: Path, config: Path, run_id: str, phase: str, socket_path: Path):
-        compiled = compile_workflow(config)
+    def __init__(
+        self, root: Path, config: Path, run_id: str, phase: str, socket_path: Path, compiled=None
+    ):
+        compiled = compiled if compiled is not None else compile_workflow(config)
         hooks = compiled["instructions"]["phases"][phase]["humans"]
         self.hooks = {
             hook["id"]: hook
@@ -46,7 +50,18 @@ class Broker:
             and hook.get("delivery", {}).get("targets")
         }
         self.root, self.config, self.run_id, self.phase = root, config, run_id, phase
-        self.integrations = IntegrationExecutor(compiled, resolver=local_credential_resolver(root))
+        run_directory = root / ".outcomeci" / "outcomes" / run_id
+        state_path = run_directory / "run.json"
+        state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        self.integrations = PolicyExecutor(
+            IntegrationExecutor(compiled, resolver=local_credential_resolver(root), reviewed=True),
+            root / ".outcomeci" / ".broker" / run_id,
+            {
+                "intent": state.get("intent"),
+                "trigger": state.get("trigger"),
+                "phase": compiled["instructions"]["phases"][phase],
+            },
+        )
         self.token = secrets.token_urlsafe(32)
         self.server = _Server(str(socket_path), _Handler)
         self.server.dispatch = self.dispatch  # type: ignore[attr-defined]
@@ -111,12 +126,14 @@ class Broker:
 
 
 @contextmanager
-def serve(root: Path, config: Path, run_id: str, phase: str) -> Iterator[dict[str, str]]:
-    directory = root / ".outcomeci" / "outcomes" / run_id / ".capability"
-    directory.mkdir(parents=True, exist_ok=True)
+def serve(
+    root: Path, config: Path, run_id: str, phase: str, *, compiled=None
+) -> Iterator[dict[str, str]]:
+    temporary = tempfile.TemporaryDirectory(prefix="oci-cap-")
+    directory = Path(temporary.name)
     socket_path = directory / "human.sock"
     socket_path.unlink(missing_ok=True)
-    broker = Broker(root, config, run_id, phase, socket_path)
+    broker = Broker(root, config, run_id, phase, socket_path, compiled)
     thread = threading.Thread(target=broker.server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -129,6 +146,7 @@ def serve(root: Path, config: Path, run_id: str, phase: str) -> Iterator[dict[st
         broker.server.shutdown()
         broker.server.server_close()
         socket_path.unlink(missing_ok=True)
+        temporary.cleanup()
 
 
 def invoke(operation: str, run_id: str, interaction_id: str, **arguments: Any) -> dict[str, Any]:

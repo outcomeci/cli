@@ -151,6 +151,14 @@ def _safe_destination(url: str, allow_private: bool) -> None:
 
 
 def _credential_mapping(value: Mapping[str, str] | str) -> dict[str, str]:
+    if isinstance(value, Mapping) and isinstance(value.get("secrets"), Mapping):
+        secrets = value["secrets"]
+        configuration = value.get("configuration", {})
+        return {
+            **configuration,
+            **secrets,
+            "value": secrets.get("api_key", secrets.get("value", "")),
+        }
     return dict(value) if isinstance(value, Mapping) else {"value": value}
 
 
@@ -222,16 +230,30 @@ def _project(body: Any, expose: Mapping[str, str]) -> dict[str, Any]:
     return result
 
 
+def _redact(value: Any, secrets: list[str]) -> Any:
+    if isinstance(value, dict):
+        return {_redact(key, secrets): _redact(item, secrets) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_redact(item, secrets) for item in value]
+    if isinstance(value, str):
+        for secret in secrets:
+            if secret:
+                value = value.replace(secret, "[credential withheld]")
+    return value
+
+
 class IntegrationExecutor:
     def __init__(
         self,
         compiled: Mapping[str, Any],
         resolver: CredentialResolver = environment_resolver,
         transport: httpx.BaseTransport | None = None,
+        reviewed: bool = False,
     ) -> None:
         self.compiled = compiled
         self.resolver = resolver
         self.transport = transport
+        self.reviewed = reviewed
 
     def capabilities(self, phase: str | None = None) -> list[str]:
         integrations = self.compiled["workflow"]["spec"].get("integrations", {})
@@ -287,6 +309,7 @@ class IntegrationExecutor:
                         "query": {"type": "object"},
                         "headers": {"type": "object"},
                         "body": {},
+                        "purpose": {"type": "string", "minLength": 1},
                     },
                     "additionalProperties": False,
                 },
@@ -343,6 +366,16 @@ class IntegrationExecutor:
         integration_name, operation_name = capability.split(".", 1)
         spec = self.compiled["workflow"]["spec"]
         integration = spec["integrations"][integration_name]
+        if not self.reviewed and (
+            integration.get("policy")
+            or "max_requests" in integration["access"]
+            or integration["access"].get("opaque_identifiers")
+        ):
+            raise IntegrationError(
+                "integration.policy_runtime_unavailable",
+                "policy-reviewed execution is not wired yet; no request was sent",
+                category="configuration",
+            )
         operation = integration["operations"].get(operation_name)
         if operation_name == "request" and integration["access"]["mode"] == "full":
             operation = {
@@ -415,6 +448,7 @@ class IntegrationExecutor:
             else None
         )
         started = time.monotonic()
+        sensitive = list(_credential_mapping(resolved).values()) if resolved else []
         try:
             with httpx.Client(
                 transport=self.transport,
@@ -422,6 +456,15 @@ class IntegrationExecutor:
                 follow_redirects=False,
             ) as client:
                 _apply_auth(client, connection["auth"], resolved, headers, query)
+                if connection["auth"]["type"] != "none":
+                    sensitive.extend(
+                        value
+                        for key, value in headers.items()
+                        if key.lower() == "authorization" or key == connection["auth"].get("header")
+                    )
+                    authorization = headers.get("Authorization", "")
+                    if " " in authorization:
+                        sensitive.append(authorization.split(" ", 1)[1])
                 response = client.request(
                     request["method"],
                     url,
@@ -458,6 +501,13 @@ class IntegrationExecutor:
             body = response.json()
         except ValueError:
             body = {"text": response.text}
+        body = _redact(body, [item for item in sensitive if isinstance(item, str)])
+        if isinstance(body, dict) and body.get("ok") is False:
+            raise IntegrationError(
+                "integration.provider_rejected",
+                "provider rejected the request",
+                category="transport",
+            )
         duration = int((time.monotonic() - started) * 1000)
         return {
             "ok": True,

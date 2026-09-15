@@ -15,7 +15,7 @@ from outcomeci.repository import initialize
 
 @pytest.fixture(autouse=True)
 def capability_context(monkeypatch):
-    monkeypatch.setattr(local, "serve_capability", lambda *args: nullcontext({}))
+    monkeypatch.setattr(local, "serve_capability", lambda *args, **kwargs: nullcontext({}))
 
 
 def _fake_invoke(
@@ -68,7 +68,9 @@ def test_local_start_and_continue_through_tasks(tmp_path: Path, monkeypatch) -> 
     initialize(tmp_path, "filesystem")
     monkeypatch.setattr(local, "invoke", _fake_invoke)
     monkeypatch.setattr(
-        local, "_transcripts", lambda *args: {"usage_records": 0, "files": [], "usage": []}
+        local,
+        "_transcripts",
+        lambda *args, **kwargs: {"usage_records": 0, "files": [], "usage": []},
     )
 
     state = local.start(tmp_path, tmp_path / "outcome.yml", "Improve local onboarding")
@@ -239,7 +241,9 @@ def test_before_interaction_is_durable_and_resumes_execution(tmp_path: Path, mon
     workflow.write_text(yaml.safe_dump(value, sort_keys=False))
     monkeypatch.setattr(local, "invoke", _fake_invoke)
     monkeypatch.setattr(
-        local, "_transcripts", lambda *args: {"usage_records": 0, "files": [], "usage": []}
+        local,
+        "_transcripts",
+        lambda *args, **kwargs: {"usage_records": 0, "files": [], "usage": []},
     )
     state = local.start(tmp_path, workflow, "Improve onboarding")
     assert state["status"] == "awaiting_input"

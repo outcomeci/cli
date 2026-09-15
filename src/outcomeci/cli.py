@@ -22,6 +22,7 @@ from .cloud import logout as cloud_logout
 from .cloud import sync_workflow, vault_request
 from .config import ConfigError, compile_workflow
 from .conformance import run as run_conformance
+from .contracts import ContractError, render_reference, validate_contract
 from .humans import accept as accept_human_input
 from .humans import assign as assign_human_hook
 from .humans import poll as poll_human_input
@@ -45,6 +46,7 @@ from .local import respond as respond_local_outcome
 from .local import retry as retry_local_outcome
 from .local import start as start_local_outcome
 from .local import status as local_outcome_status
+from .local import trigger as trigger_local_outcome
 from .local_vault import initialize as initialize_local_vault
 from .local_vault import list_entries as list_local_vault_entries
 from .local_vault import put as put_local_vault_entry
@@ -97,9 +99,23 @@ def parser() -> argparse.ArgumentParser:
     commands = root.add_subparsers(dest="command", required=True)
     schema = commands.add_parser("schema", help="Inspect the versioned outcome.yml schema")
     schema_commands = schema.add_subparsers(dest="schema_command", required=True)
-    schema_commands.add_parser("path", help="Print the packaged schema path")
-    schema_commands.add_parser("print", help="Print the current schema")
+    schema_path_command = schema_commands.add_parser("path", help="Print the packaged schema path")
+    schema_print_command = schema_commands.add_parser("print", help="Print the current schema")
     schema_export = schema_commands.add_parser("export", help="Export the current schema")
+    for command in (schema_path_command, schema_print_command, schema_export):
+        command.add_argument(
+            "--type",
+            choices=("workflow", "email.received", "webhook.received", "agent"),
+            default="workflow",
+        )
+    schema_commands.add_parser("docs", help="Print reference documentation from enforced schemas")
+    schema_validate_command = schema_commands.add_parser(
+        "validate", help="Validate a typed payload or phase configuration"
+    )
+    schema_validate_command.add_argument("input", type=Path)
+    schema_validate_command.add_argument(
+        "--type", choices=("email.received", "webhook.received", "agent"), required=True
+    )
     schema_export.add_argument("output", type=Path)
     conformance = commands.add_parser(
         "conformance", help="Run the portable OutcomeCI runtime contract checks"
@@ -122,6 +138,19 @@ def parser() -> argparse.ArgumentParser:
     workflow = commands.add_parser("workflow", help="Manage OutcomeCI Cloud workflows")
     workflow_commands = workflow.add_subparsers(dest="workflow_command", required=True)
     workflow_sync = workflow_commands.add_parser("sync")
+    workflow_listen = workflow_commands.add_parser(
+        "listen", help="Execute queued or forwarded webhooks locally"
+    )
+    workflow_listen.add_argument("--workspace", required=True, help="Cloud workspace identifier")
+    workflow_listen.add_argument("--workflow", required=True, help="Cloud workflow identifier")
+    workflow_listen.add_argument("--dir", type=Path, default=Path.cwd())
+    workflow_listen.add_argument("--config", type=Path, default=Path("outcome.yml"))
+    workflow_listen.add_argument(
+        "--auto-continue",
+        action="store_true",
+        help="Continue configured phases automatically, without bypassing human hooks",
+    )
+    workflow_listen.add_argument("--once", action="store_true")
     workflow_sync.add_argument("file", type=Path)
     workflow_sync.add_argument("--workspace", required=True)
     workflow_sync.add_argument("--name")
@@ -203,6 +232,12 @@ def parser() -> argparse.ArgumentParser:
     start = outcome_commands.add_parser("start")
     start.add_argument("intent")
     _add_workflow_arguments(start, agent_overrides=True)
+    trigger_command = outcome_commands.add_parser(
+        "trigger", help="Execute a named typed trigger locally"
+    )
+    trigger_command.add_argument("trigger_name")
+    trigger_command.add_argument("--input", type=Path, required=True)
+    _add_workflow_arguments(trigger_command, agent_overrides=True)
     continuation = outcome_commands.add_parser("continue")
     continuation.add_argument("run_id")
     continuation.add_argument("--approve", action="store_true")
@@ -373,11 +408,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0 if result["status"] == "passed" else 2
         if args.command == "schema":
             if args.schema_command == "path":
-                print(schema_path())
+                print(schema_path(args.type))
             elif args.schema_command == "print":
-                _print_json(load_schema(), sort_keys=True)
+                _print_json(load_schema(args.type), sort_keys=True)
+            elif args.schema_command == "docs":
+                print(render_reference())
+            elif args.schema_command == "validate":
+                try:
+                    validate_contract(args.type, json.loads(args.input.read_text(encoding="utf-8")))
+                except (ContractError, OSError, json.JSONDecodeError) as exc:
+                    raise ExecutionError(str(exc)) from exc
+                _print_json({"valid": True, "type": args.type})
             else:
-                print(export_schema(args.output))
+                print(export_schema(args.output, args.type))
             return 0
         if args.command == "conformance":
             result = run_conformance(args.workflow.resolve() if args.workflow else None)
@@ -400,6 +443,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _print_json(cloud_logout())
             return 0
         if args.command == "workflow":
+            if args.workflow_command == "listen":
+                from .webhooks import listen
+
+                root = args.dir.resolve()
+                config = (root / args.config).resolve()
+                listen(
+                    args.workspace,
+                    args.workflow,
+                    root,
+                    config,
+                    auto_continue=args.auto_continue,
+                    once=args.once,
+                )
+                return 0
             result = sync_workflow(
                 args.file,
                 args.workspace,
@@ -529,6 +586,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                     indent=2,
                     sort_keys=True,
                 )
+            )
+        elif args.command == "outcome" and args.outcome_command == "trigger":
+            try:
+                payload = json.loads(args.input.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ExecutionError("trigger input must be a readable JSON file") from exc
+            if not isinstance(payload, dict):
+                raise ExecutionError("trigger input must be a JSON object")
+            _print_json(
+                trigger_local_outcome(
+                    args.workspace.resolve(),
+                    _workflow_path(args),
+                    args.trigger_name,
+                    payload,
+                    agent=args.agent,
+                    model=args.model,
+                ),
+                sort_keys=True,
             )
         elif args.command == "outcome" and args.outcome_command == "continue":
             config = _workflow_path(args)

@@ -6,6 +6,7 @@ import base64
 import os
 import shutil
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -95,6 +96,7 @@ def invoke(
     extra_env: dict[str, str] | None = None,
     writable_paths: list[Path] | None = None,
     excluded_env: set[str] | None = None,
+    read_only: bool = False,
 ) -> str:
     secrets = {
         "GITHUB_TOKEN",
@@ -108,6 +110,8 @@ def invoke(
     secrets.update(excluded_env or set())
     env = {key: value for key, value in os.environ.items() if key not in secrets}
     env.update(extra_env or {})
+    if read_only:
+        env = {key: value for key, value in env.items() if not key.startswith("OUTCOMECI_")}
     if agent == "codex":
         if (
             not allow_local_auth
@@ -118,6 +122,8 @@ def invoke(
         if os.environ.get("OPENAI_API_KEY"):
             env["OPENAI_API_KEY"] = os.environ["OPENAI_API_KEY"]
         argv = ["codex", "exec", "--approve-for-me", "--skip-git-repo-check"]
+        if read_only:
+            argv = ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check"]
         if model:
             argv += ["--model", model]
         argv += ["-"]
@@ -131,6 +137,8 @@ def invoke(
         ):
             raise ExecutionError("Claude needs ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN")
         argv = ["claude", "--print", "--permission-mode", "acceptEdits"]
+        if read_only:
+            argv = ["claude", "--print", "--tools", "", "--permission-mode", "default"]
         if model:
             argv += ["--model", model]
         argv += [prompt]
@@ -155,8 +163,7 @@ def invoke(
             "--die-with-parent",
             "--new-session",
             "--unshare-pid",
-            "--ro-bind",
-            "/",
+            "--tmpfs",
             "/",
             "--dev-bind",
             "/dev",
@@ -166,10 +173,54 @@ def invoke(
             "--tmpfs",
             "/tmp",
         ]
+        # Expose runtimes, not the host filesystem. In particular, a workflow
+        # cannot read another repository's .env or the user's cloud/SSH keys.
+        runtime_paths = {
+            Path(value)
+            for value in (
+                "/usr",
+                "/bin",
+                "/sbin",
+                "/lib",
+                "/lib64",
+                "/etc",
+                "/opt",
+                "/home/linuxbrew",
+            )
+        }
+        runtime_paths.update(
+            {Path(sys.prefix), Path(sys.base_prefix), Path(__file__).resolve().parents[2]}
+        )
+        runtime_paths.update(
+            {
+                Path.home() / ".local" / "lib",
+                Path.home() / ".local" / "bin",
+                Path.home() / ".local" / "share" / "claude",
+            }
+        )
+        for runtime_path in sorted(runtime_paths):
+            if runtime_path.exists():
+                wrapper += ["--ro-bind", str(runtime_path), str(runtime_path)]
+        # Hosts may use a resolver symlink into /run. Expose only its target,
+        # not /run (which contains host sockets and other private state).
+        resolver = Path("/etc/resolv.conf")
+        if resolver.is_symlink() and resolver.resolve().is_file():
+            target = resolver.resolve()
+            # Bind at the first link destination: the host may have another
+            # symlink there, whose intermediate directory is intentionally absent.
+            destination = Path(os.readlink(resolver))
+            if not destination.is_absolute():
+                destination = resolver.parent / destination
+            wrapper += ["--ro-bind", str(target), str(destination)]
+        wrapper += ["--ro-bind", str(workspace), str(workspace)]
         slack_home = Path.home() / ".slack"
         if slack_home.exists():
             wrapper += ["--tmpfs", str(slack_home)]
-        for agent_home in (Path.home() / ".codex", Path.home() / ".claude"):
+        for agent_home in (
+            Path(os.environ.get("CODEX_HOME", Path.home() / ".codex"))
+            if agent == "codex"
+            else Path.home() / ".claude",
+        ):
             if agent_home.exists():
                 wrapper += ["--bind", str(agent_home), str(agent_home)]
         vault_key = os.environ.get("OUTCOMECI_VAULT_KEY_FILE")
@@ -177,6 +228,37 @@ def invoke(
             wrapper += ["--ro-bind", "/dev/null", str(Path(vault_key).resolve())]
         for writable in writable_paths:
             wrapper += ["--bind", str(writable), str(writable)]
+        capability_socket = (extra_env or {}).get("OUTCOMECI_CAPABILITY_SOCKET")
+        if capability_socket:
+            socket_directory = str(Path(capability_socket).parent)
+            wrapper += ["--ro-bind", socket_directory, socket_directory]
+        # Apply masks after writable binds: no artifact directory can reveal
+        # the broker journal, Vault ciphertext/key or cloud authentication.
+        config_home = Path(
+            os.environ.get("OUTCOMECI_CONFIG_HOME", Path.home() / ".config/outcomeci")
+        )
+        for private in (
+            config_home,
+            workspace / ".outcomeci" / "vault.enc",
+            workspace / ".outcomeci" / ".broker",
+        ):
+            if private.is_dir():
+                wrapper += ["--tmpfs", str(private)]
+            elif private.is_file():
+                wrapper += ["--ro-bind", "/dev/null", str(private)]
+        outcomes = workspace / ".outcomeci" / "outcomes"
+        if outcomes.exists():
+            for journal in outcomes.glob("*/.broker"):
+                wrapper += ["--tmpfs", str(journal)]
+        for directory, subdirectories, files in os.walk(workspace):
+            subdirectories[:] = [
+                name
+                for name in subdirectories
+                if name not in {"node_modules", ".git", ".venv", "transcripts", ".worktrees"}
+            ]
+            for filename in files:
+                if filename == ".env" or filename.startswith(".env."):
+                    wrapper += ["--ro-bind", "/dev/null", str(Path(directory) / filename)]
         wrapper += ["--"]
         argv = [*wrapper, *argv]
     result = command(argv, cwd=workspace, timeout=timeout, input_text=input_text, env=env)

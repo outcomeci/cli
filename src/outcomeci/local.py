@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import uuid
@@ -19,6 +20,7 @@ from jsonschema import validate as validate_json
 
 from .capability import serve as serve_capability
 from .config import compile_workflow
+from .contracts import FORMAT_CHECKER, ContractError, validate_trigger_payload
 from .manifest import build_manifest
 from .outcome import (
     _select_sessions,
@@ -41,8 +43,12 @@ def _policy(
     selected = compiled["instructions"]["phases"].get(phase, {}).get("policy", {})
     runner = agent or selected.get("runner")
     chosen_model = model or selected.get("model")
-    if runner not in {"codex", "claude"}:
+    if runner not in {"codex", "claude", "opencode"}:
         raise ExecutionError(f"no supported agent configured for {phase}")
+    if runner == "opencode" and (
+        not isinstance(chosen_model, str) or not chosen_model.startswith("openrouter/")
+    ):
+        raise ExecutionError("OpenCode needs an explicit openrouter/<model> selection")
     return runner, chosen_model
 
 
@@ -120,7 +126,9 @@ def _validate_outputs(compiled: dict[str, Any], outcome_root: Path, phase: str) 
                 value = json.loads(path.read_text(encoding="utf-8"))
                 if contract.get("schema"):
                     validate_json(
-                        value, compiled["instructions"]["schemas"][contract["schema"]]["value"]
+                        value,
+                        compiled["instructions"]["schemas"][contract["schema"]]["value"],
+                        format_checker=FORMAT_CHECKER,
                     )
             except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
                 raise ExecutionError(
@@ -137,14 +145,24 @@ def _validate_outputs(compiled: dict[str, Any], outcome_root: Path, phase: str) 
 
 
 def _input_context(
-    compiled: dict[str, Any], outcome_root: Path, phase: str, intent: str
+    compiled: dict[str, Any], outcome_root: Path, phase: str, state: dict[str, Any]
 ) -> list[dict[str, Any]]:
     values = []
     for contract in compiled["instructions"]["phases"][phase]["expects"]["inputs"]:
         source = contract["from"]
         value: dict[str, Any] = {**contract}
         if source == "runtime.intent":
-            value["value"] = intent
+            value["value"] = state["intent"]
+        elif source.startswith("trigger."):
+            trigger = state.get("trigger") or {}
+            name = source.removeprefix("trigger.")
+            if trigger.get("name") != name:
+                if contract["required"]:
+                    raise ExecutionError(
+                        f"required input {phase}.{contract['name']} is unavailable"
+                    )
+            else:
+                value["value"] = trigger["value"]
         elif ".outputs." in source:
             producer, output_name = source.split(".outputs.", 1)
             output = next(
@@ -156,6 +174,19 @@ def _input_context(
             if contract["required"] and not path.exists():
                 raise ExecutionError(f"required input {phase}.{contract['name']} is unavailable")
             value["path"] = str(path)
+            if path.exists() and contract.get("schema"):
+                value["value"] = json.loads(path.read_text(encoding="utf-8"))
+        if "value" in value and contract.get("schema"):
+            try:
+                validate_json(
+                    value["value"],
+                    compiled["instructions"]["schemas"][contract["schema"]]["value"],
+                    format_checker=FORMAT_CHECKER,
+                )
+            except ValidationError as exc:
+                raise ExecutionError(
+                    f"input {phase}.{contract['name']} failed schema validation"
+                ) from exc
         values.append(value)
     return values
 
@@ -341,7 +372,8 @@ def _execute(
         "prior_phases": state.get("completed_phases", []),
         "workflow_revision": compiled["workflow_revision"],
         "context_files": compiled["context"]["files"],
-        "inputs": _input_context(compiled, outcome_root, phase, state["intent"]),
+        "inputs": _input_context(compiled, outcome_root, phase, state),
+        "with": compiled["instructions"]["phases"][phase]["with"],
         "outputs": compiled["instructions"]["phases"][phase]["expects"]["outputs"],
         "capabilities": compiled["instructions"]["phases"][phase].get("capabilities", []),
         "human_context": _human_context(state, outcome_root),
@@ -356,6 +388,8 @@ rationale, and a candidates array following the stable role and disposition
 contract above. Use paths relative to this repository.
 """
     prompt = f"{shared}\n\n{instructions}\n\nThis is a filesystem-backed local Standup. Work in {root}. Write durable artifacts beneath {outcome_root}. During intake, plan, and tasks, do not modify product source files. There is no OutcomeCI Cloud or Digital Twin; inspect the local repository directly. Only execute API capabilities listed for this phase, using `oci integration execute <capability> --phase {phase} --input-stdin`; the capability broker owns credentials and authorization. Only use human tools for a hook declared on this current phase with Slack or custom delivery and configured targets. Never discover targets or change hook assignments during execution. Use only readable names; never request or expose provider IDs. Before a wired hook with wait strategy `ask`, ask the requester how long to wait or whether to continue. Deliver it with `oci human request <interaction-id> --run {state['run_id']} --workspace {root}`; add `--continue` only when the requester chose to keep working. Otherwise poll for exactly their bounded duration using `oci human poll <interaction-id> --run {state['run_id']} --wait <seconds> --workspace {root}`. Apply a received response with `oci human accept` and preserve it as outcome context.\n{intake_contract}\n{json.dumps(context, separators=(',', ':'))}"
+    runtime_cli = shlex.join([sys.executable, "-m", "outcomeci.cli"])
+    prompt += f"\nThe authoritative CLI for this run is `{runtime_cli}`. Use this absolute command instead of bare `oci` in every tool invocation; login shells may select an older globally installed CLI. For API requests use `{runtime_cli} integration execute <capability> --phase {phase} --input-stdin`. Do not fall back to a global CLI."
     state.update(
         {
             "status": "running",
@@ -365,8 +399,11 @@ contract above. Use paths relative to this repository.
         }
     )
     _write(root, state)
+    phase_started_at = datetime.now(UTC).isoformat()
     try:
-        with serve_capability(root, config, state["run_id"], phase) as capability_env:
+        with serve_capability(
+            root, config, state["run_id"], phase, compiled=compiled
+        ) as capability_env:
             summary = invoke(
                 runner,
                 chosen_model,
@@ -389,7 +426,9 @@ contract above. Use paths relative to this repository.
             _validate_trajectory(
                 trajectory, {"intent_context": {"ontology_revision_id": local_revision}}
             )
-        transcripts = _transcripts(runner, outcome_root, phase)
+        transcripts = _transcripts(
+            runner, outcome_root, phase, workspace=root, since=phase_started_at
+        )
     except (ExecutionError, OSError, json.JSONDecodeError) as exc:
         state.update({"status": "error", "error": str(exc)})
         state["phases"] = _phase_states(compiled, state)
@@ -421,7 +460,9 @@ contract above. Use paths relative to this repository.
         state_repository=None,
         context_provider=compiled["workflow"]["spec"]["context"].get("provider", "filesystem"),
         context_revision_id=local_revision,
-        constitution_sha256=hashlib.sha256(constitution.read_bytes()).hexdigest(),
+        constitution_sha256=hashlib.sha256(
+            constitution.read_bytes() if constitution.exists() else b""
+        ).hexdigest(),
         repository_base_commits={repository: _local_revision(root)},
         runner=runner,
         model=chosen_model,
@@ -452,6 +493,53 @@ def start(
         "schema_version": 2,
         "run_id": _id(intent),
         "intent": intent.strip(),
+        "phase": first,
+        "status": "queued",
+        "completed_phases": [],
+        "ready_phases": _ready(compiled, []),
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    before = _first_required_interaction(compiled, first, "before", state)
+    if before:
+        return _open_interaction(root, state, first, "before", before)
+    return _execute(root, config, state, agent=agent, model=model)
+
+
+def trigger(
+    root: Path,
+    config: Path,
+    trigger_name: str,
+    payload: dict[str, Any],
+    *,
+    agent: str | None = None,
+    model: str | None = None,
+) -> dict[str, Any]:
+    """Validate and materialize a named trigger before any agent execution."""
+    compiled = compile_workflow(config)
+    definition = compiled["triggers"].get(trigger_name)
+    if definition is None:
+        raise ExecutionError(f"workflow does not declare trigger {trigger_name}")
+    encoded = json.dumps(payload, separators=(",", ":")).encode()
+    limit = 2 * 1024 * 1024 if definition["type"] == "webhook.received" else 1024 * 1024
+    if len(encoded) > limit:
+        raise ExecutionError("trigger payload exceeds the 1 MiB local limit")
+    try:
+        validate_trigger_payload(definition["type"], payload)
+    except ContractError as exc:
+        raise ExecutionError(str(exc)) from exc
+    payload = json.loads(encoded)
+    subject = payload.get("subject")
+    intent = (
+        subject
+        if isinstance(subject, str) and subject.strip()
+        else f"{definition['type']} received"
+    )
+    first = _ready(compiled, [])[0]
+    state = {
+        "schema_version": 2,
+        "run_id": _id(intent),
+        "intent": intent,
+        "trigger": {"name": trigger_name, "type": definition["type"], "value": payload},
         "phase": first,
         "status": "queued",
         "completed_phases": [],
@@ -588,7 +676,9 @@ def validate_artifacts(root: Path, config: Path, run_id: str | None) -> dict[str
         state_repository=None,
         context_provider="filesystem",
         context_revision_id=context_revision,
-        constitution_sha256=hashlib.sha256(constitution.read_bytes()).hexdigest(),
+        constitution_sha256=hashlib.sha256(
+            constitution.read_bytes() if constitution.exists() else b""
+        ).hexdigest(),
         repository_base_commits={repository: _local_revision(root)},
         runner=runner,
         model=model,
