@@ -32,7 +32,7 @@ duration is 15 minutes, with `--ttl-seconds` up to one hour.
 
 Local testing requires the separate local tunnel service: send
 `Host: ASSIGNED_HOSTNAME` to `http://127.0.0.1:7402`. Cloud sessions use HTTPS
-under `tunnel.outcomeci.com` (staging: `tunnel.staging.outcomeci.com`) once the
+under `tunnel.outcomeci.com` (staging: `staging.tunnel.outcomeci.com`) once the
 environment is deployed. Public client connections use WSS with system CA
 trust roots and explicit hostname verification; insecure remote TCP is rejected.
 User application WebSocket upgrades remain unsupported. `--public`
