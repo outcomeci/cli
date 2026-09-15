@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -142,7 +143,7 @@ def sync_credentials(
             raise SlackError("Slack returned a credential for a different app")
         tokens = result.get("api_access_tokens")
         bot = tokens.get("bot") if isinstance(tokens, dict) else None
-        if not isinstance(bot, str) or not bot.startswith("xoxb-"):
+        if not isinstance(bot, str) or re.fullmatch(r"xoxb-[A-Za-z0-9-]+", bot) is None:
             raise SlackError("Installed Slack app did not return a bot credential")
         identity = _call(client, "auth.test", bot, {})
         if identity.get("team_id") != installation["team_id"] or not identity.get("bot_id"):
