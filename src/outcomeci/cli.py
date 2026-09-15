@@ -395,6 +395,17 @@ def parser() -> argparse.ArgumentParser:
     slack_setup.add_argument("--team")
     slack_setup.add_argument("--channel", help="Default Slack channel or user ID for human hooks")
     slack_setup.add_argument("--force", action="store_true")
+    slack_sync = slack_commands.add_parser(
+        "sync-credentials", help="Sync the installed app token to a Vault"
+    )
+    _add_workspace_argument(slack_sync)
+    slack_destination = slack_sync.add_mutually_exclusive_group(required=True)
+    slack_destination.add_argument("--local", action="store_true")
+    slack_destination.add_argument("--cloud", metavar="WORKSPACE_ID")
+    slack_sync.add_argument("--vault-workspace", type=Path)
+    slack_sync.add_argument("--team")
+    slack_sync.add_argument("--path", default="slack/bot-token")
+    slack_sync.add_argument("--workflow", action="append")
     slack_status_command = slack_commands.add_parser("status")
     _add_workspace_argument(slack_status_command)
     slack_targets_command = slack_commands.add_parser("targets", help="List readable Slack targets")
@@ -931,6 +942,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                         ),
                         indent=2,
                         sort_keys=True,
+                    )
+                )
+            elif args.slack_command == "sync-credentials":
+                from .slack_vault import sync_credentials
+
+                _print_json(
+                    sync_credentials(
+                        args.workspace,
+                        local=args.local,
+                        cloud_workspace=args.cloud,
+                        vault_workspace=args.vault_workspace,
+                        team=args.team,
+                        path=args.path,
+                        workflows=args.workflow,
                     )
                 )
             elif args.slack_command == "status":
