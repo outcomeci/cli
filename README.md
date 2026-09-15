@@ -508,3 +508,16 @@ staging control plane.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the supported Python versions and the
 formatting, lint, test, and package checks used by CI.
+
+### Permission advisor execution logs
+
+A queued local workflow records integration proposals, advisor allow/revise/deny
+reasons, request start and result summaries, and static permission denials. The
+listener streams these events through its execution heartbeat to the existing
+portal workflow log. Events include phase, capability, proposal digest, method,
+endpoint and purpose; credentials, raw provider IDs, and request/response bodies
+are excluded. Stable event IDs make upload retries idempotent. Final events are
+flushed on success and failure. If the API has not advertised policy-event
+support, evidence remains in the private local broker journal. Upgrade the API
+before expecting cloud logs. A final upload failure is reported while keeping
+the local journal; it never authorizes replaying an integration effect.

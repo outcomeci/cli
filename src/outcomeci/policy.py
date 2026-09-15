@@ -16,6 +16,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from .execution_events import event, safe_text
 from .integrations import IntegrationError, IntegrationExecutor
 from .process import invoke
 
@@ -145,6 +146,19 @@ class PolicyExecutor:
             return "[provider reference withheld]"
         return value
 
+    def _event(
+        self,
+        state: dict[str, Any],
+        event_type: str,
+        phase: str,
+        capability: str,
+        message: str,
+        **fields: Any,
+    ) -> None:
+        state.setdefault("events", []).append(
+            event(event_type, phase, capability, message, **fields)
+        )
+
     def execute(self, capability: str, inputs: Mapping[str, Any], *, phase: str) -> dict[str, Any]:
         integration = self.executor.compiled["workflow"]["spec"]["integrations"][
             capability.split(".")[0]
@@ -154,16 +168,28 @@ class PolicyExecutor:
             or integration["access"].get("opaque_identifiers")
         ):
             return self.executor.execute(capability, inputs, phase=phase)
-        if capability not in self.executor.capabilities(phase):
-            raise IntegrationError(
-                "integration.capability_denied", "capability is not authorized", category="policy"
-            )
         with (self.directory / "lock").open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             file = self.directory / "journal.json"
             state = (
                 json.loads(file.read_text()) if file.exists() else {"calls": {}, "references": {}}
             )
+            if capability not in self.executor.capabilities(phase):
+                self._event(
+                    state,
+                    "permission.denied",
+                    phase,
+                    capability,
+                    "Integration capability is not authorized",
+                    decision="deny",
+                    level="warning",
+                )
+                self._save(state)
+                raise IntegrationError(
+                    "integration.capability_denied",
+                    "capability is not authorized",
+                    category="policy",
+                )
             request = dict(inputs)
             fingerprint = digest(
                 {
@@ -187,6 +213,16 @@ class PolicyExecutor:
                 for call in state["calls"].values()
             )
             if count >= integration["access"].get("max_requests", 1000):
+                self._event(
+                    state,
+                    "permission.denied",
+                    phase,
+                    capability,
+                    "Integration request budget exhausted",
+                    decision="deny",
+                    level="warning",
+                )
+                self._save(state)
                 raise IntegrationError(
                     "integration.budget_exhausted",
                     "integration request budget exhausted",
@@ -195,13 +231,36 @@ class PolicyExecutor:
             if integration["access"].get("opaque_identifiers") and re.search(
                 r'"[UCDTWB][A-Z0-9]{8,}"', json.dumps(request)
             ):
+                self._event(
+                    state,
+                    "permission.denied",
+                    phase,
+                    capability,
+                    "Use broker references instead of raw provider identifiers",
+                    decision="deny",
+                    level="warning",
+                )
+                self._save(state)
                 raise IntegrationError(
                     "integration.raw_identifier_denied",
                     "use broker references, not provider identifiers",
                     category="policy",
                 )
             references = state["references"].setdefault(capability.split(".")[0], {})
-            actual = self._resolve(request, references)
+            try:
+                actual = self._resolve(request, references)
+            except IntegrationError:
+                self._event(
+                    state,
+                    "permission.denied",
+                    phase,
+                    capability,
+                    "Provider reference is unknown or ambiguous",
+                    decision="deny",
+                    level="warning",
+                )
+                self._save(state)
+                raise
             call = {
                 "capability": capability,
                 "status": "reviewing",
@@ -209,6 +268,20 @@ class PolicyExecutor:
                 "request": request,
             }
             state["calls"][fingerprint] = call
+            self._event(
+                state,
+                "integration.proposed",
+                phase,
+                capability,
+                f"Integration request proposed: {capability}",
+                proposal_sha256=fingerprint,
+                method=request.get("method")
+                if request.get("method")
+                in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+                else None,
+                endpoint=str(request.get("path", "")).split("?", 1)[0],
+                purpose=request.get("purpose") if isinstance(request.get("purpose"), str) else None,
+            )
             self._save(state)
             policy = (
                 self.executor.compiled["instructions"]
@@ -226,13 +299,32 @@ class PolicyExecutor:
                             "receipts": list(state["calls"].values()),
                         }
                     )
-                    if (
-                        not isinstance(review, dict)
-                        or not isinstance(review.get("reason"), str)
-                        or not review["reason"].strip()
-                        or review.get("proposal_sha256") != fingerprint
-                        or review.get("decision") != "allow"
-                    ):
+                    valid = (
+                        isinstance(review, dict)
+                        and isinstance(review.get("reason"), str)
+                        and bool(review["reason"].strip())
+                        and review.get("proposal_sha256") == fingerprint
+                        and review.get("decision") in {"allow", "revise", "deny"}
+                    )
+                    decision = review["decision"] if valid else "error"
+                    reason = (
+                        safe_text(review["reason"])
+                        if valid
+                        else "Advisor returned an invalid decision for this proposal"
+                    )
+                    call["review"] = {"decision": decision, "reason": reason}
+                    self._event(
+                        state,
+                        "permission.reviewed",
+                        phase,
+                        capability,
+                        f"Permission advisor: {decision}",
+                        proposal_sha256=fingerprint,
+                        decision=decision,
+                        reason=reason,
+                        level="info" if decision == "allow" else "warning",
+                    )
+                    if decision != "allow":
                         call["status"] = "denied"
                         self._save(state)
                         raise IntegrationError(
@@ -241,16 +333,68 @@ class PolicyExecutor:
                             category="policy",
                         )
                 call["status"] = "pending"
+                self._event(
+                    state,
+                    "integration.started",
+                    phase,
+                    capability,
+                    "Approved integration request started",
+                    proposal_sha256=fingerprint,
+                )
                 self._save(state)
                 result = self.executor.execute(capability, actual, phase=phase)
                 if integration["access"].get("opaque_identifiers"):
                     result = self._opaque(result, references)
                 result["receipt"] = fingerprint
                 call.update(status="confirmed", result=result)
+                provider = (
+                    result.get("output", {}).get("result", {})
+                    if isinstance(result.get("output"), dict)
+                    else {}
+                )
+                ok = bool(result.get("ok")) and not (
+                    isinstance(provider, dict) and provider.get("ok") is False
+                )
+                status = result.get("status")
+                self._event(
+                    state,
+                    "integration.completed" if ok else "integration.failed",
+                    phase,
+                    capability,
+                    "Integration request succeeded" if ok else "Integration request failed",
+                    proposal_sha256=fingerprint,
+                    ok=ok,
+                    http_status=status
+                    if isinstance(status, int) and 100 <= status <= 599
+                    else None,
+                    level="info" if ok else "error",
+                )
                 self._save(state)
                 return result
             except Exception:
                 if call["status"] != "denied":
+                    if call["status"] == "reviewing":
+                        self._event(
+                            state,
+                            "permission.reviewed",
+                            phase,
+                            capability,
+                            "Permission advisor failed; no request authorized",
+                            decision="error",
+                            reason="Advisor execution failed",
+                            proposal_sha256=fingerprint,
+                            level="error",
+                        )
+                    else:
+                        self._event(
+                            state,
+                            "integration.failed",
+                            phase,
+                            capability,
+                            "Integration request failed or delivery is uncertain",
+                            proposal_sha256=fingerprint,
+                            level="error",
+                        )
                     call["status"] = "uncertain"
                     self._save(state)
                 raise

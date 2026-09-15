@@ -39,6 +39,51 @@ def _save(path: Path, value: dict[str, Any]) -> None:
     Path(temporary).replace(path)
 
 
+class ExecutionHeartbeat:
+    """Upload only safe broker event summaries; retries retain stable event IDs."""
+
+    def __init__(self, listener, lease):
+        self.listener, self.lease = listener, lease
+        self.run_id = None
+        self.cursor = 0
+        self.lock = threading.Lock()
+
+    def created(self, run_id: str) -> None:
+        self.run_id = run_id
+
+    def send(self) -> bool:
+        with self.lock:
+            events = []
+            if self.listener.policy_events and self.run_id:
+                journal = self.listener.root / ".outcomeci/.broker" / self.run_id / "journal.json"
+                if journal.exists():
+                    events = json.loads(journal.read_text()).get("events", [])[
+                        self.cursor : self.cursor + 100
+                    ]
+            body = {**self.lease, "events": events} if events else self.lease
+            response = self.listener.request("heartbeat", body)
+            if events:
+                if response.get("policy_events_received") != len(events):
+                    raise ListenerUnavailable(
+                        "Policy events were not acknowledged; evidence remains local"
+                    )
+                self.cursor += len(events)
+            return len(events) == 100
+
+    def drain(self) -> None:
+        while True:
+            for attempt in range(3):
+                try:
+                    more = self.send()
+                    break
+                except ListenerUnavailable:
+                    if attempt == 2:
+                        raise
+                    time.sleep(1)
+            if not more:
+                return
+
+
 class Listener:
     def __init__(
         self,
@@ -63,6 +108,7 @@ class Listener:
         self.content_sha256 = hashlib.sha256(config.read_bytes()).hexdigest()
         self.support_sha256 = self._support_hash()
         self.auto_continue = auto_continue
+        self.policy_events = False
         self.connector_id = str(uuid4())
         self.prefix = f"/workspaces/{workspace_id}/workflows/{workflow_id}/local-listener"
         self.mutex = threading.RLock()
@@ -114,7 +160,7 @@ class Listener:
         return result
 
     def register(self) -> Any:
-        return self.request(
+        result = self.request(
             "",
             {
                 "connector_id": self.connector_id,
@@ -122,6 +168,9 @@ class Listener:
                 "support_sha256": self.support_sha256,
             },
         )
+
+        self.policy_events = result.get("policy_events") is True
+        return result
 
     def claim(self) -> Any:
         if (
@@ -178,11 +227,14 @@ class Listener:
         _save(receipt, {"state": "running", "invocation_id": claim["invocation_id"]})
         stop = threading.Event()
         failure = []
+        logs = ExecutionHeartbeat(self, lease)
 
         def heartbeat() -> None:
             while not stop.wait(10):
                 try:
-                    self.request("heartbeat", lease)
+                    logs.send()
+                except ListenerUnavailable:
+                    continue
                 except ExecutionError as exc:
                     failure.append(exc)
                     return
@@ -191,7 +243,10 @@ class Listener:
         thread.start()
         result = None
         try:
-            result = local.trigger(self.root, self.config, claim["trigger_name"], payload)
+            options = {"on_created": logs.created} if self.policy_events else {}
+            result = local.trigger(
+                self.root, self.config, claim["trigger_name"], payload, **options
+            )
             while True:
                 if failure:
                     raise ExecutionError(
@@ -216,12 +271,22 @@ class Listener:
                     # continue the durable local run from another CLI/session.
                     time.sleep(1)
                     result = local.status(self.root, result["run_id"])
+            if self.policy_events:
+                try:
+                    logs.drain()
+                except ListenerUnavailable:
+                    print("Policy logs could not upload; evidence is retained locally.", flush=True)
             self.request(
                 "complete", {**lease, "status": "completed", "local_run_id": result["run_id"]}
             )
             _save(receipt, {"state": "completed", "local_run_id": result["run_id"]})
             return result
         except Exception:
+            if self.policy_events:
+                try:
+                    logs.drain()
+                except ExecutionError:
+                    print("Policy logs could not upload; evidence is retained locally.", flush=True)
             _save(
                 receipt,
                 {"state": "uncertain", "local_run_id": result.get("run_id") if result else None},

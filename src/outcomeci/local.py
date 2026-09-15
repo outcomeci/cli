@@ -11,6 +11,7 @@ import shlex
 import subprocess
 import sys
 import uuid
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -513,6 +514,7 @@ def trigger(
     *,
     agent: str | None = None,
     model: str | None = None,
+    on_created: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """Validate and materialize a named trigger before any agent execution."""
     compiled = compile_workflow(config)
@@ -546,6 +548,9 @@ def trigger(
         "ready_phases": _ready(compiled, []),
         "created_at": datetime.now(UTC).isoformat(),
     }
+    if on_created is not None:
+        _write(root, state)
+        on_created(state["run_id"])
     before = _first_required_interaction(compiled, first, "before", state)
     if before:
         return _open_interaction(root, state, first, "before", before)
