@@ -181,7 +181,32 @@ def parser() -> argparse.ArgumentParser:
     vault_put.add_argument("--name")
     vault_put.add_argument("--value")
     vault_put.add_argument("--value-stdin", action="store_true")
+    vault_put.add_argument(
+        "--secrets-json-stdin",
+        action="store_true",
+        help="Read a JSON object of secret fields from stdin",
+    )
     vault_put.add_argument("--workflow", action="append", default=[])
+    vault_put.add_argument("--provider", help="Credential provider, for example slack")
+    vault_put.add_argument(
+        "--credential-type",
+        choices=("api_key", "auth_header", "oauth2", "oidc"),
+        help="Typed credential contract used by workflow brokers",
+    )
+    vault_put.add_argument("--header-name")
+    vault_put.add_argument("--prefix")
+    vault_put.add_argument("--scheme")
+    vault_put.add_argument("--token-url")
+    vault_put.add_argument("--issuer-url")
+    vault_put.add_argument("--client-id")
+    vault_put.add_argument("--grant-type", choices=("client_credentials", "refresh_token"))
+    vault_put.add_argument("--scope", action="append", default=[])
+    vault_put.add_argument("--audience")
+    vault_put.add_argument(
+        "--secret-name",
+        choices=("api_key", "value", "client_secret", "refresh_token"),
+        help="Field receiving --value/--value-stdin; inferred for common types",
+    )
     vault_rotate = vault_commands.add_parser("rotate")
     vault_rotate.add_argument("entry_id")
     vault_rotate.add_argument("--workspace", required=True)
@@ -520,17 +545,51 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.vault_command == "list":
                 result = vault_request(args.workspace, "list")
             elif args.vault_command in {"put", "rotate"}:
-                value = sys.stdin.read().rstrip("\n") if args.value_stdin else args.value
+                reads_stdin = args.value_stdin or getattr(args, "secrets_json_stdin", False)
+                value = sys.stdin.read().rstrip("\n") if reads_stdin else args.value
                 if not value:
                     raise ExecutionError("secret value is required; use --value-stdin or --value")
                 if args.vault_command == "put":
+                    typed = bool(args.provider or args.credential_type)
+                    if typed and not (args.provider and args.credential_type):
+                        raise ExecutionError(
+                            "--provider and --credential-type must be provided together"
+                        )
+                    if typed and not reads_stdin:
+                        raise ExecutionError("typed credentials must be supplied through stdin")
+                    secrets = None
+                    if args.secrets_json_stdin:
+                        try:
+                            secrets = json.loads(value)
+                        except json.JSONDecodeError as exc:
+                            raise ExecutionError(
+                                "--secrets-json-stdin requires a JSON object"
+                            ) from exc
+                        if not isinstance(secrets, dict) or not all(
+                            isinstance(key, str) and isinstance(item, str)
+                            for key, item in secrets.items()
+                        ):
+                            raise ExecutionError("--secrets-json-stdin requires string fields")
                     result = vault_request(
                         args.workspace,
-                        "put",
+                        "put_credential" if typed else "put",
                         path=args.path,
                         display_name=args.name or args.path,
                         value=value,
                         workflow_ids=args.workflow,
+                        provider=args.provider,
+                        credential_type=args.credential_type,
+                        header_name=args.header_name,
+                        prefix=args.prefix,
+                        scheme=args.scheme,
+                        token_url=args.token_url,
+                        issuer_url=args.issuer_url,
+                        client_id=args.client_id,
+                        grant_type=args.grant_type,
+                        scopes=args.scope,
+                        audience=args.audience,
+                        secret_name=args.secret_name,
+                        secrets=secrets,
                     )
                 else:
                     result = vault_request(

@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from outcomeci.cloud_runner.main import execute
+from outcomeci.cloud_runner.main import execute, execute_workflow
 from outcomeci.cloud_runner.models import ExecutionClaim, Launch
 from outcomeci.cloud_runner.process import ProcessResult
 
@@ -68,6 +68,83 @@ class FakeClient:
 
 
 class FlowTests(unittest.TestCase):
+    def test_generic_workflow_uses_scoped_vault_values_and_completes(self):
+        claim = {
+            "content": "apiVersion: outcomeci.dev/v1alpha1\nkind: OutcomeWorkflow\n",
+            "files": {},
+            "trigger_name": "inbound",
+            "input": {"subject": "hello"},
+            "lease_token": "lease-secret",
+            "agent": {
+                "provider": "codex",
+                "credential": {"token": "agent-secret"},
+                "credential_version": 3,
+            },
+            "vault": {
+                "expires_at": "2099-01-01T00:00:00+00:00",
+                "values": {
+                    "slack/bot-token": {
+                        "credential_type": "auth_header",
+                        "configuration": {"header_name": "Authorization", "scheme": "Bearer"},
+                        "secrets": {"value": "slack-secret"},
+                    }
+                },
+            },
+        }
+
+        class WorkflowClient:
+            completed = []
+
+            def claim_workflow(self):
+                return claim
+
+            def workflow_start(self, token):
+                self.started = token
+
+            def workflow_heartbeat(self, token):
+                pass
+
+            def workflow_complete(self, token, status, **values):
+                self.completed.append((token, status, values))
+
+        client = WorkflowClient()
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "private"
+            root.mkdir()
+
+            def trigger(workspace, config, name, payload, **options):
+                self.assertEqual(
+                    options["credential_resolver"]("vault:slack/bot-token")["secrets"]["value"],
+                    "slack-secret",
+                )
+                self.assertEqual(name, "inbound")
+                return {
+                    "run_id": "run-1",
+                    "status": "completed",
+                    "completed_phases": ["notify"],
+                }
+
+            with (
+                mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
+                mock.patch("outcomeci.cloud_runner.main.tempfile.mkdtemp", return_value=str(root)),
+                mock.patch("outcomeci.local.trigger", side_effect=trigger),
+                mock.patch(
+                    "outcomeci.config.compile_workflow",
+                    return_value={"instructions": {"phases": {"notify": {}}}},
+                ),
+            ):
+                self.assertEqual(
+                    execute_workflow(
+                        Launch("workflow", "invocation-1", "boot", "https://api.outcomeci.com"),
+                        client,
+                    ),
+                    0,
+                )
+        self.assertEqual(client.completed[0][0:2], ("lease-secret", "completed"))
+        self.assertEqual(client.completed[0][2]["run_id"], "run-1")
+        self.assertEqual(client.completed[0][2]["expected_credential_version"], 3)
+        self.assertEqual(client.completed[0][2]["agent_credential"], {"token": "agent-secret"})
+
     def test_outcome_executes_with_scoped_tokens_and_persists_result(self):
         claim = outcome_claim("codex")
         client = FakeClient(claim)

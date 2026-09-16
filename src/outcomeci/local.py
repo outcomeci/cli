@@ -22,6 +22,7 @@ from jsonschema import validate as validate_json
 from .capability import serve as serve_capability
 from .config import compile_workflow
 from .contracts import FORMAT_CHECKER, ContractError, validate_trigger_payload
+from .integrations import CredentialResolver
 from .manifest import build_manifest
 from .outcome import (
     _select_sessions,
@@ -339,6 +340,7 @@ def _execute(
     *,
     agent: str | None = None,
     model: str | None = None,
+    credential_resolver: CredentialResolver | None = None,
 ) -> dict[str, Any]:
     compiled = compile_workflow(config)
     if compiled["workflow"]["spec"]["backend"].get("provider") != "filesystem":
@@ -403,7 +405,12 @@ contract above. Use paths relative to this repository.
     phase_started_at = datetime.now(UTC).isoformat()
     try:
         with serve_capability(
-            root, config, state["run_id"], phase, compiled=compiled
+            root,
+            config,
+            state["run_id"],
+            phase,
+            compiled=compiled,
+            resolver=credential_resolver,
         ) as capability_env:
             summary = invoke(
                 runner,
@@ -515,6 +522,7 @@ def trigger(
     agent: str | None = None,
     model: str | None = None,
     on_created: Callable[[str], None] | None = None,
+    credential_resolver: CredentialResolver | None = None,
 ) -> dict[str, Any]:
     """Validate and materialize a named trigger before any agent execution."""
     compiled = compile_workflow(config)
@@ -554,7 +562,14 @@ def trigger(
     before = _first_required_interaction(compiled, first, "before", state)
     if before:
         return _open_interaction(root, state, first, "before", before)
-    return _execute(root, config, state, agent=agent, model=model)
+    return _execute(
+        root,
+        config,
+        state,
+        agent=agent,
+        model=model,
+        credential_resolver=credential_resolver,
+    )
 
 
 def begin(root: Path, config: Path, intent: str) -> dict[str, Any]:

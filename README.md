@@ -350,6 +350,27 @@ slack:
   auth: {type: bearer, credential: "vault:slack/bot-token"}
 ```
 
+Provider-neutral credentials can be written directly without placing their
+value in shell history. Declare the provider and authentication contract; the
+CLI supplies safe Authorization/Bearer defaults for `auth_header`:
+
+```console
+printf '%s' "$SLACK_BOT_TOKEN" | oci vault put slack/bot-token \
+  --workspace workspace_abc123 \
+  --name "Slack bot token" \
+  --provider slack \
+  --credential-type auth_header \
+  --workflow WORKFLOW_ID \
+  --value-stdin
+```
+
+Other supported credential contracts are `api_key`, `oauth2`, and `oidc`.
+Use `--header-name`, `--prefix`, `--scheme`, `--token-url`, `--issuer-url`,
+`--client-id`, `--grant-type`, repeated `--scope`, and `--audience` to describe
+their non-secret configuration. Use `--secrets-json-stdin` for contracts such
+as OAuth refresh-token grants that require more than one secret field. Typed
+credentials deliberately reject secret values supplied in process arguments.
+
 Syncing does not modify workflow connections or enable a cloud runner to read
 a local Vault. Local execution uses the local Vault; cloud execution needs the
 cloud secret and a grant for its workflow.

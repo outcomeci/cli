@@ -16,7 +16,7 @@ from typing import Any
 
 from .config import compile_workflow
 from .humans import accept, poll, request, transport_responses
-from .integrations import IntegrationExecutor, local_credential_resolver
+from .integrations import CredentialResolver, IntegrationExecutor, local_credential_resolver
 from .policy import PolicyExecutor
 from .process import ExecutionError
 
@@ -38,7 +38,14 @@ class _Handler(socketserver.StreamRequestHandler):
 
 class Broker:
     def __init__(
-        self, root: Path, config: Path, run_id: str, phase: str, socket_path: Path, compiled=None
+        self,
+        root: Path,
+        config: Path,
+        run_id: str,
+        phase: str,
+        socket_path: Path,
+        compiled=None,
+        resolver: CredentialResolver | None = None,
     ):
         compiled = compiled if compiled is not None else compile_workflow(config)
         hooks = compiled["instructions"]["phases"][phase]["humans"]
@@ -54,7 +61,9 @@ class Broker:
         state_path = run_directory / "run.json"
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
         self.integrations = PolicyExecutor(
-            IntegrationExecutor(compiled, resolver=local_credential_resolver(root), reviewed=True),
+            IntegrationExecutor(
+                compiled, resolver=resolver or local_credential_resolver(root), reviewed=True
+            ),
             root / ".outcomeci" / ".broker" / run_id,
             {
                 "intent": state.get("intent"),
@@ -127,13 +136,19 @@ class Broker:
 
 @contextmanager
 def serve(
-    root: Path, config: Path, run_id: str, phase: str, *, compiled=None
+    root: Path,
+    config: Path,
+    run_id: str,
+    phase: str,
+    *,
+    compiled=None,
+    resolver: CredentialResolver | None = None,
 ) -> Iterator[dict[str, str]]:
     temporary = tempfile.TemporaryDirectory(prefix="oci-cap-")
     directory = Path(temporary.name)
     socket_path = directory / "human.sock"
     socket_path.unlink(missing_ok=True)
-    broker = Broker(root, config, run_id, phase, socket_path, compiled)
+    broker = Broker(root, config, run_id, phase, socket_path, compiled, resolver)
     thread = threading.Thread(target=broker.server.serve_forever, daemon=True)
     thread.start()
     try:
