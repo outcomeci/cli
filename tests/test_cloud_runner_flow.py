@@ -113,6 +113,7 @@ class FlowTests(unittest.TestCase):
             root.mkdir()
 
             def trigger(workspace, config, name, payload, **options):
+                self.assertEqual(options["execution_backend"], "outcomeci")
                 self.assertEqual(
                     options["credential_resolver"]("vault:slack/bot-token")["secrets"]["value"],
                     "slack-secret",

@@ -110,6 +110,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
             str(claim["trigger_name"]),
             dict(claim["input"]),
             credential_resolver=resolver,
+            execution_backend="outcomeci",
         )
         run_id = str(result["run_id"])
         if result.get("status") == "error":

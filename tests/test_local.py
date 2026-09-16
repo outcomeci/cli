@@ -93,6 +93,37 @@ def test_local_start_and_continue_through_tasks(tmp_path: Path, monkeypatch) -> 
     assert manifest_path.is_file()
 
 
+def test_managed_execution_accepts_outcomeci_backend(tmp_path: Path, monkeypatch) -> None:
+    initialize(tmp_path, "filesystem")
+    workflow = tmp_path / "outcome.yml"
+    value = yaml.safe_load(workflow.read_text())
+    value["spec"]["backend"] = {"provider": "outcomeci"}
+    workflow.write_text(yaml.safe_dump(value, sort_keys=False))
+    monkeypatch.setattr(local, "invoke", _fake_invoke)
+    monkeypatch.setattr(
+        local,
+        "_transcripts",
+        lambda *args, **kwargs: {"usage_records": 0, "files": [], "usage": []},
+    )
+    state = {
+        "schema_version": 2,
+        "run_id": "managed-run",
+        "intent": "Verify managed execution",
+        "phase": "intake",
+        "status": "queued",
+        "completed_phases": [],
+        "ready_phases": ["intake"],
+        "created_at": "2026-09-16T00:00:00+00:00",
+    }
+
+    result = local._execute(tmp_path, workflow, state, execution_backend="outcomeci")
+
+    assert result["status"] == "awaiting_input"
+    manifest = json.loads((tmp_path / ".outcomeci/outcomes/managed-run/manifest.json").read_text())
+    assert manifest["backend"]["provider"] == "outcomeci"
+    assert manifest["context"]["revision_id"].startswith("outcomeci:")
+
+
 def test_interactive_session_lifecycle(tmp_path: Path) -> None:
     initialize(tmp_path, "filesystem")
     state = local.begin(tmp_path, tmp_path / "outcome.yml", "Improve local onboarding")

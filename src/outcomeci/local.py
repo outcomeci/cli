@@ -341,10 +341,14 @@ def _execute(
     agent: str | None = None,
     model: str | None = None,
     credential_resolver: CredentialResolver | None = None,
+    execution_backend: str = "filesystem",
 ) -> dict[str, Any]:
     compiled = compile_workflow(config)
-    if compiled["workflow"]["spec"]["backend"].get("provider") != "filesystem":
-        raise ExecutionError("local execution requires spec.backend.provider: filesystem")
+    configured_backend = compiled["workflow"]["spec"]["backend"].get("provider")
+    if configured_backend != execution_backend:
+        raise ExecutionError(
+            f"{execution_backend} execution requires spec.backend.provider: {execution_backend}"
+        )
     phase = state["phase"]
     runner, chosen_model = _policy(compiled, phase, agent, model)
     outcome_root = root / ".outcomeci" / "outcomes" / state["run_id"]
@@ -366,7 +370,7 @@ def _execute(
     repository = root.name
     shared = compiled["instructions"]["orchestrator"]["content"]
     instructions = compiled["instructions"]["phases"][phase]["content"]
-    local_revision = f"filesystem:{compiled['workflow_revision']}"
+    context_revision = f"{execution_backend}:{compiled['workflow_revision']}"
     context = {
         "run_id": state["run_id"],
         "phase": phase,
@@ -385,12 +389,18 @@ def _execute(
     if phase == "intake":
         intake_contract = f"""
 Write intake/trajectory.json with schema_version \"1\", ontology_revision_id
-\"{local_revision}\", and at least one target. The local target must use
+\"{context_revision}\", and at least one target. The local target must use
 repository_id \"local:{repository}\", repository \"{repository}\", a non-empty
 rationale, and a candidates array following the stable role and disposition
 contract above. Use paths relative to this repository.
 """
-    prompt = f"{shared}\n\n{instructions}\n\nThis is a filesystem-backed local Standup. Work in {root}. Write durable artifacts beneath {outcome_root}. During intake, plan, and tasks, do not modify product source files. There is no OutcomeCI Cloud or Digital Twin; inspect the local repository directly. Only execute API capabilities listed for this phase, using `oci integration execute <capability> --phase {phase} --input-stdin`; the capability broker owns credentials and authorization. Only use human tools for a hook declared on this current phase with Slack or custom delivery and configured targets. Never discover targets or change hook assignments during execution. Use only readable names; never request or expose provider IDs. Before a wired hook with wait strategy `ask`, ask the requester how long to wait or whether to continue. Deliver it with `oci human request <interaction-id> --run {state['run_id']} --workspace {root}`; add `--continue` only when the requester chose to keep working. Otherwise poll for exactly their bounded duration using `oci human poll <interaction-id> --run {state['run_id']} --wait <seconds> --workspace {root}`. Apply a received response with `oci human accept` and preserve it as outcome context.\n{intake_contract}\n{json.dumps(context, separators=(',', ':'))}"
+    runtime_description = (
+        "This is an OutcomeCI-managed cloud run hydrated from an immutable workflow revision."
+        if execution_backend == "outcomeci"
+        else "This is a filesystem-backed local Standup. There is no OutcomeCI Cloud or "
+        "Digital Twin; inspect the local repository directly."
+    )
+    prompt = f"{shared}\n\n{instructions}\n\n{runtime_description} Work in {root}. Write durable artifacts beneath {outcome_root}. During intake, plan, and tasks, do not modify product source files. Only execute API capabilities listed for this phase, using `oci integration execute <capability> --phase {phase} --input-stdin`; the capability broker owns credentials and authorization. Only use human tools for a hook declared on this current phase with Slack or custom delivery and configured targets. Never discover targets or change hook assignments during execution. Use only readable names; never request or expose provider IDs. Before a wired hook with wait strategy `ask`, ask the requester how long to wait or whether to continue. Deliver it with `oci human request <interaction-id> --run {state['run_id']} --workspace {root}`; add `--continue` only when the requester chose to keep working. Otherwise poll for exactly their bounded duration using `oci human poll <interaction-id> --run {state['run_id']} --wait <seconds> --workspace {root}`. Apply a received response with `oci human accept` and preserve it as outcome context.\n{intake_contract}\n{json.dumps(context, separators=(',', ':'))}"
     runtime_cli = shlex.join([sys.executable, "-m", "outcomeci.cli"])
     prompt += f"\nThe authoritative CLI for this run is `{runtime_cli}`. Use this absolute command instead of bare `oci` in every tool invocation; login shells may select an older globally installed CLI. For API requests use `{runtime_cli} integration execute <capability> --phase {phase} --input-stdin`. Do not fall back to a global CLI."
     state.update(
@@ -432,7 +442,7 @@ contract above. Use paths relative to this repository.
                 (outcome_root / "intake" / "trajectory.json").read_text(encoding="utf-8")
             )
             _validate_trajectory(
-                trajectory, {"intent_context": {"ontology_revision_id": local_revision}}
+                trajectory, {"intent_context": {"ontology_revision_id": context_revision}}
             )
         transcripts = _transcripts(
             runner, outcome_root, phase, workspace=root, since=phase_started_at
@@ -464,10 +474,10 @@ contract above. Use paths relative to this repository.
         trajectory_version=None,
         phase=phase,
         workflow_revision=compiled["workflow_revision"],
-        backend_provider="filesystem",
+        backend_provider=execution_backend,
         state_repository=None,
         context_provider=compiled["workflow"]["spec"]["context"].get("provider", "filesystem"),
-        context_revision_id=local_revision,
+        context_revision_id=context_revision,
         constitution_sha256=hashlib.sha256(
             constitution.read_bytes() if constitution.exists() else b""
         ).hexdigest(),
@@ -523,6 +533,7 @@ def trigger(
     model: str | None = None,
     on_created: Callable[[str], None] | None = None,
     credential_resolver: CredentialResolver | None = None,
+    execution_backend: str = "filesystem",
 ) -> dict[str, Any]:
     """Validate and materialize a named trigger before any agent execution."""
     compiled = compile_workflow(config)
@@ -569,6 +580,7 @@ def trigger(
         agent=agent,
         model=model,
         credential_resolver=credential_resolver,
+        execution_backend=execution_backend,
     )
 
 
