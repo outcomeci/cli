@@ -1,3 +1,5 @@
+import io
+import json
 import tempfile
 import unittest
 import urllib.error
@@ -89,7 +91,30 @@ class ContractTests(unittest.TestCase):
             self.assertRaises(CoreError) as raised,
         ):
             client.claim_execution()
-        self.assertEqual(raised.exception.category, "lease_conflict")
+        self.assertEqual(raised.exception.category, "core_conflict")
+
+    def test_client_preserves_effect_evidence_conflicts(self):
+        client = CoreClient("https://api.outcomeci.com", "job", "bootstrap", "workflow")
+        error = urllib.error.HTTPError(
+            "https://api.outcomeci.com",
+            409,
+            "error",
+            None,
+            io.BytesIO(
+                json.dumps(
+                    {
+                        "detail": "required integration effect evidence is missing: "
+                        "notify:slack.request"
+                    }
+                ).encode()
+            ),
+        )
+        with (
+            mock.patch("urllib.request.urlopen", side_effect=error),
+            self.assertRaises(CoreError) as raised,
+        ):
+            client.claim_workflow()
+        self.assertEqual(raised.exception.category, "workflow_effect_evidence_missing")
 
     def test_safe_helpers_preserve_scoped_credentials(self):
         with tempfile.TemporaryDirectory() as directory:
