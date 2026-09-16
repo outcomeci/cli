@@ -308,6 +308,46 @@ def vault_request(workspace_id: str, operation: str, **values: Any) -> dict[str,
             "value": values["value"],
             "workflow_ids": values.get("workflow_ids", []),
         }
+    elif operation == "put_credential":
+        credential_type = values["credential_type"]
+        inferred_secret = {
+            "api_key": "api_key",
+            "auth_header": "value",
+            "oauth2": "client_secret",
+            "oidc": "client_secret",
+        }[credential_type]
+        configuration = {
+            key: values.get(key)
+            for key in (
+                "header_name",
+                "prefix",
+                "scheme",
+                "token_url",
+                "issuer_url",
+                "client_id",
+                "grant_type",
+                "audience",
+            )
+            if values.get(key) is not None
+        }
+        if credential_type == "auth_header":
+            configuration.setdefault("header_name", "Authorization")
+            configuration.setdefault("scheme", "Bearer")
+        elif credential_type == "api_key":
+            configuration.setdefault("header_name", "X-API-Key")
+        if values.get("scopes"):
+            configuration["scopes"] = values["scopes"]
+        method, path, expected = "POST", f"{base}/credentials", {201}
+        body = {
+            "path": values["path"],
+            "display_name": values["display_name"],
+            "service": values["provider"],
+            "credential_type": credential_type,
+            "configuration": configuration,
+            "secrets": values.get("secrets")
+            or {values.get("secret_name") or inferred_secret: values["value"]},
+            "workflow_ids": values.get("workflow_ids", []),
+        }
     elif operation == "rotate":
         method, path, body = (
             "POST",

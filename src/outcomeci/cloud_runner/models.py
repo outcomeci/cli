@@ -67,7 +67,7 @@ def command(value: Any) -> tuple[str, ...]:
 
 @dataclass(frozen=True)
 class Launch:
-    mode: Literal["authorize", "outcome"]
+    mode: Literal["authorize", "outcome", "workflow"]
     job_id: str
     bootstrap_token: str
     core_url: str
@@ -75,7 +75,7 @@ class Launch:
     @classmethod
     def from_env(cls, env: dict[str, str]) -> Launch:
         mode = env.get("AGENT_RUNNER_MODE")
-        if mode not in ("authorize", "outcome"):
+        if mode not in ("authorize", "outcome", "workflow"):
             raise ContractError("invalid runner mode")
         return cls(
             mode,

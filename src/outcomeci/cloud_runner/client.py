@@ -20,11 +20,18 @@ class CoreClient:
     def __init__(
         self, base_url: str, object_id: str, bootstrap_token: str, mode: str, timeout: int = 20
     ):
-        resource = "agent-auth-attempts" if mode == "authorize" else "outcome-jobs"
+        resource = (
+            "agent-auth-attempts"
+            if mode == "authorize"
+            else "workflow-invocations"
+            if mode == "workflow"
+            else "outcome-jobs"
+        )
         self._url = f"{base_url}/v1/internal/{resource}/{object_id}"
         self._base_url = base_url
         self._token = bootstrap_token
         self._timeout = timeout
+        self._max_response = 24 * 1024 * 1024 if mode == "workflow" else 1024 * 1024
 
     def _post(
         self, suffix: str, payload: dict[str, Any], token: str | None = None
@@ -42,8 +49,8 @@ class CoreClient:
             with urllib.request.urlopen(request, timeout=self._timeout) as response:
                 if response.status == 204:
                     return {}
-                raw = response.read(1_048_577)
-                if len(raw) > 1_048_576:
+                raw = response.read(self._max_response + 1)
+                if len(raw) > self._max_response:
                     raise CoreError("invalid_core_response")
                 result = json.loads(raw or b"{}")
                 if not isinstance(result, dict):
@@ -63,6 +70,43 @@ class CoreClient:
 
     def claim_execution(self) -> ExecutionClaim:
         return ExecutionClaim.parse(self._post("claim", {}))
+
+    def claim_workflow(self) -> dict[str, Any]:
+        return self._post("claim", {})
+
+    def workflow_start(self, lease_token: str) -> None:
+        self._post("start", {"lease_token": lease_token})
+
+    def workflow_heartbeat(self, lease_token: str) -> None:
+        self._post("heartbeat", {"lease_token": lease_token})
+
+    def workflow_credential(self, lease_token: str, reference: str) -> Any:
+        return self._post(
+            "credentials/resolve",
+            {"lease_token": lease_token, "reference": reference},
+        ).get("value")
+
+    def workflow_complete(
+        self,
+        lease_token: str,
+        status: str,
+        *,
+        run_id: str | None = None,
+        category: str | None = None,
+        expected_credential_version: int | None = None,
+        agent_credential: Any | None = None,
+    ) -> None:
+        self._post(
+            "complete",
+            {
+                "lease_token": lease_token,
+                "status": status,
+                "run_id": run_id,
+                "category": category,
+                "expected_credential_version": expected_credential_version,
+                "agent_credential": agent_credential,
+            },
+        )
 
     def verification(
         self, session_token: str, url: str, code: str | None, expires_at: str | None

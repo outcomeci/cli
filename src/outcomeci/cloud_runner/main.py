@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 from contextlib import suppress
 from datetime import UTC, datetime
@@ -24,6 +26,130 @@ CLAUDE_TOKEN = re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b")
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 CONTROL_CHAR = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 HEARTBEAT_INTERVAL_SECONDS = 15.0
+
+
+def execute_workflow(launch: Launch, client: CoreClient) -> int:
+    """Execute one immutable generic workflow claim with broker-private credentials."""
+    from .. import local
+    from ..config import compile_workflow
+
+    claim = client.claim_workflow()
+    lease = str(claim["lease_token"])
+    root = Path(
+        tempfile.mkdtemp(
+            prefix="oci-cloud-workflow-",
+            dir=os.environ.get("AGENT_PRIVATE_ROOT", "/home/runner"),
+        )
+    )
+    os.chmod(root, 0o700)
+    previous: dict[str, str | None] = {}
+    stop = threading.Event()
+    run_id: str | None = None
+    agent_update = None
+    credential_version = None
+    try:
+        config = root / "outcome.yml"
+        config.write_text(str(claim["content"]), encoding="utf-8")
+        for name, encoded in dict(claim.get("files") or {}).items():
+            target = (root / str(name)).resolve()
+            if not target.is_relative_to(root.resolve()):
+                raise ContractError("workflow support file escaped its root")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(base64.b64decode(encoded, validate=True))
+
+        agent = dict(claim["agent"])
+        provider = str(agent["provider"])
+        credential = agent["credential"]
+        credential_version = int(agent["credential_version"])
+        if provider == "codex":
+            home = root / ".codex"
+            home.mkdir(mode=0o700)
+            (home / "auth.json").write_text(
+                json.dumps(credential, separators=(",", ":")), encoding="utf-8"
+            )
+            os.chmod(home / "auth.json", 0o600)
+            (home / "config.toml").write_text(
+                'cli_auth_credentials_store = "file"\n', encoding="utf-8"
+            )
+            injected = {"CODEX_HOME": str(home)}
+        elif provider == "claude":
+            injected = {"CLAUDE_CODE_OAUTH_TOKEN": str(credential)}
+        elif provider == "opencode":
+            injected = {"OPENROUTER_API_KEY": str(credential)}
+        else:
+            raise ContractError("unsupported workflow agent")
+        for key, value in injected.items():
+            previous[key] = os.environ.get(key)
+            os.environ[key] = value
+
+        values = dict((claim.get("vault") or {}).get("values") or {})
+        vault_expires = datetime.fromisoformat(str((claim.get("vault") or {})["expires_at"]))
+
+        def resolver(reference: str):
+            if datetime.now(UTC) >= vault_expires:
+                raise ContractError("workflow credential lease expired")
+            if not reference.startswith("vault:"):
+                raise ContractError("cloud credentials must use vault references")
+            path = reference.removeprefix("vault:")
+            if path not in values:
+                raise ContractError("credential is not granted to this workflow")
+            return values[path]
+
+        client.workflow_start(lease)
+
+        def pulse() -> None:
+            while not stop.wait(HEARTBEAT_INTERVAL_SECONDS):
+                with suppress(CoreError):
+                    client.workflow_heartbeat(lease)
+
+        heartbeat = threading.Thread(target=pulse, daemon=True)
+        heartbeat.start()
+        result = local.trigger(
+            root,
+            config,
+            str(claim["trigger_name"]),
+            dict(claim["input"]),
+            credential_resolver=resolver,
+        )
+        run_id = str(result["run_id"])
+        if result.get("status") == "error":
+            raise ContractError("workflow recorded an error")
+        phase_count = len(compile_workflow(config)["instructions"]["phases"])
+        if len(result.get("completed_phases", [])) != phase_count:
+            raise ContractError("workflow requires a durable continuation")
+        if provider == "codex":
+            agent_update = json.loads((root / ".codex" / "auth.json").read_text())
+        client.workflow_complete(
+            lease,
+            "completed",
+            run_id=run_id,
+            expected_credential_version=credential_version,
+            agent_credential=agent_update,
+        )
+        return 0
+    except Exception as exc:
+        auth_path = root / ".codex" / "auth.json"
+        if credential_version is not None and auth_path.is_file():
+            with suppress(OSError, json.JSONDecodeError):
+                agent_update = json.loads(auth_path.read_text())
+        with suppress(CoreError):
+            client.workflow_complete(
+                lease,
+                "failed",
+                run_id=run_id,
+                category=type(exc).__name__,
+                expected_credential_version=credential_version,
+                agent_credential=agent_update,
+            )
+        raise
+    finally:
+        stop.set()
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        shutil.rmtree(root, ignore_errors=True)
 
 
 def reconcile_failure(client: CoreClient, claim: object, category: str, retryable: bool) -> None:
@@ -311,7 +437,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         launch = Launch.from_env(dict(os.environ))
         client = CoreClient(launch.core_url, launch.job_id, launch.bootstrap_token, launch.mode)
-        return authorize(launch, client) if launch.mode == "authorize" else execute(launch, client)
+        if launch.mode == "authorize":
+            return authorize(launch, client)
+        if launch.mode == "workflow":
+            return execute_workflow(launch, client)
+        return execute(launch, client)
     except TimeoutError:
         category, retryable = "agent_timeout", True
     except CoreError as error:
