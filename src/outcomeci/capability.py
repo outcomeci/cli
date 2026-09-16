@@ -51,6 +51,7 @@ class Broker:
         compiled=None,
         resolver: CredentialResolver | None = None,
         event_sink=None,
+        policy_reviewer=None,
     ):
         compiled = compiled if compiled is not None else compile_workflow(config)
         hooks = compiled["instructions"]["phases"][phase]["humans"]
@@ -77,6 +78,7 @@ class Broker:
                 "trigger": state.get("trigger"),
                 "phase": compiled["instructions"]["phases"][phase],
             },
+            reviewer=policy_reviewer,
             event_sink=event_sink,
         )
         self.token = secrets.token_urlsafe(32)
@@ -152,6 +154,7 @@ def serve(
     compiled=None,
     resolver: CredentialResolver | None = None,
     event_sink=None,
+    policy_reviewer=None,
 ) -> Iterator[dict[str, str]]:
     temporary = tempfile.TemporaryDirectory(prefix="oci-cap-")
     directory = Path(temporary.name)
@@ -166,6 +169,7 @@ def serve(
         compiled,
         resolver,
         event_sink,
+        policy_reviewer,
     )
     thread = threading.Thread(target=broker.server.serve_forever, daemon=True)
     thread.start()

@@ -87,6 +87,9 @@ class CoreClient:
     ) -> dict[str, Any]:
         return self._post("heartbeat", {"lease_token": lease_token, "events": events or []})
 
+    def workflow_policy_review(self, lease_token: str, proposal: dict[str, Any]) -> dict[str, Any]:
+        return self._post("policy-review", {"lease_token": lease_token, "proposal": proposal})
+
     def workflow_credential(self, lease_token: str, reference: str) -> Any:
         return self._post(
             "credentials/resolve",

@@ -22,6 +22,7 @@ from jsonschema import validate as validate_json
 from .capability import serve as serve_capability
 from .config import compile_workflow
 from .contracts import FORMAT_CHECKER, ContractError, validate_trigger_payload
+from .execution_events import event, safe_text
 from .integrations import CredentialResolver
 from .manifest import build_manifest
 from .outcome import (
@@ -185,6 +186,86 @@ def _validate_required_effects(
     missing = sorted(set(required) - confirmed)
     if missing:
         raise ExecutionError("required integration effect was not confirmed: " + ", ".join(missing))
+
+
+def _write_effect_receipts(root: Path, outcome_root: Path, run_id: str, phase: str) -> Path:
+    """Materialize credential-free effect evidence for output validation and repair."""
+    journal = root / ".outcomeci" / ".broker" / run_id / "journal.json"
+    calls: list[dict[str, Any]] = []
+    try:
+        state = json.loads(journal.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    for receipt in (state.get("calls") or {}).values():
+        if not isinstance(receipt, dict):
+            continue
+        result = receipt.get("result") if isinstance(receipt.get("result"), dict) else {}
+        provider = (
+            result.get("output", {}).get("result", {})
+            if isinstance(result.get("output"), dict)
+            else {}
+        )
+        calls.append(
+            {
+                "capability": receipt.get("capability"),
+                "proposal_sha256": receipt.get("proposal_sha256"),
+                "status": receipt.get("status"),
+                "ok": bool(result.get("ok"))
+                and not (isinstance(provider, dict) and provider.get("ok") is False),
+                "http_status": (
+                    result.get("status") if isinstance(result.get("status"), int) else None
+                ),
+            }
+        )
+    target = outcome_root / "effects.json"
+    target.write_text(
+        json.dumps(
+            {"schema_version": "1", "phase": phase, "effects": calls},
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return target
+
+
+def _repair_outputs(
+    root: Path,
+    compiled: dict[str, Any],
+    outcome_root: Path,
+    phase: str,
+    runner: str,
+    model: str | None,
+    error: ExecutionError,
+    writable_artifacts: list[Path],
+    excluded_env: set[str],
+    *,
+    container_isolated: bool,
+) -> str:
+    """Run one output-only repair with no capability socket or provider credentials."""
+    contracts = compiled["instructions"]["phases"][phase]["expects"]["outputs"]
+    prompt = (
+        "Repair the declared workflow output artifacts only. External effects may already "
+        "have completed and must not be repeated. You have no integration or human "
+        "capabilities. Read effects.json for sanitized effect evidence, then edit only the "
+        "declared output paths so they satisfy their contracts. Do not modify source code.\n"
+        f"Outcome directory: {outcome_root}\n"
+        f"Validation error: {safe_text(str(error))}\n"
+        f"Output contracts: {json.dumps(contracts, separators=(',', ':'))}"
+    )
+    return invoke(
+        runner,
+        model,
+        prompt,
+        root,
+        600,
+        allow_local_auth=True,
+        extra_env={},
+        writable_paths=writable_artifacts,
+        excluded_env=excluded_env,
+        container_isolated=container_isolated,
+    )
 
 
 def _input_context(
@@ -394,6 +475,7 @@ def _execute(
     model: str | None = None,
     credential_resolver: CredentialResolver | None = None,
     event_sink: Callable[[dict[str, Any]], None] | None = None,
+    policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     execution_backend: str = "filesystem",
     _container_isolated: bool = False,
 ) -> dict[str, Any]:
@@ -486,6 +568,7 @@ contract above. Use paths relative to this repository.
             compiled=compiled,
             resolver=credential_resolver,
             event_sink=event_sink,
+            policy_reviewer=policy_reviewer,
         ) as capability_env:
             summary = invoke(
                 runner,
@@ -502,7 +585,58 @@ contract above. Use paths relative to this repository.
         persisted = _read(root, state["run_id"])
         if persisted.get("status") == "awaiting_input":
             return persisted
-        _validate_outputs(compiled, outcome_root, phase)
+        _write_effect_receipts(root, outcome_root, state["run_id"], phase)
+        try:
+            _validate_outputs(compiled, outcome_root, phase)
+        except ExecutionError as validation_error:
+            if event_sink:
+                event_sink(
+                    event(
+                        "artifact.repair_started",
+                        phase,
+                        "workflow.outputs",
+                        "Output contract repair started",
+                        reason=safe_text(str(validation_error)),
+                        level="warning",
+                    )
+                )
+            try:
+                repair_summary = _repair_outputs(
+                    root,
+                    compiled,
+                    outcome_root,
+                    phase,
+                    runner,
+                    chosen_model,
+                    validation_error,
+                    writable_artifacts,
+                    connection_secrets,
+                    container_isolated=_container_isolated,
+                )
+                _validate_outputs(compiled, outcome_root, phase)
+            except ExecutionError as repair_error:
+                if event_sink:
+                    event_sink(
+                        event(
+                            "artifact.repair_failed",
+                            phase,
+                            "workflow.outputs",
+                            "Output contract repair failed",
+                            reason=safe_text(str(repair_error)),
+                            level="error",
+                        )
+                    )
+                raise
+            if event_sink:
+                event_sink(
+                    event(
+                        "artifact.repair_completed",
+                        phase,
+                        "workflow.outputs",
+                        "Output contract repair completed",
+                    )
+                )
+            summary = f"{summary}\n{repair_summary}"
         _validate_required_effects(root, compiled, state["run_id"], phase)
         if phase == "intake":
             trajectory = json.loads(
@@ -607,6 +741,7 @@ def trigger(
     on_created: Callable[[str], None] | None = None,
     credential_resolver: CredentialResolver | None = None,
     event_sink: Callable[[dict[str, Any]], None] | None = None,
+    policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
     execution_backend: str = "filesystem",
     _container_isolated: bool = False,
 ) -> dict[str, Any]:
@@ -656,6 +791,7 @@ def trigger(
         model=model,
         credential_resolver=credential_resolver,
         event_sink=event_sink,
+        policy_reviewer=policy_reviewer,
         execution_backend=execution_backend,
         _container_isolated=_container_isolated,
     )
