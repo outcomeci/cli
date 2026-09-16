@@ -5,9 +5,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from outcomeci.cloud_runner.main import execute, execute_workflow
+from outcomeci.cloud_runner.main import execute, execute_workflow, workflow_failure_category
 from outcomeci.cloud_runner.models import ExecutionClaim, Launch
 from outcomeci.cloud_runner.process import ProcessResult
+from outcomeci.process import ExecutionError
 
 
 def outcome_claim(provider: str = "codex") -> ExecutionClaim:
@@ -68,6 +69,11 @@ class FakeClient:
 
 
 class FlowTests(unittest.TestCase):
+    def test_workflow_failure_categories_do_not_expose_agent_output(self):
+        error = ExecutionError("codex failed with exit 1: private provider output", True)
+
+        self.assertEqual(workflow_failure_category(error), "agent_process_failed")
+
     def test_generic_workflow_uses_scoped_vault_values_and_completes(self):
         claim = {
             "content": "apiVersion: outcomeci.dev/v1alpha1\nkind: OutcomeWorkflow\n",
