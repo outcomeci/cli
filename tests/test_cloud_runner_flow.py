@@ -1,6 +1,7 @@
 import json
 import os
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -239,6 +240,42 @@ class FlowTests(unittest.TestCase):
         self.assertTrue(all(entry[1]["phase"] == "plan" for entry in client.logs))
         self.assertNotIn("github-token", json.dumps(client.logs))
         self.assertNotIn("job-token", json.dumps(client.logs))
+
+    def test_heartbeat_continues_while_agent_is_silent(self):
+        claim = outcome_claim("codex")
+        client = FakeClient(claim)
+        result = {"status": "completed", "manifest": {}, "artifact_paths": []}
+        with tempfile.TemporaryDirectory() as parent:
+            root, workspace = Path(parent) / "private", Path(parent) / "workspace"
+            root.mkdir()
+            workspace.mkdir()
+
+            def silent_run(command, *, cwd, env, timeout, on_tick):
+                time.sleep(0.04)
+                return ProcessResult(0, json.dumps(result), "")
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {"AGENT_PRIVATE_ROOT": parent, "AGENT_WORK_ROOT": str(workspace)},
+                    clear=False,
+                ),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.tempfile.mkdtemp",
+                    return_value=str(root),
+                ),
+                mock.patch("outcomeci.cloud_runner.main.HEARTBEAT_INTERVAL_SECONDS", 0.01),
+                mock.patch("outcomeci.cloud_runner.main.run", side_effect=silent_run),
+            ):
+                self.assertEqual(
+                    execute(
+                        Launch("outcome", "job_1", "boot", "https://api.outcomeci.com"),
+                        client,
+                    ),
+                    0,
+                )
+        self.assertGreaterEqual(len(client.heartbeats), 3)
+        self.assertEqual(len(client.completions), 1)
 
     def test_opencode_hydrates_openrouter_key_in_private_home(self):
         claim = outcome_claim("opencode")
