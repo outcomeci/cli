@@ -15,6 +15,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
+from ..process import ExecutionError
 from .client import CoreClient, CoreError
 from .models import ContractError, Launch
 from .process import run
@@ -26,6 +27,24 @@ CLAUDE_TOKEN = re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b")
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 CONTROL_CHAR = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 HEARTBEAT_INTERVAL_SECONDS = 15.0
+
+
+def workflow_failure_category(error: Exception) -> str:
+    """Return an operator-safe category without emitting workflow or provider output."""
+    if isinstance(error, ExecutionError):
+        message = str(error).casefold()
+        if "authentication" in message or "unauthorized" in message or "oauth" in message:
+            return "provider_auth_rejected"
+        if "bubblewrap" in message or "sandbox" in message:
+            return "runner_sandbox_unavailable"
+        if "failed with exit" in message:
+            return "agent_process_failed"
+        if "output" in message or "artifact" in message:
+            return "workflow_artifact_invalid"
+        return "workflow_execution_failed"
+    if isinstance(error, ContractError):
+        return "workflow_contract_failed"
+    return "internal_failure"
 
 
 def execute_workflow(launch: Launch, client: CoreClient) -> int:
@@ -138,7 +157,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 lease,
                 "failed",
                 run_id=run_id,
-                category=type(exc).__name__,
+                category=workflow_failure_category(exc),
                 expected_credential_version=credential_version,
                 agent_credential=agent_update,
             )
@@ -449,6 +468,8 @@ def main(argv: list[str] | None = None) -> int:
         category, retryable = error.category, error.retryable
     except (ContractError, KeyError, json.JSONDecodeError):
         category, retryable = "invalid_job", False
+    except ExecutionError as error:
+        category, retryable = workflow_failure_category(error), error.retryable
     except Exception as error:
         category, retryable = "internal_failure", True
         exception_type = type(error).__name__
