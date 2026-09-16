@@ -100,7 +100,11 @@ def _contract(value: Any, field: str, *, output: bool) -> dict[str, Any]:
         raise ConfigError(f"{field}.name must be a valid identifier")
     if not isinstance(media_type, str) or "/" not in media_type:
         raise ConfigError(f"{field}.media_type is required")
-    result = {"name": name, "media_type": media_type, "required": item.get("required", True)}
+    result = {
+        "name": name,
+        "media_type": media_type,
+        "required": item.get("required", True),
+    }
     if not isinstance(result["required"], bool):
         raise ConfigError(f"{field}.required must be true or false")
     if output:
@@ -172,7 +176,8 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
             if not isinstance(purpose, str) or not purpose.strip():
                 raise ConfigError(f"{field}.{timing}[{index}].purpose is required")
             delivery = _mapping(
-                item.get("delivery", {"type": "local"}), f"{field}.{timing}[{index}].delivery"
+                item.get("delivery", {"type": "local"}),
+                f"{field}.{timing}[{index}].delivery",
             )
             if delivery.get("type") not in {"local", "slack", "custom"}:
                 raise ConfigError(f"{field}.{timing}[{index}].delivery.type is unsupported")
@@ -186,7 +191,8 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
             normalized_targets = []
             for target_index, target_value in enumerate(targets):
                 target = _mapping(
-                    target_value, f"{field}.{timing}[{index}].delivery.targets[{target_index}]"
+                    target_value,
+                    f"{field}.{timing}[{index}].delivery.targets[{target_index}]",
                 )
                 if target.get("kind") not in {"user", "channel", "group"}:
                     raise ConfigError(
@@ -197,7 +203,10 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
                         f"{field}.{timing}[{index}].delivery.targets[{target_index}].name is required"
                     )
                 normalized_targets.append(
-                    {"kind": target["kind"], "name": target["name"].strip().lstrip("@#")}
+                    {
+                        "kind": target["kind"],
+                        "name": target["name"].strip().lstrip("@#"),
+                    }
                 )
             if normalized_targets:
                 delivery["targets"] = normalized_targets
@@ -240,7 +249,7 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
 
 def _phase_integrations(
     policy: dict[str, Any], field: str
-) -> tuple[list[str], dict[str, list[dict[str, Any]]]]:
+) -> tuple[list[str], list[str], dict[str, list[dict[str, Any]]]]:
     """Normalize typed phase integrations into the existing runtime graph shape."""
     capabilities = policy.get("capabilities", [])
     if not isinstance(capabilities, list) or not all(
@@ -248,6 +257,7 @@ def _phase_integrations(
     ):
         raise ConfigError(f"{field}.capabilities must be a list of names")
     capability_names = list(capabilities)
+    required_capabilities: list[str] = []
     raw_humans = _mapping(policy.get("humans", {}), f"{field}.humans")
     human_groups: dict[str, list[Any]] = {
         timing: list(raw_humans.get(timing, [])) for timing in ("before", "during", "after")
@@ -263,7 +273,13 @@ def _phase_integrations(
             capability = entry.get("capability")
             if not isinstance(capability, str) or not capability.strip():
                 raise ConfigError(f"{entry_field}.capability is required")
-            capability_names.append(capability.strip())
+            capability = capability.strip()
+            capability_names.append(capability)
+            required = entry.get("required", False)
+            if not isinstance(required, bool):
+                raise ConfigError(f"{entry_field}.required must be true or false")
+            if required:
+                required_capabilities.append(capability)
         elif integration_type == "human":
             timing = entry.get("timing")
             if timing not in human_groups:
@@ -274,7 +290,7 @@ def _phase_integrations(
         else:
             raise ConfigError(f"{entry_field}.type must be api or human")
     humans = _human_interactions(human_groups, f"{field}.integrations")
-    return sorted(set(capability_names)), humans
+    return sorted(set(capability_names)), sorted(set(required_capabilities)), humans
 
 
 def _schema(value: Any, field: str) -> dict[str, Any]:
@@ -313,7 +329,10 @@ def _triggers(value: Any) -> dict[str, dict[str, Any]]:
         if trigger_type == "webhook.received":
             from .webhooks import validate_delivery_config
 
-            normalized[name] = {"type": trigger_type, **validate_delivery_config(trigger)}
+            normalized[name] = {
+                "type": trigger_type,
+                **validate_delivery_config(trigger),
+            }
             continue
         unknown = set(trigger) - {"type", "filters"}
         if unknown:
@@ -381,7 +400,15 @@ def _http_auth(value: Any, field: str) -> dict[str, Any]:
         if not isinstance(credential, str) or not credential.strip():
             raise ConfigError(f"{field}.credential is required")
         result["credential"] = credential.strip()
-    for key in ("header", "query", "scheme", "token_url", "discovery_url", "scope", "audience"):
+    for key in (
+        "header",
+        "query",
+        "scheme",
+        "token_url",
+        "discovery_url",
+        "scope",
+        "audience",
+    ):
         if auth.get(key) is not None:
             if not isinstance(auth[key], str) or not auth[key].strip():
                 raise ConfigError(f"{field}.{key} must be non-empty")
@@ -709,7 +736,7 @@ def load(path: Path) -> dict[str, Any]:
                 raise ConfigError(f"duplicate output path: {item['path']}")
             output_paths.add(item["path"])
             outputs[(phase_name, item["name"])] = item
-        capabilities, humans = _phase_integrations(policy, field)
+        capabilities, required_capabilities, humans = _phase_integrations(policy, field)
         normalized_phases[phase_name] = {
             "type": "agent",
             "with": with_values,
@@ -718,6 +745,7 @@ def load(path: Path) -> dict[str, Any]:
             "outputs": phase_outputs,
             "humans": humans,
             "capabilities": capabilities,
+            "required_capabilities": required_capabilities,
         }
 
     for phase_name, phase in normalized_phases.items():
@@ -824,7 +852,8 @@ def load(path: Path) -> dict[str, Any]:
             operations = _mapping(item.get("operations"), f"spec.connections[{index}].operations")
             for operation in ("request", "poll"):
                 operation_value = _mapping(
-                    operations.get(operation), f"spec.connections[{index}].operations.{operation}"
+                    operations.get(operation),
+                    f"spec.connections[{index}].operations.{operation}",
                 )
                 if transport_type == "http" and not isinstance(operation_value.get("path"), str):
                     raise ConfigError(
@@ -850,7 +879,8 @@ def load(path: Path) -> dict[str, Any]:
                     )
                 for operation, operation_contract in contract.items():
                     operation_contract = _mapping(
-                        operation_contract, f"spec.connections[{index}].contract.{operation}"
+                        operation_contract,
+                        f"spec.connections[{index}].contract.{operation}",
                     )
                     if set(operation_contract) - {"input", "output"}:
                         raise ConfigError(
@@ -972,7 +1002,9 @@ def compile_workflow(path: Path) -> dict[str, Any]:
         policy = spec["agents"]["phases"][phase_name]
         phases[phase_name] = {
             **_reference(
-                root, policy["instructions"], f"spec.agents.phases.{phase_name}.instructions"
+                root,
+                policy["instructions"],
+                f"spec.agents.phases.{phase_name}.instructions",
             ),
             "needs": contract["needs"],
             "type": contract["type"],
@@ -980,6 +1012,7 @@ def compile_workflow(path: Path) -> dict[str, Any]:
             "expects": {"inputs": contract["inputs"], "outputs": contract["outputs"]},
             "humans": contract["humans"],
             "capabilities": contract["capabilities"],
+            "required_capabilities": contract["required_capabilities"],
             "policy": {
                 "runner": policy.get("runner", default.get("runner")),
                 "model": policy.get("model", default.get("model")),
@@ -1022,7 +1055,9 @@ def compile_workflow(path: Path) -> dict[str, Any]:
             reviewer = integration["policy"]
             reviewers[name] = {
                 **_reference(
-                    root, reviewer["instructions"], f"spec.integrations.{name}.policy.instructions"
+                    root,
+                    reviewer["instructions"],
+                    f"spec.integrations.{name}.policy.instructions",
                 ),
                 "policy": {
                     "runner": reviewer.get("runner", default.get("runner")),
@@ -1039,7 +1074,10 @@ def compile_workflow(path: Path) -> dict[str, Any]:
         "workflow": normalized,
         "graph": {"levels": graph["levels"]},
         "instructions": resolved,
-        "context": {"provider": context.get("provider", "outcomeci"), "files": context_files},
+        "context": {
+            "provider": context.get("provider", "outcomeci"),
+            "files": context_files,
+        },
         "triggers": graph["triggers"],
     }
     revision = hashlib.sha256(

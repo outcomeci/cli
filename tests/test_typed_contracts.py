@@ -38,7 +38,7 @@ def typed_workflow(root: Path) -> Path:
                 "instructions": ".outcomeci/instructions/plan.md",
                 "needs": [],
                 "with": {"recipient": {"type": "user", "value": "@izzy"}},
-                "integrations": [{"type": "api", "capability": "slack.request"}],
+                "integrations": [{"type": "api", "capability": "slack.request", "required": True}],
                 "expects": {
                     "inputs": [
                         {
@@ -93,7 +93,9 @@ def email_payload() -> dict:
     return copy.deepcopy(contract_schema("email.received")["examples"][0])
 
 
-def test_typed_configuration_compiles_and_preserves_enforcement_contract(tmp_path: Path) -> None:
+def test_typed_configuration_compiles_and_preserves_enforcement_contract(
+    tmp_path: Path,
+) -> None:
     path = typed_workflow(tmp_path)
     import jsonschema
 
@@ -103,7 +105,11 @@ def test_typed_configuration_compiles_and_preserves_enforcement_contract(tmp_pat
     phase = instructions["phases"]["notify"]
     assert phase["type"] == "agent"
     assert phase["with"]["recipient"]["value"] == "@izzy"
-    assert instructions["orchestrator"]["policy"] == {"runner": "codex", "model": "default-model"}
+    assert phase["required_capabilities"] == ["slack.request"]
+    assert instructions["orchestrator"]["policy"] == {
+        "runner": "codex",
+        "model": "default-model",
+    }
     assert instructions["integration_policies"]["slack"]["policy"] == {
         "runner": "codex",
         "model": "default-model",
@@ -120,6 +126,9 @@ def test_typed_configuration_compiles_and_preserves_enforcement_contract(tmp_pat
         lambda value: value["spec"]["agents"]["phases"]["notify"].update(type="script"),
         lambda value: value["spec"]["agents"]["phases"]["notify"].update(typo="ignored"),
         lambda value: value["spec"]["agents"]["phases"]["notify"].update(with_value=[]),
+        lambda value: value["spec"]["agents"]["phases"]["notify"]["integrations"][0].update(
+            required="yes"
+        ),
         lambda value: value["spec"].update(instructions={"standup": "policy.md"}),
         lambda value: value["spec"]["integrations"]["slack"]["access"].update(max_requests=True),
         lambda value: value["spec"]["integrations"]["slack"]["access"].update(max_requests=0),
@@ -214,7 +223,9 @@ def test_policy_instruction_edits_change_revision(tmp_path: Path) -> None:
     assert compile_workflow(path)["workflow_revision"] != first
 
 
-def test_policy_configuration_fails_closed_until_executor_is_wired(tmp_path: Path) -> None:
+def test_policy_configuration_fails_closed_until_executor_is_wired(
+    tmp_path: Path,
+) -> None:
     calls = []
     executor = IntegrationExecutor(
         compile_workflow(typed_workflow(tmp_path)),
@@ -223,7 +234,9 @@ def test_policy_configuration_fails_closed_until_executor_is_wired(tmp_path: Pat
     )
     with pytest.raises(IntegrationError, match="not wired yet"):
         executor.execute(
-            "slack.request", {"method": "GET", "path": "/api/users.list"}, phase="notify"
+            "slack.request",
+            {"method": "GET", "path": "/api/users.list"},
+            phase="notify",
         )
     assert calls == []
 
@@ -235,6 +248,47 @@ def test_inline_output_contract_is_enforced(tmp_path: Path) -> None:
         local._validate_outputs(compiled, tmp_path, "notify")
     (tmp_path / "delivery.json").write_text('{"status":"delivered"}')
     local._validate_outputs(compiled, tmp_path, "notify")
+
+
+def test_required_integration_needs_broker_confirmed_success(tmp_path: Path) -> None:
+    compiled = compile_workflow(typed_workflow(tmp_path))
+    with pytest.raises(ExecutionError, match="evidence is missing"):
+        local._validate_required_effects(tmp_path, compiled, "run-1", "notify")
+    broker = tmp_path / ".outcomeci/.broker/run-1"
+    broker.mkdir(parents=True)
+    journal = broker / "journal.json"
+    journal.write_text(
+        json.dumps(
+            {
+                "calls": {
+                    "receipt": {
+                        "capability": "slack.request",
+                        "status": "confirmed",
+                        "result": {"ok": False},
+                    }
+                }
+            }
+        )
+    )
+    with pytest.raises(ExecutionError, match="slack.request"):
+        local._validate_required_effects(tmp_path, compiled, "run-1", "notify")
+    journal.write_text(
+        json.dumps(
+            {
+                "calls": {
+                    "receipt": {
+                        "capability": "slack.request",
+                        "status": "confirmed",
+                        "result": {
+                            "ok": True,
+                            "output": {"result": {"ok": True}},
+                        },
+                    }
+                }
+            }
+        )
+    )
+    local._validate_required_effects(tmp_path, compiled, "run-1", "notify")
 
 
 def test_instruction_symlink_cannot_read_private_vault(tmp_path: Path) -> None:

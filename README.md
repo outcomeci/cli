@@ -182,6 +182,7 @@ spec:
         integrations:
           - type: api
             capability: linear.create_issue
+            required: true
 
   connections:
     linear:

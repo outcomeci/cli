@@ -69,7 +69,9 @@ def test_denied_proposals_never_resolve_credentials(tmp_path, decision):
     broker.executor.resolver = lambda _: pytest.fail("credential was resolved")
     with pytest.raises(IntegrationError, match="policy did not approve"):
         broker.execute(
-            "slack.request", {"method": "POST", "path": "/api/chat.postMessage"}, phase="notify"
+            "slack.request",
+            {"method": "POST", "path": "/api/chat.postMessage"},
+            phase="notify",
         )
 
 
@@ -81,7 +83,11 @@ def test_transport_failure_is_durable_and_not_replayed(tmp_path):
         raise httpx.ReadTimeout("uncertain delivery")
 
     broker = executor(tmp_path, handler=send)
-    inputs = {"method": "POST", "path": "/api/chat.postMessage", "body": {"text": "Hello"}}
+    inputs = {
+        "method": "POST",
+        "path": "/api/chat.postMessage",
+        "body": {"text": "Hello"},
+    }
     with pytest.raises(IntegrationError):
         broker.execute("slack.request", inputs, phase="notify")
     with pytest.raises(IntegrationError, match="uncertain"):
@@ -110,7 +116,11 @@ def test_ambiguous_names_and_provider_errors_fail_safely(tmp_path):
     with pytest.raises(IntegrationError, match="ambiguous"):
         broker.execute(
             "slack.request",
-            {"method": "POST", "path": "/api/conversations.open", "body": {"users": "ref:izzy:id"}},
+            {
+                "method": "POST",
+                "path": "/api/conversations.open",
+                "body": {"users": "ref:izzy:id"},
+            },
             phase="notify",
         )
     broker.executor.transport = httpx.MockTransport(
@@ -155,7 +165,7 @@ def test_normal_email_agent_broker_policy_http_flow(tmp_path, monkeypatch, execu
         value = yaml.safe_load(path.read_text())
         value["spec"]["backend"]["provider"] = "outcomeci"
         path.write_text(yaml.safe_dump(value, sort_keys=False))
-    requests, reviews = [], []
+    requests, reviews, events = [], [], []
     responses = [
         {"ok": True, "members": [{"id": "U0123456789", "name": "izzy"}]},
         {"ok": True, "channel": {"id": "D0123456789"}},
@@ -195,7 +205,8 @@ def test_normal_email_agent_broker_policy_http_flow(tmp_path, monkeypatch, execu
         for key, value in kwargs["extra_env"].items():
             monkeypatch.setenv(key, value)
         users = capability.invoke_integration(
-            "slack.request", {"method": "GET", "path": "/api/users.list", "purpose": "Find @izzy"}
+            "slack.request",
+            {"method": "GET", "path": "/api/users.list", "purpose": "Find @izzy"},
         )
         user = users["output"]["result"]["members"][0]["id"]
         assert user == "ref:izzy:id"
@@ -230,11 +241,22 @@ def test_normal_email_agent_broker_policy_http_flow(tmp_path, monkeypatch, execu
         "inbound",
         email_payload(),
         credential_resolver=(lambda _: "private-token"),
+        event_sink=events.append,
         execution_backend=execution_backend,
         _container_isolated=execution_backend == "outcomeci",
     )
     assert state["completed_phases"] == ["notify"]
     assert len(requests) == len(reviews) == 3
+    assert [event["event_type"] for event in events] == [
+        event_type
+        for _ in range(3)
+        for event_type in (
+            "integration.proposed",
+            "permission.reviewed",
+            "integration.started",
+            "integration.completed",
+        )
+    ]
     assert all(review["context"]["trigger"]["value"] == email_payload() for review in reviews)
     assert "private-token" not in json.dumps(reviews)
 
