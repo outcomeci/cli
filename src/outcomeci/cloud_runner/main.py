@@ -403,36 +403,67 @@ def execute(launch: Launch, client: CoreClient) -> int:
         phase = "preparing"
         detail: str | None = "Preparing the Outcome workspace"
         last_heartbeat = 0.0
+        heartbeat_error: CoreError | None = None
+        heartbeat_stop = threading.Event()
+        heartbeat_lock = threading.Lock()
 
         def heartbeat() -> None:
-            nonlocal last_heartbeat
-            now = time.monotonic()
-            if now - last_heartbeat < HEARTBEAT_INTERVAL_SECONDS:
-                return
-            try:
-                client.heartbeat(claim.completion_token, claim.lease_id, phase, detail)
-            except CoreError as error:
-                if not error.retryable:
-                    raise
-                return
-            last_heartbeat = now
+            nonlocal heartbeat_error, last_heartbeat
+            with heartbeat_lock:
+                now = time.monotonic()
+                if now - last_heartbeat < HEARTBEAT_INTERVAL_SECONDS:
+                    return
+                try:
+                    client.heartbeat(claim.completion_token, claim.lease_id, phase, detail)
+                except CoreError as error:
+                    if not error.retryable:
+                        heartbeat_error = error
+                        raise
+                    return
+                last_heartbeat = now
 
         def tick() -> None:
+            if heartbeat_error is not None:
+                raise heartbeat_error
             heartbeat()
 
         heartbeat()
+
+        def heartbeat_loop() -> None:
+            while not heartbeat_stop.wait(HEARTBEAT_INTERVAL_SECONDS):
+                try:
+                    heartbeat()
+                except CoreError:
+                    return
+
+        heartbeat_thread = threading.Thread(
+            target=heartbeat_loop,
+            name="outcomeci-execution-heartbeat",
+            daemon=True,
+        )
+        heartbeat_thread.start()
         lifecycle(
             "agent.started",
             "Coding agent started.",
             metadata={"provider": claim.provider},
         )
-        result = run(
-            claim.command,
-            cwd=workspace,
-            env=env,
-            timeout=claim.timeout_seconds,
-            on_tick=tick,
-        )
+        try:
+            result = run(
+                claim.command,
+                cwd=workspace,
+                env=env,
+                timeout=claim.timeout_seconds,
+                on_tick=tick,
+            )
+        finally:
+            heartbeat_stop.set()
+            heartbeat_thread.join(timeout=HEARTBEAT_INTERVAL_SECONDS)
+        if heartbeat_error is not None:
+            raise heartbeat_error
+        # Fence completion with one last renewal so successful external effects
+        # cannot be followed by a false failed run at the lease boundary.
+        last_heartbeat = 0.0
+        heartbeat()
         try:
             lines = [line for line in result.stdout.splitlines() if line.strip()]
             outcome_result = json.loads(lines[-1]) if lines else None
