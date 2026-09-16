@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
+from contextlib import suppress
 from typing import Any
 
 from .models import AuthorizationClaim, ExecutionClaim
@@ -65,7 +66,19 @@ class CoreClient:
             if error.code in (401, 403):
                 raise CoreError("claim_rejected") from error
             if error.code == 409:
-                raise CoreError("lease_conflict") from error
+                category = "core_conflict"
+                with suppress(Exception):
+                    body = json.loads(error.read(4097))
+                    detail = str(body.get("detail", "")).casefold()
+                    if "lease" in detail or "workflow is not" in detail:
+                        category = "lease_conflict"
+                    elif "effect evidence" in detail:
+                        category = "workflow_effect_evidence_missing"
+                    elif "credential changed" in detail:
+                        category = "credential_conflict"
+                    elif "policy review digest" in detail:
+                        category = "policy_review_conflict"
+                raise CoreError(category) from error
             raise CoreError("core_unavailable", error.code >= 500) from error
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
             raise CoreError("core_unavailable", True) from error
