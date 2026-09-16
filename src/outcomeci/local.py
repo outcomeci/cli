@@ -67,13 +67,17 @@ def _phase_states(compiled: dict[str, Any], state: dict[str, Any]) -> dict[str, 
     completed = set(state.get("completed_phases", []))
     ready = set(_ready(compiled, list(completed)))
     return {
-        name: "completed"
-        if name in completed
-        else "active"
-        if name == state.get("phase") and state.get("status") == "running"
-        else "queued"
-        if name in ready
-        else "blocked"
+        name: (
+            "completed"
+            if name in completed
+            else (
+                "active"
+                if name == state.get("phase") and state.get("status") == "running"
+                else "queued"
+                if name in ready
+                else "blocked"
+            )
+        )
         for name in compiled["instructions"]["phases"]
     }
 
@@ -144,6 +148,43 @@ def _validate_outputs(compiled: dict[str, Any], outcome_root: Path, phase: str) 
                 raise ExecutionError(
                     f"output {phase}.{contract['name']} is not UTF-8 text"
                 ) from exc
+
+
+def _validate_required_effects(
+    root: Path, compiled: dict[str, Any], run_id: str, phase: str
+) -> None:
+    """Require broker-confirmed evidence for effects declared as mandatory."""
+    required = compiled["instructions"]["phases"][phase].get("required_capabilities", [])
+    if not required:
+        return
+    journal = root / ".outcomeci" / ".broker" / run_id / "journal.json"
+    try:
+        state = json.loads(journal.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ExecutionError("required integration effect evidence is missing") from exc
+    calls = state.get("calls", {})
+    if not isinstance(calls, dict):
+        raise ExecutionError("required integration effect evidence is invalid")
+    confirmed: set[str] = set()
+    for call in calls.values():
+        if not isinstance(call, dict) or call.get("status") != "confirmed":
+            continue
+        result = call.get("result")
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            continue
+        provider_result = (
+            result.get("output", {}).get("result", {})
+            if isinstance(result.get("output"), dict)
+            else {}
+        )
+        if isinstance(provider_result, dict) and provider_result.get("ok") is False:
+            continue
+        capability = call.get("capability")
+        if isinstance(capability, str):
+            confirmed.add(capability)
+    missing = sorted(set(required) - confirmed)
+    if missing:
+        raise ExecutionError("required integration effect was not confirmed: " + ", ".join(missing))
 
 
 def _input_context(
@@ -232,7 +273,11 @@ def _interaction_path(root: Path, run_id: str, phase: str, interaction_id: str) 
 
 
 def _open_interaction(
-    root: Path, state: dict[str, Any], phase: str, timing: str, definition: dict[str, Any]
+    root: Path,
+    state: dict[str, Any],
+    phase: str,
+    timing: str,
+    definition: dict[str, Any],
 ) -> dict[str, Any]:
     request = {
         "schema_version": 1,
@@ -262,7 +307,10 @@ def _open_interaction(
 
 
 def _first_required_interaction(
-    compiled: dict[str, Any], phase: str, timing: str, state: dict[str, Any] | None = None
+    compiled: dict[str, Any],
+    phase: str,
+    timing: str,
+    state: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     resolved = {
         item["id"]
@@ -306,7 +354,11 @@ def _write(root: Path, state: dict[str, Any]) -> None:
 
 def _local_revision(root: Path) -> str | None:
     result = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=root, text=True, capture_output=True, check=False
+        ["git", "rev-parse", "HEAD"],
+        cwd=root,
+        text=True,
+        capture_output=True,
+        check=False,
     )
     return result.stdout.strip() if result.returncode == 0 else None
 
@@ -341,6 +393,7 @@ def _execute(
     agent: str | None = None,
     model: str | None = None,
     credential_resolver: CredentialResolver | None = None,
+    event_sink: Callable[[dict[str, Any]], None] | None = None,
     execution_backend: str = "filesystem",
     _container_isolated: bool = False,
 ) -> dict[str, Any]:
@@ -390,6 +443,9 @@ def _execute(
         "with": compiled["instructions"]["phases"][phase]["with"],
         "outputs": compiled["instructions"]["phases"][phase]["expects"]["outputs"],
         "capabilities": compiled["instructions"]["phases"][phase].get("capabilities", []),
+        "required_capabilities": compiled["instructions"]["phases"][phase].get(
+            "required_capabilities", []
+        ),
         "human_context": _human_context(state, outcome_root),
     }
     intake_contract = ""
@@ -429,6 +485,7 @@ contract above. Use paths relative to this repository.
             phase,
             compiled=compiled,
             resolver=credential_resolver,
+            event_sink=event_sink,
         ) as capability_env:
             summary = invoke(
                 runner,
@@ -446,12 +503,14 @@ contract above. Use paths relative to this repository.
         if persisted.get("status") == "awaiting_input":
             return persisted
         _validate_outputs(compiled, outcome_root, phase)
+        _validate_required_effects(root, compiled, state["run_id"], phase)
         if phase == "intake":
             trajectory = json.loads(
                 (outcome_root / "intake" / "trajectory.json").read_text(encoding="utf-8")
             )
             _validate_trajectory(
-                trajectory, {"intent_context": {"ontology_revision_id": context_revision}}
+                trajectory,
+                {"intent_context": {"ontology_revision_id": context_revision}},
             )
         transcripts = _transcripts(
             runner, outcome_root, phase, workspace=root, since=phase_started_at
@@ -508,7 +567,12 @@ contract above. Use paths relative to this repository.
 
 
 def start(
-    root: Path, config: Path, intent: str, *, agent: str | None = None, model: str | None = None
+    root: Path,
+    config: Path,
+    intent: str,
+    *,
+    agent: str | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     if not intent.strip():
         raise ExecutionError("intent is required")
@@ -542,6 +606,7 @@ def trigger(
     model: str | None = None,
     on_created: Callable[[str], None] | None = None,
     credential_resolver: CredentialResolver | None = None,
+    event_sink: Callable[[dict[str, Any]], None] | None = None,
     execution_backend: str = "filesystem",
     _container_isolated: bool = False,
 ) -> dict[str, Any]:
@@ -590,6 +655,7 @@ def trigger(
         agent=agent,
         model=model,
         credential_resolver=credential_resolver,
+        event_sink=event_sink,
         execution_backend=execution_backend,
         _container_isolated=_container_isolated,
     )
@@ -734,7 +800,10 @@ def validate_artifacts(root: Path, config: Path, run_id: str | None) -> dict[str
     after = _first_required_interaction(compiled, phase, "after", state)
     if after:
         state.update(
-            {"phase_output_ready": True, "workflow_revision": compiled["workflow_revision"]}
+            {
+                "phase_output_ready": True,
+                "workflow_revision": compiled["workflow_revision"],
+            }
         )
         _open_interaction(root, state, phase, "after", after)
         return {
@@ -751,7 +820,7 @@ def validate_artifacts(root: Path, config: Path, run_id: str | None) -> dict[str
     state.update(
         {
             "completed_phases": completed,
-            "status": "ready_for_implementation" if phase == "tasks" else "awaiting_confirmation",
+            "status": ("ready_for_implementation" if phase == "tasks" else "awaiting_confirmation"),
             "workflow_revision": compiled["workflow_revision"],
         }
     )
@@ -823,7 +892,12 @@ def continue_run(
 
 
 def retry(
-    root: Path, config: Path, run_id: str, *, agent: str | None = None, model: str | None = None
+    root: Path,
+    config: Path,
+    run_id: str,
+    *,
+    agent: str | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     """Retry agent execution after a failure without replaying resolved gates."""
     state = _read(root, run_id)
@@ -947,7 +1021,10 @@ def recover(root: Path, config: Path, run_id: str) -> dict[str, Any]:
     if _worker_live(outcome_root):
         raise ExecutionError("outcome worker is still active")
     state.update(
-        {"status": "error", "error": "previous outcome worker exited before recording completion"}
+        {
+            "status": "error",
+            "error": "previous outcome worker exited before recording completion",
+        }
     )
     _write(root, state)
     return launch_worker(root, config, run_id, "retry")
@@ -1011,7 +1088,10 @@ def respond(
     request.update(
         {
             "status": "approved" if approve else "rejected" if reject else "answered",
-            "response": {"message": message.strip(), "responded_at": datetime.now(UTC).isoformat()},
+            "response": {
+                "message": message.strip(),
+                "responded_at": datetime.now(UTC).isoformat(),
+            },
         }
     )
     path.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -1042,9 +1122,9 @@ def respond(
             {
                 "completed_phases": completed,
                 "phase_output_ready": False,
-                "status": "ready_for_implementation"
-                if phase == "tasks"
-                else "awaiting_confirmation",
+                "status": (
+                    "ready_for_implementation" if phase == "tasks" else "awaiting_confirmation"
+                ),
             }
         )
         state["ready_phases"] = _ready(compiled, completed)

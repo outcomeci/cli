@@ -18,7 +18,12 @@ class CoreError(RuntimeError):
 
 class CoreClient:
     def __init__(
-        self, base_url: str, object_id: str, bootstrap_token: str, mode: str, timeout: int = 20
+        self,
+        base_url: str,
+        object_id: str,
+        bootstrap_token: str,
+        mode: str,
+        timeout: int = 20,
     ):
         resource = (
             "agent-auth-attempts"
@@ -77,8 +82,10 @@ class CoreClient:
     def workflow_start(self, lease_token: str) -> None:
         self._post("start", {"lease_token": lease_token})
 
-    def workflow_heartbeat(self, lease_token: str) -> None:
-        self._post("heartbeat", {"lease_token": lease_token})
+    def workflow_heartbeat(
+        self, lease_token: str, events: list[dict[str, Any]] | None = None
+    ) -> dict[str, Any]:
+        return self._post("heartbeat", {"lease_token": lease_token, "events": events or []})
 
     def workflow_credential(self, lease_token: str, reference: str) -> Any:
         return self._post(
@@ -144,7 +151,11 @@ class CoreClient:
         self._post("logs", payload, session_token)
 
     def fail(
-        self, session_token: str, category: str, retryable: bool, lease_id: str | None = None
+        self,
+        session_token: str,
+        category: str,
+        retryable: bool,
+        lease_id: str | None = None,
     ) -> None:
         payload: dict[str, Any] = {"category": category, "retryable": retryable}
         if lease_id is not None:

@@ -138,7 +138,8 @@
       "required": ["type", "capability"],
       "properties": {
         "type": {"const": "api"},
-        "capability": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,62}\\.[a-z][a-z0-9_-]{0,62}$"}
+        "capability": {"type": "string", "pattern": "^[a-z][a-z0-9_-]{0,62}\\.[a-z][a-z0-9_-]{0,62}$"},
+        "required": {"type": "boolean"}
       },
       "additionalProperties": false
     },

@@ -36,11 +36,14 @@ class PolicyExecutor:
         directory: Path,
         context: dict[str, Any],
         reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        event_sink: Callable[[dict[str, Any]], None] | None = None,
     ):
         self.executor = executor
         self.directory = directory
         self.context = context
         self.reviewer = reviewer or self._review
+        self.event_sink = event_sink
+        self._event_cursor = 0
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
 
     def _review(self, proposal: dict[str, Any]) -> dict[str, Any]:
@@ -83,6 +86,11 @@ class PolicyExecutor:
             stream.flush()
             os.fsync(stream.fileno())
         Path(name).replace(self.directory / "journal.json")
+        events = state.get("events", [])
+        if self.event_sink:
+            while self._event_cursor < len(events):
+                self.event_sink(events[self._event_cursor])
+                self._event_cursor += 1
 
     @staticmethod
     def _resolve(value: Any, references: dict[str, str]) -> Any:
@@ -275,12 +283,16 @@ class PolicyExecutor:
                 capability,
                 f"Integration request proposed: {capability}",
                 proposal_sha256=fingerprint,
-                method=request.get("method")
-                if request.get("method")
-                in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
-                else None,
+                method=(
+                    request.get("method")
+                    if request.get("method")
+                    in {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+                    else None
+                ),
                 endpoint=str(request.get("path", "")).split("?", 1)[0],
-                purpose=request.get("purpose") if isinstance(request.get("purpose"), str) else None,
+                purpose=(
+                    request.get("purpose") if isinstance(request.get("purpose"), str) else None
+                ),
             )
             self._save(state)
             policy = (
@@ -361,12 +373,12 @@ class PolicyExecutor:
                     "integration.completed" if ok else "integration.failed",
                     phase,
                     capability,
-                    "Integration request succeeded" if ok else "Integration request failed",
+                    ("Integration request succeeded" if ok else "Integration request failed"),
                     proposal_sha256=fingerprint,
                     ok=ok,
-                    http_status=status
-                    if isinstance(status, int) and 100 <= status <= 599
-                    else None,
+                    http_status=(
+                        status if isinstance(status, int) and 100 <= status <= 599 else None
+                    ),
                     level="info" if ok else "error",
                 )
                 self._save(state)

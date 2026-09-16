@@ -64,6 +64,8 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
     previous: dict[str, str | None] = {}
     stop = threading.Event()
     run_id: str | None = None
+    heartbeat_lock = threading.Lock()
+    heartbeat_failure: list[Exception] = []
     agent_update = None
     credential_version = None
     try:
@@ -116,10 +118,24 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
 
         client.workflow_start(lease)
 
+        def policy_event(event: dict) -> None:
+            with heartbeat_lock:
+                response = client.workflow_heartbeat(lease, [event])
+            if response.get("policy_events_received") != 1:
+                raise CoreError("policy_evidence_unacknowledged", True)
+
+        def created(value: str) -> None:
+            nonlocal run_id
+            run_id = value
+
         def pulse() -> None:
             while not stop.wait(HEARTBEAT_INTERVAL_SECONDS):
-                with suppress(CoreError):
-                    client.workflow_heartbeat(lease)
+                try:
+                    with heartbeat_lock:
+                        client.workflow_heartbeat(lease)
+                except CoreError as exc:
+                    heartbeat_failure.append(exc)
+                    return
 
         heartbeat = threading.Thread(target=pulse, daemon=True)
         heartbeat.start()
@@ -128,11 +144,15 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
             config,
             str(claim["trigger_name"]),
             dict(claim["input"]),
+            on_created=created,
             credential_resolver=resolver,
+            event_sink=policy_event,
             execution_backend="outcomeci",
             _container_isolated=True,
         )
         run_id = str(result["run_id"])
+        if heartbeat_failure:
+            raise CoreError("policy_evidence_upload_failed", True)
         if result.get("status") == "error":
             raise ContractError("workflow recorded an error")
         phase_count = len(compile_workflow(config)["instructions"]["phases"])
@@ -241,7 +261,8 @@ def authorize(launch: Launch, client: CoreClient) -> int:
     claim = client.claim_authorization()
     root = Path(
         tempfile.mkdtemp(
-            prefix="oci-agent-auth-", dir=os.environ.get("AGENT_PRIVATE_ROOT", "/home/runner")
+            prefix="oci-agent-auth-",
+            dir=os.environ.get("AGENT_PRIVATE_ROOT", "/home/runner"),
         )
     )
     os.chmod(root, 0o700)
@@ -267,7 +288,10 @@ def authorize(launch: Launch, client: CoreClient) -> int:
             verification = safe_verification(claim.provider, pending)
             if verification:
                 client.verification(
-                    claim.session_token, verification[0], verification[1], claim.expires_at
+                    claim.session_token,
+                    verification[0],
+                    verification[1],
+                    claim.expires_at,
                 )
                 published = True
 
@@ -291,7 +315,9 @@ def authorize(launch: Launch, client: CoreClient) -> int:
         )
         if result.returncode:
             category, retryable = classify_failure(
-                result.stdout + result.stderr, authorization=True, cancelled=result.returncode < 0
+                result.stdout + result.stderr,
+                authorization=True,
+                cancelled=result.returncode < 0,
             )
             client.fail(claim.session_token, category, retryable)
             return result.returncode
@@ -348,7 +374,8 @@ def execute(launch: Launch, client: CoreClient) -> int:
     lifecycle("runner.claimed", "Runner claimed the workflow phase.")
     root = Path(
         tempfile.mkdtemp(
-            prefix="oci-outcome-", dir=os.environ.get("AGENT_PRIVATE_ROOT", "/home/runner")
+            prefix="oci-outcome-",
+            dir=os.environ.get("AGENT_PRIVATE_ROOT", "/home/runner"),
         )
     )
     os.chmod(root, 0o700)
@@ -395,7 +422,11 @@ def execute(launch: Launch, client: CoreClient) -> int:
             metadata={"provider": claim.provider},
         )
         result = run(
-            claim.command, cwd=workspace, env=env, timeout=claim.timeout_seconds, on_tick=tick
+            claim.command,
+            cwd=workspace,
+            env=env,
+            timeout=claim.timeout_seconds,
+            on_tick=tick,
         )
         try:
             lines = [line for line in result.stdout.splitlines() if line.strip()]
@@ -415,7 +446,9 @@ def execute(launch: Launch, client: CoreClient) -> int:
             return 0
         except (ContractError, json.JSONDecodeError):
             category, retryable = classify_failure(
-                result.stdout + result.stderr, authorization=False, cancelled=result.returncode < 0
+                result.stdout + result.stderr,
+                authorization=False,
+                cancelled=result.returncode < 0,
             )
             lifecycle(
                 "agent.failed",
@@ -474,7 +507,11 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as error:
         category, retryable = "internal_failure", True
         exception_type = type(error).__name__
-    payload = {"event": "outcome_runner_failed", "category": category, "retryable": retryable}
+    payload = {
+        "event": "outcome_runner_failed",
+        "category": category,
+        "retryable": retryable,
+    }
     if category == "internal_failure":
         payload["exception_type"] = exception_type
     print(json.dumps(payload), file=sys.stderr)

@@ -16,7 +16,11 @@ from typing import Any
 
 from .config import compile_workflow
 from .humans import accept, poll, request, transport_responses
-from .integrations import CredentialResolver, IntegrationExecutor, local_credential_resolver
+from .integrations import (
+    CredentialResolver,
+    IntegrationExecutor,
+    local_credential_resolver,
+)
 from .policy import PolicyExecutor
 from .process import ExecutionError
 
@@ -46,6 +50,7 @@ class Broker:
         socket_path: Path,
         compiled=None,
         resolver: CredentialResolver | None = None,
+        event_sink=None,
     ):
         compiled = compiled if compiled is not None else compile_workflow(config)
         hooks = compiled["instructions"]["phases"][phase]["humans"]
@@ -62,7 +67,9 @@ class Broker:
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
         self.integrations = PolicyExecutor(
             IntegrationExecutor(
-                compiled, resolver=resolver or local_credential_resolver(root), reviewed=True
+                compiled,
+                resolver=resolver or local_credential_resolver(root),
+                reviewed=True,
             ),
             root / ".outcomeci" / ".broker" / run_id,
             {
@@ -70,6 +77,7 @@ class Broker:
                 "trigger": state.get("trigger"),
                 "phase": compiled["instructions"]["phases"][phase],
             },
+            event_sink=event_sink,
         )
         self.token = secrets.token_urlsafe(32)
         self.server = _Server(str(socket_path), _Handler)
@@ -143,12 +151,22 @@ def serve(
     *,
     compiled=None,
     resolver: CredentialResolver | None = None,
+    event_sink=None,
 ) -> Iterator[dict[str, str]]:
     temporary = tempfile.TemporaryDirectory(prefix="oci-cap-")
     directory = Path(temporary.name)
     socket_path = directory / "human.sock"
     socket_path.unlink(missing_ok=True)
-    broker = Broker(root, config, run_id, phase, socket_path, compiled, resolver)
+    broker = Broker(
+        root,
+        config,
+        run_id,
+        phase,
+        socket_path,
+        compiled,
+        resolver,
+        event_sink,
+    )
     thread = threading.Thread(target=broker.server.serve_forever, daemon=True)
     thread.start()
     try:

@@ -5,7 +5,11 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from outcomeci.cloud_runner.main import execute, execute_workflow, workflow_failure_category
+from outcomeci.cloud_runner.main import (
+    execute,
+    execute_workflow,
+    workflow_failure_category,
+)
 from outcomeci.cloud_runner.models import ExecutionClaim, Launch
 from outcomeci.cloud_runner.process import ProcessResult
 from outcomeci.process import ExecutionError
@@ -27,7 +31,9 @@ def outcome_claim(provider: str = "codex") -> ExecutionClaim:
                 "kind": "outcome",
                 "repositories": ["owner/state", "owner/product"],
                 "agent": provider,
-                "model": "openrouter/anthropic/claude-sonnet-4" if provider == "opencode" else None,
+                "model": (
+                    "openrouter/anthropic/claude-sonnet-4" if provider == "opencode" else None
+                ),
             },
             "lease_id": "lease_1",
             "credential_version": 3,
@@ -91,7 +97,10 @@ class FlowTests(unittest.TestCase):
                 "values": {
                     "slack/bot-token": {
                         "credential_type": "auth_header",
-                        "configuration": {"header_name": "Authorization", "scheme": "Bearer"},
+                        "configuration": {
+                            "header_name": "Authorization",
+                            "scheme": "Bearer",
+                        },
                         "secrets": {"value": "slack-secret"},
                     }
                 },
@@ -100,6 +109,7 @@ class FlowTests(unittest.TestCase):
 
         class WorkflowClient:
             completed = []
+            heartbeats = []
 
             def claim_workflow(self):
                 return claim
@@ -107,8 +117,9 @@ class FlowTests(unittest.TestCase):
             def workflow_start(self, token):
                 self.started = token
 
-            def workflow_heartbeat(self, token):
-                pass
+            def workflow_heartbeat(self, token, events=None):
+                self.heartbeats.append((token, events or []))
+                return {"active": True, "policy_events_received": len(events or [])}
 
             def workflow_complete(self, token, status, **values):
                 self.completed.append((token, status, values))
@@ -126,6 +137,18 @@ class FlowTests(unittest.TestCase):
                     "slack-secret",
                 )
                 self.assertEqual(name, "inbound")
+                options["on_created"]("run-1")
+                options["event_sink"](
+                    {
+                        "event_id": "00000000-0000-0000-0000-000000000001",
+                        "occurred_at": "2026-09-16T00:00:00+00:00",
+                        "event_type": "permission.reviewed",
+                        "phase": "notify",
+                        "capability": "slack.request",
+                        "message": "Permission advisor: allow",
+                        "decision": "allow",
+                    }
+                )
                 return {
                     "run_id": "run-1",
                     "status": "completed",
@@ -134,7 +157,10 @@ class FlowTests(unittest.TestCase):
 
             with (
                 mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
-                mock.patch("outcomeci.cloud_runner.main.tempfile.mkdtemp", return_value=str(root)),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.tempfile.mkdtemp",
+                    return_value=str(root),
+                ),
                 mock.patch("outcomeci.local.trigger", side_effect=trigger),
                 mock.patch(
                     "outcomeci.config.compile_workflow",
@@ -143,7 +169,12 @@ class FlowTests(unittest.TestCase):
             ):
                 self.assertEqual(
                     execute_workflow(
-                        Launch("workflow", "invocation-1", "boot", "https://api.outcomeci.com"),
+                        Launch(
+                            "workflow",
+                            "invocation-1",
+                            "boot",
+                            "https://api.outcomeci.com",
+                        ),
                         client,
                     ),
                     0,
@@ -152,11 +183,16 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(client.completed[0][2]["run_id"], "run-1")
         self.assertEqual(client.completed[0][2]["expected_credential_version"], 3)
         self.assertEqual(client.completed[0][2]["agent_credential"], {"token": "agent-secret"})
+        self.assertEqual(client.heartbeats[0][1][0]["event_type"], "permission.reviewed")
 
     def test_outcome_executes_with_scoped_tokens_and_persists_result(self):
         claim = outcome_claim("codex")
         client = FakeClient(claim)
-        result = {"status": "awaiting_confirmation", "manifest": {}, "artifact_paths": []}
+        result = {
+            "status": "awaiting_confirmation",
+            "manifest": {},
+            "artifact_paths": [],
+        }
         with tempfile.TemporaryDirectory() as parent:
             root, workspace = Path(parent) / "private", Path(parent) / "workspace"
             root.mkdir()
@@ -167,7 +203,8 @@ class FlowTests(unittest.TestCase):
                 self.assertEqual(env["GITHUB_TOKEN"], "github-token")
                 self.assertEqual(env["OUTCOMECI_API_KEY"], "job-token")
                 self.assertEqual(
-                    json.loads((workspace / "outcome-claim.json").read_text()), claim.outcome
+                    json.loads((workspace / "outcome-claim.json").read_text()),
+                    claim.outcome,
                 )
                 on_tick()
                 return ProcessResult(0, json.dumps(result), "")
@@ -178,12 +215,16 @@ class FlowTests(unittest.TestCase):
                     {"AGENT_PRIVATE_ROOT": parent, "AGENT_WORK_ROOT": str(workspace)},
                     clear=False,
                 ),
-                mock.patch("outcomeci.cloud_runner.main.tempfile.mkdtemp", return_value=str(root)),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.tempfile.mkdtemp",
+                    return_value=str(root),
+                ),
                 mock.patch("outcomeci.cloud_runner.main.run", side_effect=fake_run),
             ):
                 self.assertEqual(
                     execute(
-                        Launch("outcome", "job_1", "boot", "https://api.outcomeci.com"), client
+                        Launch("outcome", "job_1", "boot", "https://api.outcomeci.com"),
+                        client,
                     ),
                     0,
                 )
@@ -219,7 +260,10 @@ class FlowTests(unittest.TestCase):
                     {"AGENT_PRIVATE_ROOT": parent, "AGENT_WORK_ROOT": str(workspace)},
                     clear=False,
                 ),
-                mock.patch("outcomeci.cloud_runner.main.tempfile.mkdtemp", return_value=str(root)),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.tempfile.mkdtemp",
+                    return_value=str(root),
+                ),
                 mock.patch("outcomeci.cloud_runner.main.run", side_effect=fake_run),
             ):
                 self.assertEqual(
