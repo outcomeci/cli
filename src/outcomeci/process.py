@@ -123,6 +123,16 @@ def invoke(
         if os.environ.get("OPENAI_API_KEY"):
             env["OPENAI_API_KEY"] = os.environ["OPENAI_API_KEY"]
         argv = ["codex", "exec", "--approve-for-me", "--skip-git-repo-check"]
+        if container_isolated:
+            # OutcomeCI Cloud runs inside a dedicated, least-privilege Fargate
+            # task. Codex's nested Linux sandbox is unavailable there; the
+            # container and capability broker are the security boundary.
+            argv = [
+                "codex",
+                "exec",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--skip-git-repo-check",
+            ]
         if read_only:
             argv = ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check"]
         if model:

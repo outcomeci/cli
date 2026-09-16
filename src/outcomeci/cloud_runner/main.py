@@ -124,6 +124,10 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
             if response.get("policy_events_received") != 1:
                 raise CoreError("policy_evidence_unacknowledged", True)
 
+        def policy_review(proposal: dict) -> dict:
+            with heartbeat_lock:
+                return client.workflow_policy_review(lease, proposal)
+
         def created(value: str) -> None:
             nonlocal run_id
             run_id = value
@@ -147,6 +151,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
             on_created=created,
             credential_resolver=resolver,
             event_sink=policy_event,
+            policy_reviewer=policy_review,
             execution_backend="outcomeci",
             _container_isolated=True,
         )

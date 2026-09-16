@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import json
+from contextlib import nullcontext
 from pathlib import Path
 
 import httpx
@@ -289,6 +290,114 @@ def test_required_integration_needs_broker_confirmed_success(tmp_path: Path) -> 
         )
     )
     local._validate_required_effects(tmp_path, compiled, "run-1", "notify")
+
+
+def test_effect_receipts_are_sanitized_and_materialized_for_repair(tmp_path: Path) -> None:
+    broker = tmp_path / ".outcomeci/.broker/run-1"
+    broker.mkdir(parents=True)
+    (broker / "journal.json").write_text(
+        json.dumps(
+            {
+                "calls": {
+                    "digest": {
+                        "capability": "slack.request",
+                        "proposal_sha256": "a" * 64,
+                        "status": "confirmed",
+                        "request": {"authorization": "Bearer secret", "body": "private"},
+                        "result": {
+                            "ok": True,
+                            "status": 200,
+                            "output": {"result": {"ok": True, "channel": "D123456789"}},
+                        },
+                    }
+                }
+            }
+        )
+    )
+    outcome = tmp_path / ".outcomeci/outcomes/run-1"
+    outcome.mkdir(parents=True)
+    receipt = local._write_effect_receipts(tmp_path, outcome, "run-1", "notify")
+    value = json.loads(receipt.read_text())
+    assert value == {
+        "schema_version": "1",
+        "phase": "notify",
+        "effects": [
+            {
+                "capability": "slack.request",
+                "proposal_sha256": "a" * 64,
+                "status": "confirmed",
+                "ok": True,
+                "http_status": 200,
+            }
+        ],
+    }
+    assert "secret" not in receipt.read_text()
+    assert "D123456789" not in receipt.read_text()
+
+
+def test_output_repair_has_no_capability_environment(tmp_path: Path, monkeypatch) -> None:
+    compiled = compile_workflow(typed_workflow(tmp_path))
+    outcome = tmp_path / ".outcomeci/outcomes/run-1"
+    outcome.mkdir(parents=True)
+    (outcome / "effects.json").write_text('{"schema_version":"1","effects":[]}')
+    calls = []
+
+    def invoke(*args, **kwargs):
+        calls.append((args, kwargs))
+        (outcome / "delivery.json").write_text('{"status":"delivered"}')
+        return "repaired"
+
+    monkeypatch.setattr(local, "invoke", invoke)
+    summary = local._repair_outputs(
+        tmp_path,
+        compiled,
+        outcome,
+        "notify",
+        "codex",
+        None,
+        ExecutionError("missing required output"),
+        [outcome / "delivery.json"],
+        {"SLACK_TOKEN"},
+        container_isolated=True,
+    )
+    assert summary == "repaired"
+    assert calls[0][1]["extra_env"] == {}
+    assert calls[0][1]["excluded_env"] == {"SLACK_TOKEN"}
+    assert calls[0][1]["container_isolated"] is True
+    assert "must not be repeated" in calls[0][0][2]
+
+
+def test_execution_repairs_invalid_output_once_without_capabilities(
+    tmp_path: Path, monkeypatch
+) -> None:
+    path = typed_workflow(tmp_path)
+    calls = []
+    events = []
+    monkeypatch.setattr(local, "serve_capability", lambda *args, **kwargs: nullcontext({}))
+    monkeypatch.setattr(local, "_validate_required_effects", lambda *args: None)
+    monkeypatch.setattr(
+        local,
+        "_transcripts",
+        lambda *args, **kwargs: {"usage_records": 0, "files": [], "usage": []},
+    )
+
+    def invoke(*args, **kwargs):
+        calls.append(kwargs)
+        if len(calls) == 2:
+            output = next(item for item in kwargs["writable_paths"] if item.name == "delivery.json")
+            output.write_text('{"status":"delivered"}')
+        return "complete"
+
+    monkeypatch.setattr(local, "invoke", invoke)
+    state = local.trigger(tmp_path, path, "inbound", email_payload(), event_sink=events.append)
+
+    assert state["status"] == "awaiting_confirmation"
+    assert len(calls) == 2
+    assert calls[1]["extra_env"] == {}
+    assert [item["event_type"] for item in events] == [
+        "artifact.repair_started",
+        "artifact.repair_completed",
+    ]
 
 
 def test_instruction_symlink_cannot_read_private_vault(tmp_path: Path) -> None:
