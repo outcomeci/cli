@@ -37,7 +37,6 @@ RUN /opt/oci/bin/python -m pip install --no-cache-dir /wheels/* \
     && /opt/oci/bin/python -m pip uninstall --yes pip setuptools \
     && rm -rf /wheels
 
-USER runner
 WORKDIR /work
 
-ENTRYPOINT ["/opt/oci/bin/python", "-m", "outcomeci.cloud_runner"]
+ENTRYPOINT ["/opt/oci/bin/python", "-m", "outcomeci.cloud_runner.bootstrap"]
