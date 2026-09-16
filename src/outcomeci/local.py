@@ -342,6 +342,7 @@ def _execute(
     model: str | None = None,
     credential_resolver: CredentialResolver | None = None,
     execution_backend: str = "filesystem",
+    _container_isolated: bool = False,
 ) -> dict[str, Any]:
     compiled = compile_workflow(config)
     configured_backend = compiled["workflow"]["spec"]["backend"].get("provider")
@@ -353,6 +354,8 @@ def _execute(
         )
     if execution_backend == "outcomeci" and credential_resolver is None:
         raise ExecutionError("OutcomeCI execution requires a scoped credential resolver")
+    if _container_isolated and execution_backend != "outcomeci":
+        raise ExecutionError("container isolation is reserved for OutcomeCI execution")
     phase = state["phase"]
     runner, chosen_model = _policy(compiled, phase, agent, model)
     outcome_root = root / ".outcomeci" / "outcomes" / state["run_id"]
@@ -437,6 +440,7 @@ contract above. Use paths relative to this repository.
                 extra_env=capability_env,
                 writable_paths=writable_artifacts,
                 excluded_env=connection_secrets,
+                container_isolated=_container_isolated,
             )
         persisted = _read(root, state["run_id"])
         if persisted.get("status") == "awaiting_input":
@@ -539,6 +543,7 @@ def trigger(
     on_created: Callable[[str], None] | None = None,
     credential_resolver: CredentialResolver | None = None,
     execution_backend: str = "filesystem",
+    _container_isolated: bool = False,
 ) -> dict[str, Any]:
     """Validate and materialize a named trigger before any agent execution."""
     compiled = compile_workflow(config)
@@ -586,6 +591,7 @@ def trigger(
         model=model,
         credential_resolver=credential_resolver,
         execution_backend=execution_backend,
+        _container_isolated=_container_isolated,
     )
 
 
