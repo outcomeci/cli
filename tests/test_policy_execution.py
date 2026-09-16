@@ -4,11 +4,13 @@ import json
 
 import httpx
 import pytest
+import yaml
 from test_typed_contracts import email_payload, typed_workflow
 
 from outcomeci import capability, local, policy
 from outcomeci.config import compile_workflow
 from outcomeci.integrations import IntegrationError, IntegrationExecutor
+from outcomeci.process import ExecutionError
 
 
 def executor(root, reviewer=None, handler=None):
@@ -146,8 +148,13 @@ def test_budget_methods_origin_and_identifiers_cannot_be_expanded(tmp_path):
         broker.execute("slack.request", {"method": "GET", "path": "/api/new"}, phase="notify")
 
 
-def test_normal_email_agent_broker_policy_http_flow(tmp_path, monkeypatch):
+@pytest.mark.parametrize("execution_backend", ["filesystem", "outcomeci"])
+def test_normal_email_agent_broker_policy_http_flow(tmp_path, monkeypatch, execution_backend):
     path = typed_workflow(tmp_path)
+    if execution_backend == "outcomeci":
+        value = yaml.safe_load(path.read_text())
+        value["spec"]["backend"]["provider"] = "outcomeci"
+        path.write_text(yaml.safe_dump(value, sort_keys=False))
     requests, reviews = [], []
     responses = [
         {"ok": True, "members": [{"id": "U0123456789", "name": "izzy"}]},
@@ -216,8 +223,31 @@ def test_normal_email_agent_broker_policy_http_flow(tmp_path, monkeypatch):
         return "Email delivered"
 
     monkeypatch.setattr(local, "invoke", agent)
-    state = local.trigger(tmp_path, path, "inbound", email_payload())
+    state = local.trigger(
+        tmp_path,
+        path,
+        "inbound",
+        email_payload(),
+        credential_resolver=(lambda _: "private-token"),
+        execution_backend=execution_backend,
+    )
     assert state["completed_phases"] == ["notify"]
     assert len(requests) == len(reviews) == 3
     assert all(review["context"]["trigger"]["value"] == email_payload() for review in reviews)
     assert "private-token" not in json.dumps(reviews)
+
+
+def test_cloud_backend_requires_scoped_credential_resolver(tmp_path):
+    path = typed_workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["backend"]["provider"] = "outcomeci"
+    path.write_text(yaml.safe_dump(value, sort_keys=False))
+
+    with pytest.raises(ExecutionError, match="scoped credential resolver"):
+        local.trigger(
+            tmp_path,
+            path,
+            "inbound",
+            email_payload(),
+            execution_backend="outcomeci",
+        )
