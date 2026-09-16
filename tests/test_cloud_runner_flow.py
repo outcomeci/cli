@@ -120,6 +120,7 @@ class FlowTests(unittest.TestCase):
 
             def trigger(workspace, config, name, payload, **options):
                 self.assertEqual(options["execution_backend"], "outcomeci")
+                self.assertIs(options["_container_isolated"], True)
                 self.assertEqual(
                     options["credential_resolver"]("vault:slack/bot-token")["secrets"]["value"],
                     "slack-secret",

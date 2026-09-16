@@ -190,6 +190,7 @@ def test_normal_email_agent_broker_policy_http_flow(tmp_path, monkeypatch, execu
 
     def agent(runner, model, prompt, root, timeout, **kwargs):
         assert email_payload()["subject"] in prompt
+        assert kwargs["container_isolated"] is (execution_backend == "outcomeci")
         # Drive the actual run-scoped Unix broker, exactly as the agent's CLI tool does.
         for key, value in kwargs["extra_env"].items():
             monkeypatch.setenv(key, value)
@@ -230,6 +231,7 @@ def test_normal_email_agent_broker_policy_http_flow(tmp_path, monkeypatch, execu
         email_payload(),
         credential_resolver=(lambda _: "private-token"),
         execution_backend=execution_backend,
+        _container_isolated=execution_backend == "outcomeci",
     )
     assert state["completed_phases"] == ["notify"]
     assert len(requests) == len(reviews) == 3
@@ -250,4 +252,17 @@ def test_cloud_backend_requires_scoped_credential_resolver(tmp_path):
             "inbound",
             email_payload(),
             execution_backend="outcomeci",
+        )
+
+
+def test_filesystem_backend_cannot_claim_container_isolation(tmp_path):
+    path = typed_workflow(tmp_path)
+
+    with pytest.raises(ExecutionError, match="reserved for OutcomeCI"):
+        local.trigger(
+            tmp_path,
+            path,
+            "inbound",
+            email_payload(),
+            _container_isolated=True,
         )

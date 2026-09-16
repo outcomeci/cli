@@ -97,6 +97,7 @@ def invoke(
     writable_paths: list[Path] | None = None,
     excluded_env: set[str] | None = None,
     read_only: bool = False,
+    container_isolated: bool = False,
 ) -> str:
     secrets = {
         "GITHUB_TOKEN",
@@ -154,7 +155,7 @@ def invoke(
         input_text = None
     else:
         raise ExecutionError(f"unsupported agent: {agent}")
-    if writable_paths is not None:
+    if writable_paths is not None and not container_isolated:
         bwrap = shutil.which("bwrap")
         if not bwrap:
             raise ExecutionError("bubblewrap is required for secure local agent execution")
