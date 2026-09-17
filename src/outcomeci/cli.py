@@ -54,6 +54,7 @@ from .locking import verify_lock, write_lock
 from .mcp_server import serve as serve_mcp
 from .outcome import run as run_outcome
 from .process import ExecutionError
+from .publication import prepare_publication
 from .repository import RepositoryError, initialize, update, validate
 from .schema import export_schema, load_schema, schema_path
 from .simulation import bundled_definition
@@ -147,6 +148,17 @@ def parser() -> argparse.ArgumentParser:
     workflow = commands.add_parser("workflow", help="Manage OutcomeCI Cloud workflows")
     workflow_commands = workflow.add_subparsers(dest="workflow_command", required=True)
     workflow_sync = workflow_commands.add_parser("sync")
+    workflow_publish = workflow_commands.add_parser(
+        "prepare-publication",
+        help="Create and verify a sanitized package for public reuse",
+    )
+    workflow_publish.add_argument("file", type=Path)
+    workflow_publish.add_argument("--output", type=Path, required=True)
+    workflow_publish.add_argument(
+        "--agent", choices=("codex", "claude", "opencode"), default="codex"
+    )
+    workflow_publish.add_argument("--model")
+    workflow_publish.add_argument("--sensitive-term", action="append", default=[])
     workflow_listen = workflow_commands.add_parser(
         "listen", help="Execute queued workflow triggers locally"
     )
@@ -502,6 +514,16 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _print_json(cloud_logout())
             return 0
         if args.command == "workflow":
+            if args.workflow_command == "prepare-publication":
+                result = prepare_publication(
+                    args.file,
+                    args.output,
+                    agent=args.agent,
+                    model=args.model,
+                    sensitive_terms=args.sensitive_term,
+                )
+                _print_json(result, sort_keys=True)
+                return 0
             if args.workflow_command == "listen":
                 from .webhooks import listen
 
