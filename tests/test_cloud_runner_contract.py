@@ -41,8 +41,8 @@ def outcome_claim(provider: str = "codex") -> ExecutionClaim:
 
 
 class ContractTests(unittest.TestCase):
-    def test_runner_accepts_only_authorization_and_outcome_modes(self):
-        for mode in ("authorize", "outcome"):
+    def test_runner_accepts_only_known_modes(self):
+        for mode in ("authorize", "outcome", "workflow", "publication"):
             launch = Launch.from_env(
                 {
                     "AGENT_RUNNER_MODE": mode,

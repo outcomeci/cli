@@ -526,6 +526,25 @@ selects it explicitly. Credentials live in
 the outcome repository. Set `OUTCOMECI_API_URL` when testing against a local or
 staging control plane.
 
+## Verify a reusable workflow package locally
+
+OutcomeCI Cloud prepares public versions with the configured coding agent and
+pauses for approval. Maintainers can exercise the same sanitizer and compiler
+contract locally:
+
+```bash
+oci workflow prepare-publication outcome.yml \
+  --output /tmp/my-workflow-public \
+  --agent codex \
+  --sensitive-term "Acme Corporation"
+```
+
+The output directory must be empty. The command replaces identities, Vault
+paths, connection references, repositories, endpoints, and other values a new
+consumer must provide. It emits typed setup requirements and a replacement
+report under `.outcomeci/`, then rejects the package if privacy checks or the
+pinned workflow compiler fail. Reports never contain the original values.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the supported Python versions and the

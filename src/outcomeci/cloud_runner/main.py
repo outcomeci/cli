@@ -15,8 +15,10 @@ import time
 from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 
 from ..process import ExecutionError
+from ..publication import REPORT, REQUIREMENTS, prepare_publication
 from ..security import private_path
 from .client import CoreClient, CoreError
 from .models import ContractError, Launch
@@ -556,6 +558,96 @@ def execute(launch: Launch, client: CoreClient) -> int:
         shutil.rmtree(root, ignore_errors=True)
 
 
+def execute_publication(launch: Launch, client: CoreClient) -> int:
+    """Sanitize and compiler-attest one private workflow package."""
+    claim = client.claim_publication()
+    job = claim.get("job")
+    hydration = claim.get("hydration")
+    if not isinstance(job, dict) or not isinstance(hydration, dict):
+        raise ContractError("invalid publication claim")
+    provider = str(job.get("agent"))
+    if provider not in ADAPTERS or hydration.get("provider") != provider:
+        raise ContractError("invalid publication provider")
+    root = Path(
+        tempfile.mkdtemp(
+            prefix="oci-publication-", dir=os.environ.get("AGENT_PRIVATE_ROOT", "/home/runner")
+        )
+    )
+    os.chmod(root, 0o700)
+    package, output = root / "source", root / "public"
+    package.mkdir()
+    try:
+        filename = str(job.get("source_filename") or "outcome.yml")
+        if Path(filename).name != filename:
+            raise ContractError("invalid publication source filename")
+        (package / filename).write_text(str(job.get("content") or ""), encoding="utf-8")
+        files = job.get("files") or {}
+        if not isinstance(files, dict) or len(files) > 500:
+            raise ContractError("invalid publication files")
+        for name, encoded in files.items():
+            path = package / str(name)
+            if not path.resolve().is_relative_to(package.resolve()) or private_path(
+                path.relative_to(package)
+            ):
+                raise ContractError("invalid publication file path")
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(base64.b64decode(encoded, validate=True))
+        pseudo_claim = SimpleNamespace(
+            auth_json=hydration.get("auth_json"),
+            oauth_token=hydration.get("oauth_token"),
+            api_key=hydration.get("api_key"),
+        )
+        env = ADAPTERS[provider].hydrate(pseudo_claim, root, safe_env(root))
+        previous = {key: os.environ.get(key) for key in env}
+        os.environ.update(env)
+        try:
+            result = prepare_publication(
+                package / filename,
+                output,
+                agent=provider,
+                model=job.get("model"),
+                sensitive_terms=list(job.get("sensitive_terms") or []),
+                container_isolated=True,
+            )
+        finally:
+            for key, value in previous.items():
+                if value is None:
+                    os.environ.pop(key, None)
+                else:
+                    os.environ[key] = value
+        public_files: dict[str, str] = {}
+        for path in sorted(output.rglob("*")):
+            if (
+                not path.is_file()
+                or path.name == filename
+                or path in {output / REQUIREMENTS, output / REPORT}
+            ):
+                continue
+            public_files[path.relative_to(output).as_posix()] = base64.b64encode(
+                path.read_bytes()
+            ).decode()
+        content = (output / filename).read_text(encoding="utf-8")
+        client.complete_publication(
+            str(claim.get("completion_token")),
+            {
+                "content": content,
+                "content_sha256": hashlib.sha256(content.encode()).hexdigest(),
+                "files": public_files,
+                "package_sha256": result["package_digest"],
+                "compiler_version": result["compiler_version"],
+                "requirements": result["requirements"],
+                "replacement_report": result["replacement_report"],
+            },
+        )
+        return 0
+    except Exception as exc:
+        with suppress(CoreError):
+            client.fail(str(claim.get("completion_token")), workflow_failure_category(exc), False)
+        raise
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if args and args[0] == "oci":
@@ -568,6 +660,8 @@ def main(argv: list[str] | None = None) -> int:
             return authorize(launch, client)
         if launch.mode == "workflow":
             return execute_workflow(launch, client)
+        if launch.mode == "publication":
+            return execute_publication(launch, client)
         return execute(launch, client)
     except TimeoutError:
         category, retryable = "agent_timeout", True

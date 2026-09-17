@@ -31,13 +31,17 @@ class CoreClient:
             if mode == "authorize"
             else "workflow-invocations"
             if mode == "workflow"
+            else "publication-jobs"
+            if mode == "publication"
             else "outcome-jobs"
         )
         self._url = f"{base_url}/v1/internal/{resource}/{object_id}"
         self._base_url = base_url
         self._token = bootstrap_token
         self._timeout = timeout
-        self._max_response = 24 * 1024 * 1024 if mode == "workflow" else 1024 * 1024
+        self._max_response = (
+            24 * 1024 * 1024 if mode in {"workflow", "publication"} else 1024 * 1024
+        )
 
     def _post(
         self, suffix: str, payload: dict[str, Any], token: str | None = None
@@ -91,6 +95,12 @@ class CoreClient:
 
     def claim_workflow(self) -> dict[str, Any]:
         return self._post("claim", {})
+
+    def claim_publication(self) -> dict[str, Any]:
+        return self._post("claim", {})
+
+    def complete_publication(self, token: str, payload: dict[str, Any]) -> None:
+        self._post("complete", payload, token)
 
     def workflow_start(self, lease_token: str) -> None:
         self._post("start", {"lease_token": lease_token})
