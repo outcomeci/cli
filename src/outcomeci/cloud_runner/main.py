@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -16,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from ..process import ExecutionError
+from ..security import private_path
 from .client import CoreClient, CoreError
 from .models import ContractError, Launch
 from .process import run
@@ -27,6 +29,39 @@ CLAUDE_TOKEN = re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b")
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 CONTROL_CHAR = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 HEARTBEAT_INTERVAL_SECONDS = 15.0
+WORKFLOW_ARTIFACT_FILE_LIMIT = 200
+WORKFLOW_ARTIFACT_FILE_BYTES = 2 * 1024 * 1024
+WORKFLOW_ARTIFACT_TOTAL_BYTES = 20 * 1024 * 1024
+
+
+def workflow_artifacts(root: Path, run_id: str) -> list[dict[str, str]]:
+    """Return the bounded, credential-free durable bundle for one workflow run."""
+    outcome_root = (root / ".outcomeci" / "outcomes" / run_id).resolve()
+    expected_root = (root / ".outcomeci" / "outcomes").resolve()
+    if not outcome_root.is_relative_to(expected_root) or not outcome_root.is_dir():
+        raise ContractError("workflow run artifact directory is unavailable")
+    artifacts: list[dict[str, str]] = []
+    total = 0
+    for path in sorted(item for item in outcome_root.rglob("*") if item.is_file()):
+        relative_to_outcome = path.relative_to(outcome_root)
+        if private_path(relative_to_outcome):
+            continue
+        content = path.read_bytes()
+        total += len(content)
+        if (
+            len(artifacts) >= WORKFLOW_ARTIFACT_FILE_LIMIT
+            or len(content) > WORKFLOW_ARTIFACT_FILE_BYTES
+            or total > WORKFLOW_ARTIFACT_TOTAL_BYTES
+        ):
+            raise ContractError("workflow artifact bundle exceeds the completion limit")
+        artifacts.append(
+            {
+                "path": str(path.relative_to(root)),
+                "content_base64": base64.b64encode(content).decode(),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+        )
+    return artifacts
 
 
 def workflow_failure_category(error: Exception) -> str:
@@ -165,10 +200,12 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
             raise ContractError("workflow requires a durable continuation")
         if provider == "codex":
             agent_update = json.loads((root / ".codex" / "auth.json").read_text())
+        artifacts = workflow_artifacts(root, run_id)
         client.workflow_complete(
             lease,
             "completed",
             run_id=run_id,
+            artifacts=artifacts,
             expected_credential_version=credential_version,
             agent_credential=agent_update,
         )

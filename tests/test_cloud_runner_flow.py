@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import tempfile
@@ -139,6 +140,12 @@ class FlowTests(unittest.TestCase):
                 )
                 self.assertEqual(name, "inbound")
                 options["on_created"]("run-1")
+                trace = workspace / ".outcomeci" / "outcomes" / "run-1" / "transcripts"
+                trace.mkdir(parents=True)
+                (trace / "codex.jsonl").write_text('{"type":"event"}\n')
+                (workspace / ".outcomeci" / "outcomes" / "run-1" / ".env").write_text(
+                    "TOKEN=never-upload\n"
+                )
                 options["event_sink"](
                     {
                         "event_id": "00000000-0000-0000-0000-000000000001",
@@ -182,6 +189,16 @@ class FlowTests(unittest.TestCase):
                 )
         self.assertEqual(client.completed[0][0:2], ("lease-secret", "completed"))
         self.assertEqual(client.completed[0][2]["run_id"], "run-1")
+        artifacts = client.completed[0][2]["artifacts"]
+        self.assertEqual(
+            [item["path"] for item in artifacts],
+            [".outcomeci/outcomes/run-1/transcripts/codex.jsonl"],
+        )
+        self.assertEqual(
+            base64.b64decode(artifacts[0]["content_base64"]),
+            b'{"type":"event"}\n',
+        )
+        self.assertNotIn("never-upload", repr(artifacts))
         self.assertEqual(client.completed[0][2]["expected_credential_version"], 3)
         self.assertEqual(client.completed[0][2]["agent_credential"], {"token": "agent-secret"})
         self.assertEqual(client.heartbeats[0][1][0]["event_type"], "permission.reviewed")
