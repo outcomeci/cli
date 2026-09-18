@@ -620,7 +620,7 @@ def _load_integration_packages(path: Path, spec: dict[str, Any]) -> None:
     spec["integration_packages"] = sorted(normalized, key=lambda item: item["name"])
 
 
-def load(path: Path) -> dict[str, Any]:
+def _load_v1alpha1(path: Path) -> dict[str, Any]:
     try:
         root = _mapping(yaml.safe_load(path.read_text(encoding="utf-8")), "document")
     except (OSError, yaml.YAMLError) as exc:
@@ -943,6 +943,27 @@ def load(path: Path) -> dict[str, Any]:
     return root
 
 
+# API versions are durable behavior contracts, not aliases for the newest
+# package implementation. Never replace an entry with incompatible rules; add a
+# new API version and keep the older compiler available.
+COMPILER_REGISTRY = {"outcomeci.dev/v1alpha1": _load_v1alpha1}
+
+
+def load(path: Path) -> dict[str, Any]:
+    try:
+        document = _mapping(yaml.safe_load(path.read_text(encoding="utf-8")), "document")
+    except (OSError, yaml.YAMLError) as exc:
+        raise ConfigError(f"could not read {path}: {exc}") from exc
+    api_version = document.get("apiVersion")
+    compiler = COMPILER_REGISTRY.get(api_version)
+    if compiler is None:
+        supported = ", ".join(sorted(COMPILER_REGISTRY))
+        raise ConfigError(
+            f"unsupported apiVersion {api_version!r}; supported versions: {supported}"
+        )
+    return compiler(path)
+
+
 def _excluded(relative: str, patterns: list[str]) -> bool:
     return any(
         fnmatch.fnmatch(relative, pattern)
@@ -1085,6 +1106,7 @@ def compile_workflow(path: Path) -> dict[str, Any]:
     ).hexdigest()
     return {
         "schema_version": "outcomeci.workflow/v1alpha1",
+        "api_version": document["apiVersion"],
         "engine_version": "2",
         "engine_package_version": __version__,
         "workflow_revision": revision,

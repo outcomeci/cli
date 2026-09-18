@@ -128,6 +128,25 @@ def _workflow(tmp_path: Path) -> Path:
     return path
 
 
+def test_compiler_registry_preserves_v1alpha1_contract(tmp_path: Path) -> None:
+    path = _workflow(tmp_path)
+
+    compiled = compile_workflow(path)
+
+    assert compiled["api_version"] == "outcomeci.dev/v1alpha1"
+    assert compiled["engine_version"] == "2"
+
+
+def test_compiler_registry_rejects_unknown_api_version(tmp_path: Path) -> None:
+    path = _workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["apiVersion"] = "outcomeci.dev/v9"
+    path.write_text(yaml.safe_dump(value, sort_keys=False))
+
+    with pytest.raises(ConfigError, match="unsupported apiVersion.*v9"):
+        compile_workflow(path)
+
+
 def test_compiles_fan_out_graph_and_effective_agent_policies(tmp_path: Path) -> None:
     compiled = compile_workflow(_workflow(tmp_path))
     assert compiled["graph"]["levels"] == [["intake"], ["product", "technical"], ["plan"]]
