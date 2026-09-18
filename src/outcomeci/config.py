@@ -392,7 +392,7 @@ def _http_origin(value: Any, field: str) -> str:
 def _http_auth(value: Any, field: str) -> dict[str, Any]:
     auth = _mapping(value or {"type": "none"}, field)
     kind = auth.get("type", "none")
-    if kind not in {"none", "api_key", "basic", "bearer", "oauth2", "oidc"}:
+    if kind not in {"none", "api_key", "basic", "bearer", "oauth2", "oidc", "jwt_bearer"}:
         raise ConfigError(f"{field}.type is unsupported")
     result = {"type": kind}
     if kind != "none":
@@ -418,7 +418,7 @@ def _http_auth(value: Any, field: str) -> dict[str, Any]:
     if kind == "api_key" and not (result.get("header") or result.get("query")):
         result["header"] = "Authorization"
         result["scheme"] = "Bearer"
-    if kind == "oauth2" and "token_url" not in result:
+    if kind in {"oauth2", "jwt_bearer"} and "token_url" not in result:
         raise ConfigError(f"{field}.token_url is required")
     if kind == "oidc" and "discovery_url" not in result:
         raise ConfigError(f"{field}.discovery_url is required")

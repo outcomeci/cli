@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 from urllib.parse import parse_qs
@@ -7,6 +8,8 @@ from urllib.parse import parse_qs
 import httpx
 import pytest
 import yaml
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from outcomeci.config import ConfigError, compile_workflow
 from outcomeci.integrations import (
@@ -334,6 +337,192 @@ def test_oauth2_account_credentials_requires_account_id(tmp_path: Path) -> None:
     }
     path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
     with pytest.raises(ConfigError, match="account_id is required"):
+        compile_workflow(path)
+
+
+def _decode_segment(segment: str) -> bytes:
+    return base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4))
+
+
+def test_jwt_bearer_signs_assertion_and_exchanges_for_bearer_token(tmp_path: Path) -> None:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+
+    path = workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["connections"]["tickets"]["auth"] = {
+        "type": "jwt_bearer",
+        "credential": "env:TICKET_TOKEN",
+        "token_url": "https://oauth2.googleapis.com/token",
+        "audience": "https://oauth2.googleapis.com/token",
+        "scope": "https://www.googleapis.com/auth/analytics.readonly",
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/token":
+            seen["body"] = request.content.decode()
+            return httpx.Response(200, json={"access_token": "minted-token"})
+        seen["bearer"] = request.headers["Authorization"]
+        return httpx.Response(201, json={"id": "T-1", "url": "https://example.test/T-1"})
+
+    executor = IntegrationExecutor(
+        compile_workflow(path),
+        resolver=lambda _reference: {
+            "issuer": "sa@project.iam.gserviceaccount.com",
+            "private_key": pem,
+        },
+        transport=httpx.MockTransport(handler),
+    )
+    executor.execute("tickets.create", {"title": "Broken button"}, phase="intake")
+
+    parsed = parse_qs(seen["body"])
+    assert parsed["grant_type"] == ["urn:ietf:params:oauth:grant-type:jwt-bearer"]
+    header_b64, payload_b64, signature_b64 = parsed["assertion"][0].split(".")
+    header = json.loads(_decode_segment(header_b64))
+    payload = json.loads(_decode_segment(payload_b64))
+    assert header == {"alg": "RS256", "typ": "JWT"}
+    assert payload["iss"] == "sa@project.iam.gserviceaccount.com"
+    assert payload["aud"] == "https://oauth2.googleapis.com/token"
+    assert payload["scope"] == "https://www.googleapis.com/auth/analytics.readonly"
+    assert "sub" not in payload
+    private_key.public_key().verify(
+        _decode_segment(signature_b64),
+        f"{header_b64}.{payload_b64}".encode(),
+        padding.PKCS1v15(),
+        hashes.SHA256(),
+    )
+    assert seen["bearer"] == "Bearer minted-token"
+
+
+def test_jwt_bearer_includes_subject_for_domain_wide_delegation(tmp_path: Path) -> None:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption(),
+    ).decode()
+
+    path = workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["connections"]["tickets"]["auth"] = {
+        "type": "jwt_bearer",
+        "credential": "env:TICKET_TOKEN",
+        "token_url": "https://login.salesforce.com/services/oauth2/token",
+        "scope": "api",
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/services/oauth2/token":
+            seen["body"] = request.content.decode()
+            return httpx.Response(200, json={"access_token": "minted-token"})
+        return httpx.Response(201, json={"id": "T-1", "url": "https://example.test/T-1"})
+
+    executor = IntegrationExecutor(
+        compile_workflow(path),
+        resolver=lambda _reference: {
+            "issuer": "consumer-key",
+            "subject": "integration@example.com",
+            "private_key": pem,
+        },
+        transport=httpx.MockTransport(handler),
+    )
+    executor.execute("tickets.create", {"title": "Broken button"}, phase="intake")
+
+    parsed = parse_qs(seen["body"])
+    _, payload_b64, _ = parsed["assertion"][0].split(".")
+    payload = json.loads(_decode_segment(payload_b64))
+    assert payload["sub"] == "integration@example.com"
+    assert payload["aud"] == "https://login.salesforce.com/services/oauth2/token"
+
+
+def test_jwt_bearer_rejects_unsupported_algorithm(tmp_path: Path) -> None:
+    path = workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["connections"]["tickets"]["auth"] = {
+        "type": "jwt_bearer",
+        "credential": "env:TICKET_TOKEN",
+        "token_url": "https://oauth2.googleapis.com/token",
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+
+    executor = IntegrationExecutor(
+        compile_workflow(path),
+        resolver=lambda _reference: {"issuer": "sa@example.com", "algorithm": "HS256"},
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={})),
+    )
+    with pytest.raises(ExecutionError, match="algorithm"):
+        executor.execute("tickets.create", {"title": "Broken button"}, phase="intake")
+
+
+def test_jwt_bearer_rejects_non_rsa_key(tmp_path: Path) -> None:
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    pem = (
+        ec.generate_private_key(ec.SECP256R1())
+        .private_bytes(
+            encoding=serialization.Encoding.PEM,
+            format=serialization.PrivateFormat.PKCS8,
+            encryption_algorithm=serialization.NoEncryption(),
+        )
+        .decode()
+    )
+    path = workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["connections"]["tickets"]["auth"] = {
+        "type": "jwt_bearer",
+        "credential": "env:TICKET_TOKEN",
+        "token_url": "https://oauth2.googleapis.com/token",
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+
+    executor = IntegrationExecutor(
+        compile_workflow(path),
+        resolver=lambda _reference: {"issuer": "sa@example.com", "private_key": pem},
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={})),
+    )
+    with pytest.raises(ExecutionError, match="RSA"):
+        executor.execute("tickets.create", {"title": "Broken button"}, phase="intake")
+
+
+def test_jwt_bearer_rejects_malformed_private_key(tmp_path: Path) -> None:
+    path = workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["connections"]["tickets"]["auth"] = {
+        "type": "jwt_bearer",
+        "credential": "env:TICKET_TOKEN",
+        "token_url": "https://oauth2.googleapis.com/token",
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+
+    executor = IntegrationExecutor(
+        compile_workflow(path),
+        resolver=lambda _reference: {
+            "issuer": "sa@example.com",
+            "private_key": "not-a-pem-key",
+        },
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={})),
+    )
+    with pytest.raises(ExecutionError, match="PEM private key"):
+        executor.execute("tickets.create", {"title": "Broken button"}, phase="intake")
+
+
+def test_jwt_bearer_requires_token_url(tmp_path: Path) -> None:
+    path = workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["connections"]["tickets"]["auth"] = {
+        "type": "jwt_bearer",
+        "credential": "env:TICKET_TOKEN",
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+    with pytest.raises(ConfigError, match="token_url is required"):
         compile_workflow(path)
 
 
