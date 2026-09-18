@@ -424,7 +424,7 @@ def _http_auth(value: Any, field: str) -> dict[str, Any]:
         raise ConfigError(f"{field}.discovery_url is required")
     if kind in {"oauth2", "oidc"}:
         grant_type = result.get("grant_type", "client_credentials")
-        if grant_type not in {"client_credentials", "account_credentials"}:
+        if grant_type not in {"client_credentials", "account_credentials", "refresh_token"}:
             raise ConfigError(f"{field}.grant_type is unsupported")
         result["grant_type"] = grant_type
         if grant_type == "account_credentials" and "account_id" not in result:

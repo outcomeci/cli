@@ -221,13 +221,18 @@ def _token(
         }
         response = client.post(token_url, data=data)
     else:
-        data = {"grant_type": auth.get("grant_type", "client_credentials")}
+        grant_type = auth.get("grant_type", "client_credentials")
+        data = {"grant_type": grant_type}
         if auth.get("scope"):
             data["scope"] = auth["scope"]
         if auth.get("audience"):
             data["audience"] = auth["audience"]
         if auth.get("account_id"):
             data["account_id"] = auth["account_id"]
+        if grant_type == "refresh_token":
+            if not credential.get("refresh_token"):
+                raise ExecutionError("refresh_token grant requires a refresh_token credential")
+            data["refresh_token"] = credential["refresh_token"]
         response = client.post(
             token_url,
             data=data,

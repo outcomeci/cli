@@ -453,6 +453,65 @@ def test_oauth2_rejects_unsupported_grant_type(tmp_path: Path) -> None:
         compile_workflow(path)
 
 
+def test_oauth2_refresh_token_grant_sends_credential_refresh_token(tmp_path: Path) -> None:
+    path = workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["connections"]["tickets"]["auth"] = {
+        "type": "oauth2",
+        "credential": "env:TICKET_TOKEN",
+        "token_url": "https://auth.example.test/token",
+        "grant_type": "refresh_token",
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/token":
+            seen["body"] = request.content.decode()
+            seen["basic_auth"] = request.headers["Authorization"]
+            return httpx.Response(200, json={"access_token": "minted-token"})
+        seen["bearer"] = request.headers["Authorization"]
+        return httpx.Response(201, json={"id": "T-1", "url": "https://example.test/T-1"})
+
+    executor = IntegrationExecutor(
+        compile_workflow(path),
+        resolver=lambda _reference: {
+            "client_id": "abc",
+            "client_secret": "shh",
+            "refresh_token": "rt-123",
+        },
+        transport=httpx.MockTransport(handler),
+    )
+    executor.execute("tickets.create", {"title": "Broken button"}, phase="intake")
+
+    assert parse_qs(seen["body"]) == {
+        "grant_type": ["refresh_token"],
+        "refresh_token": ["rt-123"],
+    }
+    assert seen["basic_auth"].startswith("Basic ")
+    assert seen["bearer"] == "Bearer minted-token"
+
+
+def test_oauth2_refresh_token_grant_requires_refresh_token_credential(tmp_path: Path) -> None:
+    path = workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["connections"]["tickets"]["auth"] = {
+        "type": "oauth2",
+        "credential": "env:TICKET_TOKEN",
+        "token_url": "https://auth.example.test/token",
+        "grant_type": "refresh_token",
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+
+    executor = IntegrationExecutor(
+        compile_workflow(path),
+        resolver=lambda _reference: {"client_id": "abc", "client_secret": "shh"},
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={})),
+    )
+    with pytest.raises(ExecutionError, match="refresh_token"):
+        executor.execute("tickets.create", {"title": "Broken button"}, phase="intake")
+
+
 def test_oidc_rejects_unsupported_grant_type(tmp_path: Path) -> None:
     path = workflow(tmp_path)
     value = yaml.safe_load(path.read_text())
