@@ -148,6 +148,75 @@ def test_doctor_reports_credential_presence_without_value(tmp_path: Path, monkey
     assert "top-secret" not in json.dumps(result)
 
 
+def test_doctor_passes_basic_auth_type_with_preencoded_value_credential(
+    tmp_path: Path,
+) -> None:
+    path = workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["connections"]["tickets"]["auth"] = {
+        "type": "basic",
+        "credential": "env:TICKET_TOKEN",
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+
+    result = doctor(compile_workflow(path), resolver=lambda _reference: {"value": "cGFpcg=="})
+
+    shape_check = next(check for check in result["checks"] if check["check"] == "credential_shape")
+    assert shape_check["status"] == "pass"
+    assert "cGFpcg==" not in json.dumps(result)
+
+
+def test_doctor_flags_basic_auth_type_paired_with_shapeless_credential(tmp_path: Path) -> None:
+    path = workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["connections"]["tickets"]["auth"] = {
+        "type": "basic",
+        "credential": "env:TICKET_TOKEN",
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+
+    result = doctor(compile_workflow(path), resolver=lambda _reference: {"client_id": "abc"})
+
+    shape_check = next(check for check in result["checks"] if check["check"] == "credential_shape")
+    assert shape_check["status"] == "fail"
+    assert "api_key" in shape_check["detail"]
+
+
+def test_doctor_passes_basic_auth_type_with_matching_username_password_credential(
+    tmp_path: Path,
+) -> None:
+    path = workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["connections"]["tickets"]["auth"] = {
+        "type": "basic",
+        "credential": "env:TICKET_TOKEN",
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+
+    result = doctor(
+        compile_workflow(path),
+        resolver=lambda _reference: {"username": "u", "password": "p"},
+    )
+
+    shape_check = next(check for check in result["checks"] if check["check"] == "credential_shape")
+    assert shape_check["status"] == "pass"
+
+
+def test_doctor_passes_bearer_auth_type_with_matching_credential(tmp_path: Path) -> None:
+    path = workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["connections"]["tickets"]["auth"] = {
+        "type": "bearer",
+        "credential": "env:TICKET_TOKEN",
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+
+    result = doctor(compile_workflow(path), resolver=lambda _reference: {"value": "token"})
+
+    shape_check = next(check for check in result["checks"] if check["check"] == "credential_shape")
+    assert shape_check["status"] == "pass"
+
+
 def test_http_failure_has_stable_safe_taxonomy(tmp_path: Path) -> None:
     executor = IntegrationExecutor(
         compile_workflow(workflow(tmp_path)),
@@ -208,6 +277,78 @@ def test_executes_with_credential_but_returns_only_projected_output(tmp_path: Pa
     assert result["output"] == {"id": "T-1", "url": "https://example.test/T-1"}
     assert "top-secret" not in json.dumps(result)
     assert "hidden" not in json.dumps(result)
+
+
+def test_bearer_auth_type_honors_credential_scheme_override(tmp_path: Path) -> None:
+    path = workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["connections"]["tickets"]["auth"] = {
+        "type": "bearer",
+        "credential": "env:TICKET_TOKEN",
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["authorization"] = request.headers["Authorization"]
+        return httpx.Response(201, json={"id": "T-1", "url": "https://example.test/T-1"})
+
+    executor = IntegrationExecutor(
+        compile_workflow(path),
+        resolver=lambda _reference: {"value": "discord-bot-token", "scheme": "Bot"},
+        transport=httpx.MockTransport(handler),
+    )
+    executor.execute("tickets.create", {"title": "Broken button"}, phase="intake")
+
+    assert seen["authorization"] == "Bot discord-bot-token"
+
+
+def test_basic_auth_type_sends_preencoded_value_credential_unmodified(tmp_path: Path) -> None:
+    path = workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["connections"]["tickets"]["auth"] = {
+        "type": "basic",
+        "credential": "env:TICKET_TOKEN",
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["authorization"] = request.headers["Authorization"]
+        return httpx.Response(201, json={"id": "T-1", "url": "https://example.test/T-1"})
+
+    executor = IntegrationExecutor(
+        compile_workflow(path),
+        resolver=lambda _reference: {"value": "ZW1haWwvdG9rZW46c2VjcmV0"},
+        transport=httpx.MockTransport(handler),
+    )
+    executor.execute("tickets.create", {"title": "Broken button"}, phase="intake")
+
+    assert seen["authorization"] == "Basic ZW1haWwvdG9rZW46c2VjcmV0"
+
+
+def test_basic_auth_type_still_encodes_username_password_credential(tmp_path: Path) -> None:
+    path = workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["connections"]["tickets"]["auth"] = {
+        "type": "basic",
+        "credential": "env:TICKET_TOKEN",
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["authorization"] = request.headers["Authorization"]
+        return httpx.Response(201, json={"id": "T-1", "url": "https://example.test/T-1"})
+
+    executor = IntegrationExecutor(
+        compile_workflow(path),
+        resolver=lambda _reference: {"username": "user", "password": "pass"},
+        transport=httpx.MockTransport(handler),
+    )
+    executor.execute("tickets.create", {"title": "Broken button"}, phase="intake")
+
+    assert seen["authorization"] == f"Basic {base64.b64encode(b'user:pass').decode()}"
 
 
 def test_rejects_undeclared_capability_and_invalid_input(tmp_path: Path) -> None:

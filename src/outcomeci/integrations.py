@@ -258,12 +258,15 @@ def _apply_auth(
         else:
             query[auth["query"]] = value
     elif auth["type"] == "basic":
-        encoded = base64.b64encode(
-            f"{credential.get('username', '')}:{credential.get('password', '')}".encode()
-        ).decode()
+        if "username" in credential or "password" in credential:
+            pair = f"{credential.get('username', '')}:{credential.get('password', '')}"
+            encoded = base64.b64encode(pair.encode()).decode()
+        else:
+            encoded = credential.get("value", "")
         headers["Authorization"] = f"Basic {encoded}"
     elif auth["type"] == "bearer":
-        headers["Authorization"] = f"Bearer {credential.get('value', '')}"
+        scheme = credential.get("scheme") or "Bearer"
+        headers["Authorization"] = f"{scheme} {credential.get('value', '')}"
     else:
         headers["Authorization"] = f"Bearer {_token(client, auth, credential)}"
 
@@ -597,10 +600,11 @@ def doctor(
         auth = connection["auth"]
         reference = auth.get("credential")
         configured = True
+        resolved: Mapping[str, str] | str | None = None
         if isinstance(reference, str):
             if resolver is not None:
                 try:
-                    resolver(reference)
+                    resolved = resolver(reference)
                 except ExecutionError:
                     configured = False
             elif reference.startswith("env:"):
@@ -613,6 +617,29 @@ def doctor(
                 "credential_type": auth["type"],
             }
         )
+        if configured and resolved is not None and auth["type"] in {"basic", "bearer"}:
+            mapping = _credential_mapping(resolved)
+            if auth["type"] == "basic":
+                shape_ok = ("username" in mapping and "password" in mapping) or "value" in mapping
+                needs = "either username+password fields or a pre-encoded value field"
+            else:
+                shape_ok = "value" in mapping
+                needs = "a value field"
+            checks.append(
+                {
+                    "check": "credential_shape",
+                    "connection": connection["ref"],
+                    "status": "pass" if shape_ok else "fail",
+                    "detail": (
+                        "credential matches auth.type"
+                        if shape_ok
+                        else (
+                            f"auth.type '{auth['type']}' requires {needs} that this "
+                            "credential does not provide — use auth.type: api_key instead"
+                        )
+                    ),
+                }
+            )
         if connectivity:
             try:
                 _safe_destination(
