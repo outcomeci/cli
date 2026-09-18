@@ -174,11 +174,13 @@ def _token(
         token_url = discovery.json().get("token_endpoint")
     if not isinstance(token_url, str):
         raise ExecutionError("authorization server did not provide a token endpoint")
-    data = {"grant_type": "client_credentials"}
+    data = {"grant_type": auth.get("grant_type", "client_credentials")}
     if auth.get("scope"):
         data["scope"] = auth["scope"]
     if auth.get("audience"):
         data["audience"] = auth["audience"]
+    if auth.get("account_id"):
+        data["account_id"] = auth["account_id"]
     response = client.post(
         token_url,
         data=data,

@@ -408,6 +408,8 @@ def _http_auth(value: Any, field: str) -> dict[str, Any]:
         "discovery_url",
         "scope",
         "audience",
+        "grant_type",
+        "account_id",
     ):
         if auth.get(key) is not None:
             if not isinstance(auth[key], str) or not auth[key].strip():
@@ -420,6 +422,15 @@ def _http_auth(value: Any, field: str) -> dict[str, Any]:
         raise ConfigError(f"{field}.token_url is required")
     if kind == "oidc" and "discovery_url" not in result:
         raise ConfigError(f"{field}.discovery_url is required")
+    if kind in {"oauth2", "oidc"}:
+        grant_type = result.get("grant_type", "client_credentials")
+        if grant_type not in {"client_credentials", "account_credentials"}:
+            raise ConfigError(f"{field}.grant_type is unsupported")
+        result["grant_type"] = grant_type
+        if grant_type == "account_credentials" and "account_id" not in result:
+            raise ConfigError(
+                f"{field}.account_id is required for the account_credentials grant type"
+            )
     return result
 
 

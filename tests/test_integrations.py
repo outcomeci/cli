@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.parse import parse_qs
 
 import httpx
 import pytest
@@ -226,6 +227,113 @@ def test_rejects_absolute_operation_path(tmp_path: Path) -> None:
     )
     path.write_text(yaml.safe_dump(value), encoding="utf-8")
     with pytest.raises(ConfigError, match="relative absolute-path"):
+        compile_workflow(path)
+
+
+def test_oauth2_token_exchange_defaults_to_client_credentials_grant(tmp_path: Path) -> None:
+    path = workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["connections"]["tickets"]["auth"] = {
+        "type": "oauth2",
+        "credential": "env:TICKET_TOKEN",
+        "token_url": "https://auth.example.test/token",
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/token":
+            seen["body"] = request.content.decode()
+            return httpx.Response(200, json={"access_token": "minted-token"})
+        seen["bearer"] = request.headers["Authorization"]
+        return httpx.Response(201, json={"id": "T-1", "url": "https://example.test/T-1"})
+
+    executor = IntegrationExecutor(
+        compile_workflow(path),
+        resolver=lambda _reference: {"client_id": "abc", "client_secret": "shh"},
+        transport=httpx.MockTransport(handler),
+    )
+    executor.execute("tickets.create", {"title": "Broken button"}, phase="intake")
+
+    assert parse_qs(seen["body"]) == {"grant_type": ["client_credentials"]}
+    assert seen["bearer"] == "Bearer minted-token"
+
+
+def test_oauth2_token_exchange_passes_configured_grant_type_and_account_id(
+    tmp_path: Path,
+) -> None:
+    path = workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["connections"]["tickets"]["auth"] = {
+        "type": "oauth2",
+        "credential": "env:TICKET_TOKEN",
+        "token_url": "https://zoom.us/oauth/token",
+        "grant_type": "account_credentials",
+        "account_id": "acct-123",
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/oauth/token":
+            seen["body"] = request.content.decode()
+            seen["basic_auth"] = request.headers["Authorization"]
+            return httpx.Response(200, json={"access_token": "minted-token"})
+        return httpx.Response(201, json={"id": "T-1", "url": "https://example.test/T-1"})
+
+    executor = IntegrationExecutor(
+        compile_workflow(path),
+        resolver=lambda _reference: {"client_id": "abc", "client_secret": "shh"},
+        transport=httpx.MockTransport(handler),
+    )
+    executor.execute("tickets.create", {"title": "Broken button"}, phase="intake")
+
+    assert parse_qs(seen["body"]) == {
+        "grant_type": ["account_credentials"],
+        "account_id": ["acct-123"],
+    }
+    assert seen["basic_auth"].startswith("Basic ")
+
+
+def test_oauth2_rejects_unsupported_grant_type(tmp_path: Path) -> None:
+    path = workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["connections"]["tickets"]["auth"] = {
+        "type": "oauth2",
+        "credential": "env:TICKET_TOKEN",
+        "token_url": "https://auth.example.test/token",
+        "grant_type": "password",
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+    with pytest.raises(ConfigError, match="grant_type is unsupported"):
+        compile_workflow(path)
+
+
+def test_oidc_rejects_unsupported_grant_type(tmp_path: Path) -> None:
+    path = workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["connections"]["tickets"]["auth"] = {
+        "type": "oidc",
+        "credential": "env:TICKET_TOKEN",
+        "discovery_url": "https://auth.example.test/.well-known/openid-configuration",
+        "grant_type": "password",
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+    with pytest.raises(ConfigError, match="grant_type is unsupported"):
+        compile_workflow(path)
+
+
+def test_oauth2_account_credentials_requires_account_id(tmp_path: Path) -> None:
+    path = workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["connections"]["tickets"]["auth"] = {
+        "type": "oauth2",
+        "credential": "env:TICKET_TOKEN",
+        "token_url": "https://zoom.us/oauth/token",
+        "grant_type": "account_credentials",
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+    with pytest.raises(ConfigError, match="account_id is required"):
         compile_workflow(path)
 
 
