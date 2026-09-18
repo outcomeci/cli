@@ -19,6 +19,8 @@ from urllib.parse import quote, urljoin, urlsplit
 import httpx
 import jsonschema
 import yaml
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
 from .config import ConfigError, compile_workflow
 from .process import ExecutionError
@@ -162,6 +164,44 @@ def _credential_mapping(value: Mapping[str, str] | str) -> dict[str, str]:
     return dict(value) if isinstance(value, Mapping) else {"value": value}
 
 
+def _b64url(raw: bytes) -> str:
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def _jwt_bearer_assertion(auth: dict[str, Any], credential: dict[str, str]) -> str:
+    algorithm = credential.get("algorithm", "RS256")
+    if algorithm != "RS256":
+        raise ExecutionError(f"jwt_bearer algorithm '{algorithm}' is unsupported")
+    if not credential.get("issuer"):
+        raise ExecutionError("jwt_bearer credential is missing issuer")
+    try:
+        private_key = serialization.load_pem_private_key(
+            credential.get("private_key", "").encode(), password=None
+        )
+    except ValueError as exc:
+        raise ExecutionError("jwt_bearer private_key is not a valid PEM private key") from exc
+    if not isinstance(private_key, rsa.RSAPrivateKey):
+        raise ExecutionError("jwt_bearer private_key must be an RSA key")
+    now = int(time.time())
+    header = {"alg": "RS256", "typ": "JWT"}
+    claims = {
+        "iss": credential["issuer"],
+        "aud": auth.get("audience") or auth.get("token_url", ""),
+        "iat": now,
+        "exp": now + 300,
+    }
+    if auth.get("scope"):
+        claims["scope"] = auth["scope"]
+    if credential.get("subject"):
+        claims["sub"] = credential["subject"]
+    signing_input = (
+        f"{_b64url(json.dumps(header, separators=(',', ':')).encode())}"
+        f".{_b64url(json.dumps(claims, separators=(',', ':')).encode())}"
+    )
+    signature = private_key.sign(signing_input.encode(), padding.PKCS1v15(), hashes.SHA256())
+    return f"{signing_input}.{_b64url(signature)}"
+
+
 def _token(
     client: httpx.Client,
     auth: dict[str, Any],
@@ -174,16 +214,30 @@ def _token(
         token_url = discovery.json().get("token_endpoint")
     if not isinstance(token_url, str):
         raise ExecutionError("authorization server did not provide a token endpoint")
-    data = {"grant_type": "client_credentials"}
-    if auth.get("scope"):
-        data["scope"] = auth["scope"]
-    if auth.get("audience"):
-        data["audience"] = auth["audience"]
-    response = client.post(
-        token_url,
-        data=data,
-        auth=(credential.get("client_id", ""), credential.get("client_secret", "")),
-    )
+    if auth["type"] == "jwt_bearer":
+        data = {
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "assertion": _jwt_bearer_assertion(auth, credential),
+        }
+        response = client.post(token_url, data=data)
+    else:
+        grant_type = auth.get("grant_type", "client_credentials")
+        data = {"grant_type": grant_type}
+        if auth.get("scope"):
+            data["scope"] = auth["scope"]
+        if auth.get("audience"):
+            data["audience"] = auth["audience"]
+        if auth.get("account_id"):
+            data["account_id"] = auth["account_id"]
+        if grant_type == "refresh_token":
+            if not credential.get("refresh_token"):
+                raise ExecutionError("refresh_token grant requires a refresh_token credential")
+            data["refresh_token"] = credential["refresh_token"]
+        response = client.post(
+            token_url,
+            data=data,
+            auth=(credential.get("client_id", ""), credential.get("client_secret", "")),
+        )
     response.raise_for_status()
     value = response.json().get("access_token")
     if not isinstance(value, str):
@@ -209,12 +263,15 @@ def _apply_auth(
         else:
             query[auth["query"]] = value
     elif auth["type"] == "basic":
-        encoded = base64.b64encode(
-            f"{credential.get('username', '')}:{credential.get('password', '')}".encode()
-        ).decode()
+        if "username" in credential or "password" in credential:
+            pair = f"{credential.get('username', '')}:{credential.get('password', '')}"
+            encoded = base64.b64encode(pair.encode()).decode()
+        else:
+            encoded = credential.get("value", "")
         headers["Authorization"] = f"Basic {encoded}"
     elif auth["type"] == "bearer":
-        headers["Authorization"] = f"Bearer {credential.get('value', '')}"
+        scheme = credential.get("scheme") or "Bearer"
+        headers["Authorization"] = f"{scheme} {credential.get('value', '')}"
     else:
         headers["Authorization"] = f"Bearer {_token(client, auth, credential)}"
 
@@ -548,10 +605,11 @@ def doctor(
         auth = connection["auth"]
         reference = auth.get("credential")
         configured = True
+        resolved: Mapping[str, str] | str | None = None
         if isinstance(reference, str):
             if resolver is not None:
                 try:
-                    resolver(reference)
+                    resolved = resolver(reference)
                 except ExecutionError:
                     configured = False
             elif reference.startswith("env:"):
@@ -564,6 +622,29 @@ def doctor(
                 "credential_type": auth["type"],
             }
         )
+        if configured and resolved is not None and auth["type"] in {"basic", "bearer"}:
+            mapping = _credential_mapping(resolved)
+            if auth["type"] == "basic":
+                shape_ok = ("username" in mapping and "password" in mapping) or "value" in mapping
+                needs = "either username+password fields or a pre-encoded value field"
+            else:
+                shape_ok = "value" in mapping
+                needs = "a value field"
+            checks.append(
+                {
+                    "check": "credential_shape",
+                    "connection": connection["ref"],
+                    "status": "pass" if shape_ok else "fail",
+                    "detail": (
+                        "credential matches auth.type"
+                        if shape_ok
+                        else (
+                            f"auth.type '{auth['type']}' requires {needs} that this "
+                            "credential does not provide — use auth.type: api_key instead"
+                        )
+                    ),
+                }
+            )
         if connectivity:
             try:
                 _safe_destination(
