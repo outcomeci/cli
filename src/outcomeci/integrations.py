@@ -503,9 +503,17 @@ class IntegrationExecutor:
             body = {"text": response.text}
         body = _redact(body, [item for item in sensitive if isinstance(item, str)])
         if isinstance(body, dict) and body.get("ok") is False:
+            provider_code = body.get("error")
+            safe_code = (
+                provider_code
+                if isinstance(provider_code, str)
+                and re.fullmatch(r"[a-z0-9_]{1,64}", provider_code)
+                else None
+            )
             raise IntegrationError(
                 "integration.provider_rejected",
-                "provider rejected the request",
+                "provider rejected the request"
+                + (f" ({safe_code})" if safe_code is not None else ""),
                 category="transport",
             )
         duration = int((time.monotonic() - started) * 1000)

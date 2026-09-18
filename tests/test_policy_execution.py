@@ -126,8 +126,18 @@ def test_ambiguous_names_and_provider_errors_fail_safely(tmp_path):
     broker.executor.transport = httpx.MockTransport(
         lambda _: httpx.Response(200, json={"ok": False, "error": "invalid_auth"})
     )
-    with pytest.raises(IntegrationError, match="provider rejected"):
+    with pytest.raises(IntegrationError, match=r"provider rejected.*invalid_auth"):
         broker.execute("slack.request", {"method": "GET", "path": "/api/failure"}, phase="notify")
+
+    broker.executor.transport = httpx.MockTransport(
+        lambda _: httpx.Response(
+            200, json={"ok": False, "error": "unsafe detail containing spaces: private"}
+        )
+    )
+    with pytest.raises(IntegrationError, match=r"provider rejected the request$"):
+        broker.execute(
+            "slack.request", {"method": "GET", "path": "/api/unsafe-failure"}, phase="notify"
+        )
 
 
 def test_provider_echo_cannot_disclose_injected_credential(tmp_path):
