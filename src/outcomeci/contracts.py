@@ -31,6 +31,7 @@ def _date_time(value: Any) -> bool:
 CONTRACT_FILES = {
     "email.received": "email-received-v1.schema.json",
     "webhook.received": "webhook-received-v1.schema.json",
+    "cron": "cron-received-v1.schema.json",
     "agent": "agent-phase-v1.schema.json",
 }
 

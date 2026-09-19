@@ -192,6 +192,14 @@ def test_email_example_and_nullable_artifact_fields_validate() -> None:
         validate_contract("email.received", payload)
 
 
+def test_cron_example_validates_and_rejects_unknown_fields() -> None:
+    payload = copy.deepcopy(contract_schema("cron")["examples"][0])
+    validate_contract("cron", payload)
+    payload["unexpected"] = "value"
+    with pytest.raises(ContractError):
+        validate_contract("cron", payload)
+
+
 def test_invalid_trigger_never_invokes_agent(tmp_path: Path, monkeypatch) -> None:
     path = typed_workflow(tmp_path)
     invoked = []
@@ -418,6 +426,22 @@ def test_contract_schema_cli_and_generated_documentation(tmp_path: Path, capsys)
     assert json.loads(capsys.readouterr().out)["valid"] is True
     assert main(["schema", "print", "--type", "agent"]) == 0
     assert json.loads(capsys.readouterr().out)["required"] == ["type", "instructions"]
+    cron_payload = tmp_path / "cron.json"
+    cron_payload.write_text(json.dumps(contract_schema("cron")["examples"][0]))
+    assert main(["schema", "validate", str(cron_payload), "--type", "cron"]) == 0
+    assert json.loads(capsys.readouterr().out)["valid"] is True
+    assert main(["schema", "print", "--type", "cron"]) == 0
+    assert json.loads(capsys.readouterr().out)["required"] == [
+        "schema_version",
+        "type",
+        "schedule_id",
+        "generation",
+        "schedule_arn",
+        "scheduled_at",
+        "execution_id",
+        "attempt_number",
+        "trigger_name",
+    ]
     assert main(["schema", "docs"]) == 0
     assert capsys.readouterr().out.rstrip() == render_reference().rstrip()
     reference = Path(__file__).parents[1] / "docs" / "typed-contracts-v1.md"

@@ -82,6 +82,40 @@ Schema: `https://outcomeci.dev/schemas/triggers/webhook-received/v1`
 }
 ```
 
+## cron v1 payload
+
+Immutable scheduled-occurrence value delivered for a workflow's cron trigger.
+
+Schema: `https://outcomeci.com/schemas/cron-received-v1.schema.json`
+
+| Field | Required | Type | Meaning |
+| --- | --- | --- | --- |
+| `schema_version` | yes | 'outcomeci.trigger.cron/v1' | Version of this payload contract. |
+| `type` | yes | 'cron' | Registered trigger type. |
+| `schedule_id` | yes | string | The durable schedule this occurrence belongs to. |
+| `generation` | yes | integer | Schedule generation at the time this occurrence fired; bumped whenever the schedule is reconciled. |
+| `schedule_arn` | yes | string | Provider schedule ARN that produced this occurrence. |
+| `scheduled_at` | yes | string | UTC or offset-qualified time this occurrence was scheduled to fire. |
+| `execution_id` | yes | string | Provider-assigned identifier for this specific firing attempt. |
+| `attempt_number` | yes | integer | Delivery attempt number for this occurrence. |
+| `trigger_name` | yes | string | The named trigger in the workflow that this occurrence fires. |
+
+### Example payload
+
+```json
+{
+  "schema_version": "outcomeci.trigger.cron/v1",
+  "type": "cron",
+  "schedule_id": "00000000-0000-0000-0000-000000000001",
+  "generation": 1,
+  "schedule_arn": "arn:aws:scheduler:us-east-1:000000000000:schedule/outcomeci-workflow-staging/example",
+  "scheduled_at": "2026-09-19T15:00:00Z",
+  "execution_id": "example-execution-1",
+  "attempt_number": 1,
+  "trigger_name": "daily"
+}
+```
+
 ## Agent phase v1 configuration
 
 A typed agent step. Payload schemas are declared through expects; runner/model inherit agents.default.
