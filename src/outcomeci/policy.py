@@ -383,7 +383,7 @@ class PolicyExecutor:
                 )
                 self._save(state)
                 return result
-            except Exception:
+            except Exception as exc:
                 if call["status"] != "denied":
                     if call["status"] == "reviewing":
                         self._event(
@@ -405,6 +405,7 @@ class PolicyExecutor:
                             capability,
                             "Integration request failed or delivery is uncertain",
                             proposal_sha256=fingerprint,
+                            detail=str(exc),
                             level="error",
                         )
                     call["status"] = "uncertain"
