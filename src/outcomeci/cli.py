@@ -193,6 +193,12 @@ def parser() -> argparse.ArgumentParser:
     )
     workflow_debug.add_argument("--agent", choices=AGENT_CHOICES)
     workflow_debug.add_argument("--model")
+    workflow_debug.add_argument(
+        "--auto-continue",
+        action="store_true",
+        help="Continue automatically into each ready phase, including any real side "
+        "effects (e.g. sending Slack messages) later phases perform",
+    )
     workflow_sync.add_argument("file", type=Path)
     workflow_sync.add_argument("--workspace", required=True)
     workflow_sync.add_argument("--name")
@@ -574,6 +580,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     payload_path=args.payload,
                     agent=args.agent,
                     model=args.model,
+                    auto_continue=args.auto_continue,
                 )
                 _print_json(result)
                 return 0

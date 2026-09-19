@@ -18,6 +18,50 @@ def capability_context(monkeypatch):
     monkeypatch.setattr(local, "serve_capability", lambda *args, **kwargs: nullcontext({}))
 
 
+def test_continue_run_forwards_the_cloud_execution_context(tmp_path: Path, monkeypatch) -> None:
+    state = {
+        "run_id": "run-1",
+        "status": "awaiting_confirmation",
+        "completed_phases": ["resolve_analytics"],
+    }
+    local._write(tmp_path, state)
+    monkeypatch.setattr(
+        local,
+        "compile_workflow",
+        lambda config: {
+            "instructions": {
+                "phases": {
+                    "resolve_analytics": {"needs": []},
+                    "notify": {"needs": ["resolve_analytics"]},
+                }
+            }
+        },
+    )
+    captured = {}
+
+    def fake_execute(root, config, state, **options):
+        captured.update(options)
+        return {"run_id": state["run_id"], "status": "completed"}
+
+    monkeypatch.setattr(local, "_execute", fake_execute)
+    resolver = lambda reference: "value"  # noqa: E731
+
+    result = local.continue_run(
+        tmp_path,
+        tmp_path / "outcome.yml",
+        "run-1",
+        approve=True,
+        credential_resolver=resolver,
+        execution_backend="outcomeci",
+        _container_isolated=True,
+    )
+
+    assert result["status"] == "completed"
+    assert captured["credential_resolver"] is resolver
+    assert captured["execution_backend"] == "outcomeci"
+    assert captured["_container_isolated"] is True
+
+
 def _fake_invoke(
     agent: str, model: str | None, prompt: str, workspace: Path, timeout: int, **kwargs
 ) -> str:

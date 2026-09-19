@@ -999,6 +999,11 @@ def continue_run(
     *,
     agent: str | None = None,
     model: str | None = None,
+    credential_resolver: CredentialResolver | None = None,
+    event_sink: Callable[[dict[str, Any]], None] | None = None,
+    policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    execution_backend: str = "filesystem",
+    _container_isolated: bool = False,
 ) -> dict[str, Any]:
     state = _read(root, run_id)
     if state.get("status") == "awaiting_input" and approve:
@@ -1024,7 +1029,18 @@ def continue_run(
     state["phase"] = ready[0]
     state["status"] = "queued"
     _write(root, state)
-    return _execute(root, config, state, agent=agent, model=model)
+    return _execute(
+        root,
+        config,
+        state,
+        agent=agent,
+        model=model,
+        credential_resolver=credential_resolver,
+        event_sink=event_sink,
+        policy_reviewer=policy_reviewer,
+        execution_backend=execution_backend,
+        _container_isolated=_container_isolated,
+    )
 
 
 def retry(

@@ -194,13 +194,27 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
             _container_isolated=True,
         )
         run_id = str(result["run_id"])
+        phase_count = len(compile_workflow(config)["instructions"]["phases"])
+        while len(result.get("completed_phases", [])) != phase_count:
+            if heartbeat_failure:
+                raise CoreError("policy_evidence_upload_failed", True)
+            if result.get("status") == "error":
+                raise ContractError("workflow recorded an error")
+            if not result.get("ready_phases") or result.get("status") == "awaiting_input":
+                raise ContractError("workflow requires a durable continuation")
+            result = local.continue_run(
+                root,
+                config,
+                run_id,
+                approve=True,
+                credential_resolver=resolver,
+                event_sink=policy_event,
+                policy_reviewer=policy_review,
+                execution_backend="outcomeci",
+                _container_isolated=True,
+            )
         if heartbeat_failure:
             raise CoreError("policy_evidence_upload_failed", True)
-        if result.get("status") == "error":
-            raise ContractError("workflow recorded an error")
-        phase_count = len(compile_workflow(config)["instructions"]["phases"])
-        if len(result.get("completed_phases", [])) != phase_count:
-            raise ContractError("workflow requires a durable continuation")
         if provider == "codex":
             agent_update = json.loads((root / ".codex" / "auth.json").read_text())
         artifacts = workflow_artifacts(root, run_id)

@@ -12,7 +12,7 @@ from outcomeci.cloud_runner.main import (
     execute_workflow,
     workflow_failure_category,
 )
-from outcomeci.cloud_runner.models import ExecutionClaim, Launch
+from outcomeci.cloud_runner.models import ContractError, ExecutionClaim, Launch
 from outcomeci.cloud_runner.process import ProcessResult
 from outcomeci.process import ExecutionError
 
@@ -202,6 +202,178 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(client.completed[0][2]["expected_credential_version"], 3)
         self.assertEqual(client.completed[0][2]["agent_credential"], {"token": "agent-secret"})
         self.assertEqual(client.heartbeats[0][1][0]["event_type"], "permission.reviewed")
+
+    def test_generic_workflow_auto_continues_through_ready_phases(self):
+        claim = {
+            "content": "apiVersion: outcomeci.dev/v1alpha1\nkind: OutcomeWorkflow\n",
+            "files": {},
+            "trigger_name": "inbound",
+            "input": {"subject": "hello"},
+            "lease_token": "lease-secret",
+            "agent": {
+                "provider": "codex",
+                "credential": {"token": "agent-secret"},
+                "credential_version": 3,
+            },
+            "vault": {
+                "expires_at": "2099-01-01T00:00:00+00:00",
+                "values": {},
+            },
+        }
+
+        class WorkflowClient:
+            completed = []
+            heartbeats = []
+
+            def claim_workflow(self):
+                return claim
+
+            def workflow_start(self, token):
+                self.started = token
+
+            def workflow_heartbeat(self, token, events=None):
+                self.heartbeats.append((token, events or []))
+                return {"active": True, "policy_events_received": len(events or [])}
+
+            def workflow_complete(self, token, status, **values):
+                self.completed.append((token, status, values))
+
+        client = WorkflowClient()
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "private"
+            root.mkdir()
+            continue_calls = []
+
+            def trigger(workspace, config, name, payload, **options):
+                self.assertEqual(options["execution_backend"], "outcomeci")
+                options["on_created"]("run-1")
+                return {
+                    "run_id": "run-1",
+                    "status": "awaiting_confirmation",
+                    "completed_phases": ["resolve_analytics"],
+                    "ready_phases": ["notify"],
+                }
+
+            def continue_run(root_arg, config_arg, run_id, *, approve, **options):
+                continue_calls.append((run_id, approve, options))
+                self.assertEqual(options["execution_backend"], "outcomeci")
+                self.assertIs(options["_container_isolated"], True)
+                self.assertTrue(callable(options["credential_resolver"]))
+                trace = root_arg / ".outcomeci" / "outcomes" / run_id / "transcripts"
+                trace.mkdir(parents=True, exist_ok=True)
+                return {
+                    "run_id": run_id,
+                    "status": "completed",
+                    "completed_phases": ["resolve_analytics", "notify"],
+                }
+
+            with (
+                mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.tempfile.mkdtemp",
+                    return_value=str(root),
+                ),
+                mock.patch("outcomeci.local.trigger", side_effect=trigger),
+                mock.patch("outcomeci.local.continue_run", side_effect=continue_run),
+                mock.patch(
+                    "outcomeci.config.compile_workflow",
+                    return_value={
+                        "instructions": {"phases": {"resolve_analytics": {}, "notify": {}}}
+                    },
+                ),
+            ):
+                self.assertEqual(
+                    execute_workflow(
+                        Launch(
+                            "workflow",
+                            "invocation-1",
+                            "boot",
+                            "https://api.outcomeci.com",
+                        ),
+                        client,
+                    ),
+                    0,
+                )
+        self.assertEqual(len(continue_calls), 1)
+        self.assertEqual(continue_calls[0][0:2], ("run-1", True))
+        self.assertEqual(client.completed[0][0:2], ("lease-secret", "completed"))
+        self.assertEqual(client.completed[0][2]["run_id"], "run-1")
+
+    def test_generic_workflow_awaiting_human_input_fails_without_looping(self):
+        claim = {
+            "content": "apiVersion: outcomeci.dev/v1alpha1\nkind: OutcomeWorkflow\n",
+            "files": {},
+            "trigger_name": "inbound",
+            "input": {"subject": "hello"},
+            "lease_token": "lease-secret",
+            "agent": {
+                "provider": "codex",
+                "credential": {"token": "agent-secret"},
+                "credential_version": 3,
+            },
+            "vault": {"expires_at": "2099-01-01T00:00:00+00:00", "values": {}},
+        }
+
+        class WorkflowClient:
+            completed = []
+            heartbeats = []
+
+            def claim_workflow(self):
+                return claim
+
+            def workflow_start(self, token):
+                self.started = token
+
+            def workflow_heartbeat(self, token, events=None):
+                self.heartbeats.append((token, events or []))
+                return {"active": True, "policy_events_received": len(events or [])}
+
+            def workflow_complete(self, token, status, **values):
+                self.completed.append((token, status, values))
+
+        client = WorkflowClient()
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "private"
+            root.mkdir()
+
+            def trigger(workspace, config, name, payload, **options):
+                options["on_created"]("run-1")
+                return {
+                    "run_id": "run-1",
+                    "status": "awaiting_input",
+                    "completed_phases": [],
+                    "ready_phases": [],
+                }
+
+            with (
+                mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.tempfile.mkdtemp",
+                    return_value=str(root),
+                ),
+                mock.patch("outcomeci.local.trigger", side_effect=trigger),
+                mock.patch(
+                    "outcomeci.local.continue_run",
+                    side_effect=AssertionError("continue_run should not be called"),
+                ),
+                mock.patch(
+                    "outcomeci.config.compile_workflow",
+                    return_value={
+                        "instructions": {"phases": {"resolve_analytics": {}, "notify": {}}}
+                    },
+                ),
+                self.assertRaisesRegex(ContractError, "durable continuation"),
+            ):
+                execute_workflow(
+                    Launch(
+                        "workflow",
+                        "invocation-1",
+                        "boot",
+                        "https://api.outcomeci.com",
+                    ),
+                    client,
+                )
+        self.assertEqual(client.completed[0][1], "failed")
 
     def test_generic_workflow_failure_reports_a_redacted_detail(self):
         claim = {
