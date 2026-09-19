@@ -95,6 +95,45 @@ def test_transport_failure_is_durable_and_not_replayed(tmp_path):
     assert len(calls) == 1
 
 
+def test_integration_failure_records_the_http_status_as_detail(tmp_path):
+    def send(request):
+        return httpx.Response(401, json={"error": "invalid_auth"})
+
+    broker = executor(tmp_path, handler=send)
+    inputs = {
+        "method": "POST",
+        "path": "/api/chat.postMessage",
+        "body": {"text": "Hello"},
+    }
+    with pytest.raises(IntegrationError):
+        broker.execute("slack.request", inputs, phase="notify")
+
+    journal = json.loads((tmp_path / ".broker" / "journal.json").read_text())
+    failed = next(e for e in journal["events"] if e["event_type"] == "integration.failed")
+    assert failed["detail"] == "integration request returned HTTP 401"
+
+
+def test_integration_failure_detail_is_scrubbed_of_credential_shaped_text(tmp_path):
+    def raise_with_token_shaped_text(_reference):
+        raise ExecutionError("connect failed: Bearer some-token-value rejected")
+
+    broker = executor(tmp_path, handler=lambda _: httpx.Response(200, json={"ok": True}))
+    broker.executor.resolver = raise_with_token_shaped_text
+    inputs = {
+        "method": "POST",
+        "path": "/api/chat.postMessage",
+        "body": {"text": "Hello"},
+    }
+    with pytest.raises(ExecutionError):
+        broker.execute("slack.request", inputs, phase="notify")
+
+    journal = json.loads((tmp_path / ".broker" / "journal.json").read_text())
+    failed = next(e for e in journal["events"] if e["event_type"] == "integration.failed")
+    assert "some-token-value" not in failed["detail"]
+    assert "[credential withheld]" in failed["detail"]
+    assert "connect failed" in failed["detail"]
+
+
 def test_ambiguous_names_and_provider_errors_fail_safely(tmp_path):
     broker = executor(
         tmp_path,

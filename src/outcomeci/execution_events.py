@@ -40,6 +40,7 @@ def event(
         "http_status",
         "ok",
         "level",
+        "detail",
     ):
         value = fields.get(name)
         if value is not None:
