@@ -73,6 +73,7 @@ def run(
     payload_path: Path | None = None,
     agent: str | None = None,
     model: str | None = None,
+    auto_continue: bool = False,
 ) -> dict[str, Any]:
     from . import local
 
@@ -117,6 +118,23 @@ def run(
             execution_backend="outcomeci",
             _container_isolated=False,
         )
+        phase_count = len(compiled["instructions"]["phases"]) if auto_continue else 0
+        while auto_continue and len(result.get("completed_phases", [])) != phase_count:
+            if not result.get("ready_phases") or result.get("status") == "awaiting_input":
+                break
+            next_phase = result["ready_phases"][0]
+            print(f"Continuing into phase {next_phase!r}...", file=sys.stderr)
+            result = local.continue_run(
+                root,
+                config,
+                result["run_id"],
+                approve=True,
+                agent=agent,
+                model=model,
+                credential_resolver=resolver,
+                execution_backend="outcomeci",
+                _container_isolated=False,
+            )
     except Exception:
         if invocation_id is not None:
             with suppress(ExecutionError):

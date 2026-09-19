@@ -179,6 +179,83 @@ def test_run_mode_reports_failure_and_still_raises(monkeypatch, tmp_path):
     complete.assert_called_once_with("workspace_1", "workflow_1", "inv-1", "failed")
 
 
+def test_auto_continue_drives_through_ready_phases(monkeypatch, tmp_path):
+    compiled = {
+        "triggers": {"daily": {"type": "cron"}},
+        "instructions": {"phases": {"resolve_analytics": {}, "notify": {}}},
+    }
+    monkeypatch.setattr(debug, "compile_workflow", lambda config: compiled)
+    monkeypatch.setattr(debug, "issue_debug_lease", lambda *a, **k: _lease())
+    monkeypatch.setattr(debug, "complete_debug_lease", mock.Mock())
+    continue_calls = []
+
+    def trigger(root, config, name, payload, **options):
+        return {
+            "run_id": "run-1",
+            "status": "awaiting_confirmation",
+            "completed_phases": ["resolve_analytics"],
+            "ready_phases": ["notify"],
+        }
+
+    def continue_run(root, config, run_id, *, approve, **options):
+        continue_calls.append((run_id, approve, options))
+        return {
+            "run_id": run_id,
+            "status": "completed",
+            "completed_phases": ["resolve_analytics", "notify"],
+        }
+
+    with (
+        mock.patch("outcomeci.local.trigger", side_effect=trigger),
+        mock.patch("outcomeci.local.continue_run", side_effect=continue_run),
+    ):
+        result = debug.run(
+            tmp_path,
+            tmp_path / "outcome.yml",
+            "workspace_1",
+            "workflow_1",
+            trigger_name="daily",
+            auto_continue=True,
+        )
+
+    assert result["completed_phases"] == ["resolve_analytics", "notify"]
+    assert len(continue_calls) == 1
+    assert continue_calls[0][0:2] == ("run-1", True)
+    assert continue_calls[0][2]["execution_backend"] == "outcomeci"
+    assert continue_calls[0][2]["_container_isolated"] is False
+
+
+def test_without_auto_continue_stops_after_the_first_phase(monkeypatch, tmp_path):
+    compiled = {
+        "triggers": {"daily": {"type": "cron"}},
+        "instructions": {"phases": {"resolve_analytics": {}, "notify": {}}},
+    }
+    monkeypatch.setattr(debug, "compile_workflow", lambda config: compiled)
+    monkeypatch.setattr(debug, "issue_debug_lease", lambda *a, **k: _lease())
+    monkeypatch.setattr(debug, "complete_debug_lease", mock.Mock())
+
+    def trigger(root, config, name, payload, **options):
+        return {
+            "run_id": "run-1",
+            "status": "awaiting_confirmation",
+            "completed_phases": ["resolve_analytics"],
+            "ready_phases": ["notify"],
+        }
+
+    with (
+        mock.patch("outcomeci.local.trigger", side_effect=trigger),
+        mock.patch(
+            "outcomeci.local.continue_run",
+            side_effect=AssertionError("continue_run should not be called"),
+        ),
+    ):
+        result = debug.run(
+            tmp_path, tmp_path / "outcome.yml", "workspace_1", "workflow_1", trigger_name="daily"
+        )
+
+    assert result["completed_phases"] == ["resolve_analytics"]
+
+
 def test_resolver_rejects_a_reference_missing_from_the_lease(monkeypatch, tmp_path):
     monkeypatch.setattr(debug, "compile_workflow", lambda config: COMPILED)
     monkeypatch.setattr(debug, "issue_debug_lease", lambda *a, **k: _lease())
