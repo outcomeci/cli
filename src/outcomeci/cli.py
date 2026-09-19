@@ -115,7 +115,7 @@ def parser() -> argparse.ArgumentParser:
     for command in (schema_path_command, schema_print_command, schema_export):
         command.add_argument(
             "--type",
-            choices=("workflow", "email.received", "webhook.received", "agent"),
+            choices=("workflow", "email.received", "webhook.received", "cron", "agent"),
             default="workflow",
         )
     schema_commands.add_parser("docs", help="Print reference documentation from enforced schemas")
@@ -124,7 +124,9 @@ def parser() -> argparse.ArgumentParser:
     )
     schema_validate_command.add_argument("input", type=Path)
     schema_validate_command.add_argument(
-        "--type", choices=("email.received", "webhook.received", "agent"), required=True
+        "--type",
+        choices=("email.received", "webhook.received", "cron", "agent"),
+        required=True,
     )
     schema_export.add_argument("output", type=Path)
     conformance = commands.add_parser(

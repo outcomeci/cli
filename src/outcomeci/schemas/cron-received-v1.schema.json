@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://outcomeci.com/schemas/cron-received-v1.schema.json",
+  "title": "cron v1 payload",
+  "description": "Immutable scheduled-occurrence value delivered for a workflow's cron trigger.",
+  "type": "object",
+  "required": ["schema_version", "type", "schedule_id", "generation", "schedule_arn", "scheduled_at", "execution_id", "attempt_number", "trigger_name"],
+  "properties": {
+    "schema_version": {"const": "outcomeci.trigger.cron/v1", "description": "Version of this payload contract."},
+    "type": {"const": "cron", "description": "Registered trigger type."},
+    "schedule_id": {"type": "string", "format": "uuid", "description": "The durable schedule this occurrence belongs to."},
+    "generation": {"type": "integer", "minimum": 1, "description": "Schedule generation at the time this occurrence fired; bumped whenever the schedule is reconciled."},
+    "schedule_arn": {"type": "string", "minLength": 1, "maxLength": 2048, "description": "Provider schedule ARN that produced this occurrence."},
+    "scheduled_at": {"type": "string", "format": "date-time", "description": "UTC or offset-qualified time this occurrence was scheduled to fire."},
+    "execution_id": {"type": "string", "minLength": 1, "maxLength": 256, "description": "Provider-assigned identifier for this specific firing attempt."},
+    "attempt_number": {"type": "integer", "minimum": 1, "description": "Delivery attempt number for this occurrence."},
+    "trigger_name": {"type": "string", "minLength": 1, "description": "The named trigger in the workflow that this occurrence fires."}
+  },
+  "additionalProperties": false,
+  "examples": [{"schema_version": "outcomeci.trigger.cron/v1", "type": "cron", "schedule_id": "00000000-0000-0000-0000-000000000001", "generation": 1, "schedule_arn": "arn:aws:scheduler:us-east-1:000000000000:schedule/outcomeci-workflow-staging/example", "scheduled_at": "2026-09-19T15:00:00Z", "execution_id": "example-execution-1", "attempt_number": 1, "trigger_name": "daily"}]
+}
