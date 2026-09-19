@@ -192,6 +192,65 @@ def test_email_trigger_can_feed_a_phase(tmp_path: Path) -> None:
     assert compiled["triggers"]["inbound_email"]["type"] == "email.received"
 
 
+def test_cron_trigger_compiles_with_expression_and_timezone(tmp_path: Path) -> None:
+    path = _workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["triggers"] = {
+        "daily": {
+            "type": "cron",
+            "expression": "*/15 * * * *",
+            "timezone": "America/Chicago",
+        }
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False))
+    compiled = compile_workflow(path)
+    assert compiled["triggers"]["daily"] == {
+        "type": "cron",
+        "expression": "*/15 * * * *",
+        "timezone": "America/Chicago",
+    }
+
+
+@pytest.mark.parametrize(
+    "trigger,error",
+    [
+        (
+            {"type": "cron", "expression": "* * * * *", "timezone": "America/Chicago"},
+            "more than once every five minutes",
+        ),
+        (
+            {"type": "cron", "expression": "*/3 * * * *", "timezone": "America/Chicago"},
+            "more than once every five minutes",
+        ),
+        (
+            {"type": "cron", "expression": "0 9 5 * 2", "timezone": "America/Chicago"},
+            "day-of-month or day-of-week",
+        ),
+        (
+            {"type": "cron", "expression": "0 9 * * *"},
+            "timezone is required",
+        ),
+        (
+            {"type": "cron", "expression": "0 9 * * *", "timezone": "Not/AZone"},
+            "not a recognized IANA time zone",
+        ),
+        (
+            {"type": "cron", "expression": "0 9 * *", "timezone": "America/Chicago"},
+            "five space-separated fields",
+        ),
+    ],
+)
+def test_cron_trigger_rejects_invalid_configuration(
+    tmp_path: Path, trigger: dict, error: str
+) -> None:
+    path = _workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["triggers"] = {"daily": trigger}
+    path.write_text(yaml.safe_dump(value, sort_keys=False))
+    with pytest.raises(ConfigError, match=error):
+        compile_workflow(path)
+
+
 @pytest.mark.parametrize(
     "mutation,error",
     [
