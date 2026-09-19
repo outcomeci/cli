@@ -9,6 +9,7 @@ import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+from zoneinfo import available_timezones
 
 import jsonschema
 import yaml
@@ -23,7 +24,7 @@ HTTP_METHODS = {"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"}
 SIDE_EFFECTS = {"read", "create", "update", "delete", "execute"}
 APPROVAL_POLICIES = {"none", "required", "inherit"}
 IDEMPOTENCY_POLICIES = {"none", "supported", "required"}
-TRIGGER_TYPES = {"manual", "email.received", "webhook.received"}
+TRIGGER_TYPES = {"manual", "email.received", "webhook.received", "cron"}
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9_-]{0,62}$")
 
 
@@ -313,6 +314,25 @@ def _named_items(value: Any, field: str) -> list[dict[str, Any]]:
     return [{"ref": name, **_mapping(item, f"{field}.{name}")} for name, item in values.items()]
 
 
+def _cron_expression(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{field} must be a five-field cron expression")
+    fields = value.split()
+    if len(fields) != 5:
+        raise ConfigError(f"{field} must have five space-separated fields")
+    minute, _hour, day_of_month, _month, day_of_week = fields
+    if day_of_month != "*" and day_of_week != "*":
+        raise ConfigError(f"{field} must leave day-of-month or day-of-week as *")
+    step = re.fullmatch(r"\*/(\d+)", minute)
+    if minute == "*" or (step and int(step.group(1)) < 5):
+        raise ConfigError(f"{field} must not fire more than once every five minutes")
+    if "," in minute:
+        values = sorted(int(part) for part in minute.split(","))
+        if any(b - a < 5 for a, b in zip(values, values[1:], strict=False)):
+            raise ConfigError(f"{field} must not fire more than once every five minutes")
+    return value.strip()
+
+
 def _triggers(value: Any) -> dict[str, dict[str, Any]]:
     raw = _mapping(value, "spec.triggers")
     if not raw:
@@ -332,6 +352,23 @@ def _triggers(value: Any) -> dict[str, dict[str, Any]]:
             normalized[name] = {
                 "type": trigger_type,
                 **validate_delivery_config(trigger),
+            }
+            continue
+        if trigger_type == "cron":
+            unknown_cron = set(trigger) - {"type", "expression", "timezone"}
+            if unknown_cron:
+                raise ConfigError(f"{field} has unknown fields: {', '.join(sorted(unknown_cron))}")
+            expression = _cron_expression(trigger.get("expression"), f"{field}.expression")
+            timezone = trigger.get("timezone")
+            if not isinstance(timezone, str) or not timezone.strip():
+                raise ConfigError(f"{field}.timezone is required")
+            timezone = timezone.strip()
+            if timezone not in available_timezones():
+                raise ConfigError(f"{field}.timezone is not a recognized IANA time zone")
+            normalized[name] = {
+                "type": trigger_type,
+                "expression": expression,
+                "timezone": timezone,
             }
             continue
         unknown = set(trigger) - {"type", "filters"}
