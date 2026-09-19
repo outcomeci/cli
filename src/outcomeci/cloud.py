@@ -295,6 +295,34 @@ def sync_workflow(
     return value  # type: ignore[return-value]
 
 
+def issue_debug_lease(
+    workspace_id: str, workflow_id: str, *, invocation_id: str | None = None, ttl_seconds: int = 600
+) -> dict[str, Any]:
+    """Fetch a short-lived cloud vault lease for locally debugging one workflow."""
+    status, value = _authorized_request(
+        f"/workspaces/{workspace_id}/workflows/{workflow_id}/debug-lease",
+        method="POST",
+        body={"invocation_id": invocation_id, "ttl_seconds": ttl_seconds},
+    )
+    if status != 200 or not isinstance(value, dict):
+        detail = value.get("detail") if isinstance(value, dict) else None
+        raise ExecutionError(str(detail or "could not issue a debug lease"))
+    return value
+
+
+def complete_debug_lease(
+    workspace_id: str, workflow_id: str, invocation_id: str, status_value: str
+) -> None:
+    status, value = _authorized_request(
+        f"/workspaces/{workspace_id}/workflows/{workflow_id}/debug-lease/{invocation_id}/complete",
+        method="POST",
+        body={"status": status_value},
+    )
+    if status != 200:
+        detail = value.get("detail") if isinstance(value, dict) else None
+        raise ExecutionError(str(detail or "could not resolve the debug-claimed invocation"))
+
+
 def vault_request(workspace_id: str, operation: str, **values: Any) -> dict[str, Any] | list[Any]:
     """Perform provider-neutral credential management through OutcomeCI Vault."""
     base = f"/workspaces/{workspace_id}/vault"
