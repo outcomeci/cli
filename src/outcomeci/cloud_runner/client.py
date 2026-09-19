@@ -127,6 +127,7 @@ class CoreClient:
         run_id: str | None = None,
         artifacts: list[dict[str, str]] | None = None,
         category: str | None = None,
+        detail: str | None = None,
         expected_credential_version: int | None = None,
         agent_credential: Any | None = None,
     ) -> None:
@@ -138,6 +139,7 @@ class CoreClient:
                 "run_id": run_id,
                 "artifacts": artifacts or [],
                 "category": category,
+                "detail": detail,
                 "expected_credential_version": expected_credential_version,
                 "agent_credential": agent_credential,
             },

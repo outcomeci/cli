@@ -24,6 +24,7 @@ from .client import CoreClient, CoreError
 from .models import ContractError, Launch
 from .process import run
 from .providers import ADAPTERS
+from .redaction import redact_diagnostic
 
 URL = re.compile(r"https://[^\s<>'\"\x00-\x1f\x7f]+")
 USER_CODE = re.compile(r"\b[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+\b")
@@ -223,6 +224,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 "failed",
                 run_id=run_id,
                 category=workflow_failure_category(exc),
+                detail=redact_diagnostic(exc),
                 expected_credential_version=credential_version,
                 agent_credential=agent_update,
             )
