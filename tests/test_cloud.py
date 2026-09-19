@@ -99,6 +99,48 @@ def test_sync_validates_and_sends_explicit_create_mode(tmp_path: Path, monkeypat
     assert ".outcomeci/vault.enc" not in captured["body"]["files"]
 
 
+def test_issue_debug_lease_posts_the_optional_invocation_id(monkeypatch) -> None:
+    captured = {}
+
+    def request(path, *, method="GET", body=None):
+        captured.update(path=path, method=method, body=body)
+        return 200, {"lease_id": "lease-1", "expires_at": "2026-09-19T18:00:00+00:00", "values": {}}
+
+    monkeypatch.setattr(cloud, "_authorized_request", request)
+    result = cloud.issue_debug_lease("workspace_1", "workflow_1")
+    assert result["lease_id"] == "lease-1"
+    assert captured["path"] == "/workspaces/workspace_1/workflows/workflow_1/debug-lease"
+    assert captured["body"] == {"invocation_id": None, "ttl_seconds": 600}
+
+
+def test_issue_debug_lease_raises_the_server_detail_on_failure(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cloud, "_authorized_request", lambda *a, **k: (409, {"detail": "not queued"})
+    )
+    try:
+        cloud.issue_debug_lease("workspace_1", "workflow_1", invocation_id="inv-1")
+    except Exception as exc:
+        assert "not queued" in str(exc)
+    else:
+        raise AssertionError("expected an ExecutionError")
+
+
+def test_complete_debug_lease_posts_status(monkeypatch) -> None:
+    captured = {}
+
+    def request(path, *, method="GET", body=None):
+        captured.update(path=path, method=method, body=body)
+        return 200, {"completed": True}
+
+    monkeypatch.setattr(cloud, "_authorized_request", request)
+    cloud.complete_debug_lease("workspace_1", "workflow_1", "inv-1", "failed")
+    assert (
+        captured["path"]
+        == "/workspaces/workspace_1/workflows/workflow_1/debug-lease/inv-1/complete"
+    )
+    assert captured["body"] == {"status": "failed"}
+
+
 def test_sync_sends_patch_lineage_for_new_version(tmp_path: Path, monkeypatch) -> None:
     initialize(tmp_path, "filesystem")
     workflow = tmp_path / "outcome.yml"

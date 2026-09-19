@@ -174,6 +174,25 @@ def parser() -> argparse.ArgumentParser:
         help="Continue configured phases automatically, without bypassing human hooks",
     )
     workflow_listen.add_argument("--once", action="store_true")
+    workflow_debug = workflow_commands.add_parser(
+        "debug",
+        help="Run a backend: outcomeci workflow locally against real cloud vault credentials",
+    )
+    workflow_debug.add_argument("--workspace", required=True, help="Cloud workspace identifier")
+    workflow_debug.add_argument("--workflow", required=True, help="Cloud workflow identifier")
+    workflow_debug.add_argument("--dir", type=Path, default=Path.cwd())
+    workflow_debug.add_argument("--config", type=Path, default=Path("outcome.yml"))
+    workflow_debug.add_argument(
+        "--trigger", help="Named trigger to synthesize a payload for; ignored with --run"
+    )
+    workflow_debug.add_argument(
+        "--run", dest="invocation_id", help="Claim and replay a real queued invocation by id"
+    )
+    workflow_debug.add_argument(
+        "--payload", type=Path, help="JSON file to use as the trigger payload"
+    )
+    workflow_debug.add_argument("--agent", choices=AGENT_CHOICES)
+    workflow_debug.add_argument("--model")
     workflow_sync.add_argument("file", type=Path)
     workflow_sync.add_argument("--workspace", required=True)
     workflow_sync.add_argument("--name")
@@ -539,6 +558,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                     auto_continue=args.auto_continue,
                     once=args.once,
                 )
+                return 0
+            if args.workflow_command == "debug":
+                from .debug import run as run_debug
+
+                root = args.dir.resolve()
+                config = (root / args.config).resolve()
+                result = run_debug(
+                    root,
+                    config,
+                    args.workspace,
+                    args.workflow,
+                    trigger_name=args.trigger,
+                    invocation_id=args.invocation_id,
+                    payload_path=args.payload,
+                    agent=args.agent,
+                    model=args.model,
+                )
+                _print_json(result)
                 return 0
             result = sync_workflow(
                 args.file,
