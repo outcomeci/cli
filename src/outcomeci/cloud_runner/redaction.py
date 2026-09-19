@@ -10,6 +10,8 @@ SENSITIVE_KEY = re.compile(
 )
 BEARER = re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+")
 TOKENISH = re.compile(r"\b(?:sk-[A-Za-z0-9_-]{8,}|gh[opsu]_[A-Za-z0-9_]{8,})\b")
+JWT = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*\b")
+PEM_BLOCK = re.compile(r"-----BEGIN [A-Z ]+-----.*?-----END [A-Z ]+-----", re.DOTALL)
 
 
 def redact(value: Any) -> Any:
@@ -21,5 +23,18 @@ def redact(value: Any) -> Any:
     if isinstance(value, (list, tuple)):
         return [redact(item) for item in value]
     if isinstance(value, str):
-        return TOKENISH.sub("[REDACTED]", BEARER.sub("Bearer [REDACTED]", value))
+        value = PEM_BLOCK.sub("[REDACTED PEM]", value)
+        value = BEARER.sub("Bearer [REDACTED]", value)
+        value = JWT.sub("[REDACTED]", value)
+        return TOKENISH.sub("[REDACTED]", value)
     return value
+
+
+def redact_diagnostic(error: BaseException, *, max_length: int = 2000) -> str:
+    """A best-effort scrubbed, length-bounded rendering of an exception for an
+    operator's own workspace to read. Never a substitute for keeping genuine
+    secrets out of exception messages in the first place."""
+    message = redact(str(error))
+    if len(message) > max_length:
+        message = message[:max_length] + "…"
+    return message
