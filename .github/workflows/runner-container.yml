@@ -94,6 +94,6 @@ jobs:
             ${{ steps.ghcr_meta.outputs.tags }}
             ${{ steps.ecr_meta.outputs.tags }}
           labels: ${{ steps.ghcr_meta.outputs.labels }}
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           build-args: OUTCOMECI_CLI_VERSION=0.0.0
           cache-from: type=gha,scope=outcome-runner
