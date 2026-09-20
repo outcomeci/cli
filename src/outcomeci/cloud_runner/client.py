@@ -119,6 +119,9 @@ class CoreClient:
             {"lease_token": lease_token, "reference": reference},
         ).get("value")
 
+    def workflow_agent_fallback(self, lease_token: str) -> dict[str, Any]:
+        return self._post("agent-fallback", {"lease_token": lease_token})
+
     def workflow_complete(
         self,
         lease_token: str,
