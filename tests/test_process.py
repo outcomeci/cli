@@ -44,6 +44,29 @@ def test_container_isolated_codex_uses_fargate_as_sandbox(monkeypatch, tmp_path:
     assert "--approve-for-me" not in calls[0]
 
 
+def test_container_isolated_claude_bypasses_permission_prompts(monkeypatch, tmp_path: Path) -> None:
+    calls = []
+    monkeypatch.setattr(
+        process,
+        "command",
+        lambda argv, **kwargs: calls.append(argv) or process.Result(0, "complete", ""),
+    )
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "token")
+
+    process.invoke(
+        "claude",
+        None,
+        "prompt",
+        tmp_path,
+        10,
+        writable_paths=[],
+        container_isolated=True,
+    )
+
+    assert calls[0][:3] == ["claude", "--print", "--dangerously-skip-permissions"]
+    assert "--permission-mode" not in calls[0]
+
+
 def test_secure_execution_masks_slack_and_mounts_only_outcome_writable(
     monkeypatch, tmp_path: Path
 ) -> None:
