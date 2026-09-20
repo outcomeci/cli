@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+import fcntl
 import os
 import pty
 import selectors
 import signal
+import struct
 import subprocess
+import termios
 import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
+
+PTY_ROWS = 50
+PTY_COLUMNS = 500
 
 
 @dataclass(frozen=True)
@@ -35,6 +41,11 @@ def run(
     master = slave = None
     if terminal:
         master, slave = pty.openpty()
+        # openpty() reports a 0x0 winsize by default; terminal UIs that lay out
+        # or wrap content to that width (e.g. a boxed credential display) will
+        # wrap or clip long output, silently truncating anything we later parse
+        # out of the captured transcript. A wide, explicit size avoids that.
+        fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", PTY_ROWS, PTY_COLUMNS, 0, 0))
         child = subprocess.Popen(
             command,
             cwd=cwd,
