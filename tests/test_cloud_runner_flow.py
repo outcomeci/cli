@@ -9,11 +9,12 @@ from unittest import mock
 
 from outcomeci.cloud_runner.main import (
     _is_usage_limit_error,
+    authorize,
     execute,
     execute_workflow,
     workflow_failure_category,
 )
-from outcomeci.cloud_runner.models import ContractError, ExecutionClaim, Launch
+from outcomeci.cloud_runner.models import AuthorizationClaim, ContractError, ExecutionClaim, Launch
 from outcomeci.cloud_runner.process import ProcessResult
 from outcomeci.process import ExecutionError
 
@@ -899,6 +900,109 @@ class FlowTests(unittest.TestCase):
                     0,
                 )
             self.assertFalse(root.exists())
+
+    def test_claude_authorization_reads_the_oauth_token_from_the_credentials_file(self):
+        claim = AuthorizationClaim(
+            provider="claude",
+            command=("claude", "setup-token"),
+            session_token="session-1",
+            expires_at="2099-01-01T00:00:00Z",
+        )
+
+        class Client:
+            def __init__(self):
+                self.completions: list[tuple] = []
+                self.failures: list[tuple] = []
+
+            def claim_authorization(self):
+                return claim
+
+            def complete(self, *args):
+                self.completions.append(args)
+
+            def fail(self, *args):
+                self.failures.append(args)
+
+        client = Client()
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "private"
+            root.mkdir()
+
+            def fake_run(command, *, cwd, env, timeout, on_output, terminal, input_provider):
+                claude_home = root / ".claude"
+                claude_home.mkdir(parents=True, exist_ok=True)
+                (claude_home / ".credentials.json").write_text(
+                    json.dumps({"claudeAiOauth": {"accessToken": "sk-ant-oat01-real-token"}})
+                )
+                return ProcessResult(0, "", "")
+
+            with (
+                mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.tempfile.mkdtemp",
+                    return_value=str(root),
+                ),
+                mock.patch("outcomeci.cloud_runner.main.run", side_effect=fake_run),
+            ):
+                self.assertEqual(
+                    authorize(
+                        Launch("authorize", "job_1", "boot", "https://api.outcomeci.com"),
+                        client,
+                    ),
+                    0,
+                )
+        self.assertEqual(len(client.completions), 1)
+        self.assertEqual(
+            client.completions[0][1],
+            {"provider": "claude", "credential": "sk-ant-oat01-real-token"},
+        )
+        self.assertEqual(client.failures, [])
+
+    def test_claude_authorization_fails_loudly_when_no_credentials_file_is_written(self):
+        claim = AuthorizationClaim(
+            provider="claude",
+            command=("claude", "setup-token"),
+            session_token="session-1",
+            expires_at="2099-01-01T00:00:00Z",
+        )
+
+        class Client:
+            def __init__(self):
+                self.completions: list[tuple] = []
+                self.failures: list[tuple] = []
+
+            def claim_authorization(self):
+                return claim
+
+            def complete(self, *args):
+                self.completions.append(args)
+
+            def fail(self, *args):
+                self.failures.append(args)
+
+        client = Client()
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "private"
+            root.mkdir()
+
+            def fake_run(command, *, cwd, env, timeout, on_output, terminal, input_provider):
+                return ProcessResult(0, "some terminal output with no credential", "")
+
+            with (
+                mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.tempfile.mkdtemp",
+                    return_value=str(root),
+                ),
+                mock.patch("outcomeci.cloud_runner.main.run", side_effect=fake_run),
+                self.assertRaises(ContractError),
+            ):
+                authorize(
+                    Launch("authorize", "job_1", "boot", "https://api.outcomeci.com"),
+                    client,
+                )
+        self.assertEqual(client.completions, [])
+        self.assertEqual(client.failures, [("session-1", "invalid_result", False)])
 
 
 if __name__ == "__main__":

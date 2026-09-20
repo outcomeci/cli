@@ -29,7 +29,6 @@ from .redaction import redact_diagnostic
 
 URL = re.compile(r"https://[^\s<>'\"\x00-\x1f\x7f]+")
 USER_CODE = re.compile(r"\b[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+\b")
-CLAUDE_TOKEN = re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b")
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 CONTROL_CHAR = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 HEARTBEAT_INTERVAL_SECONDS = 15.0
@@ -458,12 +457,21 @@ def authorize(launch: Launch, client: CoreClient) -> int:
             if not isinstance(credential, dict):
                 raise ContractError("invalid Codex credential")
         else:
-            transcript = CONTROL_CHAR.sub("", ANSI_ESCAPE.sub("", result.stdout + result.stderr))
-            found = CLAUDE_TOKEN.search(transcript)
-            if not found:
+            # `claude setup-token` persists the OAuth token to disk under $HOME
+            # (set to this isolated root above) rather than only printing it to
+            # the terminal, the same way Codex's own auth.json works. Read it
+            # from there instead of regex-scraping the captured pty transcript,
+            # which is fragile against masking, box-drawn UI and line wrapping.
+            creds_path = root / ".claude" / ".credentials.json"
+            try:
+                stored = json.loads(creds_path.read_text(encoding="utf-8"))
+                credential = stored["claudeAiOauth"]["accessToken"]
+            except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+                client.fail(claim.session_token, "invalid_result", False)
+                raise ContractError("invalid Claude credential") from exc
+            if not isinstance(credential, str) or not credential.strip():
                 client.fail(claim.session_token, "invalid_result", False)
                 raise ContractError("invalid Claude credential")
-            credential = found.group(0)
         client.complete(claim.session_token, {"provider": claim.provider, "credential": credential})
         return 0
     except TimeoutError:
