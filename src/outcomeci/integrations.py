@@ -10,6 +10,7 @@ import json
 import os
 import re
 import socket
+import sys
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -287,6 +288,21 @@ def _project(body: Any, expose: Mapping[str, str]) -> dict[str, Any]:
     return result
 
 
+def _diagnostic(event: str, **fields: Any) -> None:
+    """Emit a redaction-safe timing marker to stderr.
+
+    An integration call's normal completed/failed event is only written
+    after the request finishes, so if the surrounding process is killed
+    abruptly mid-call -- observed once: a Slack post that Slack's server
+    received and acted on, but whose response our side never got to record
+    -- that event never lands anywhere. This gives CloudWatch a durable,
+    timestamped record of exactly what was in flight and when, using only
+    capability names, timings and status codes -- never request/response
+    bodies or credentials.
+    """
+    print(json.dumps({"event": event, "at": time.time(), **fields}), file=sys.stderr, flush=True)
+
+
 def _redact(value: Any, secrets: list[str]) -> Any:
     if isinstance(value, dict):
         return {_redact(key, secrets): _redact(item, secrets) for key, item in value.items()}
@@ -522,6 +538,12 @@ class IntegrationExecutor:
                     authorization = headers.get("Authorization", "")
                     if " " in authorization:
                         sensitive.append(authorization.split(" ", 1)[1])
+                _diagnostic(
+                    "integration_request_sending",
+                    capability=capability,
+                    phase=phase,
+                    method=request["method"],
+                )
                 response = client.request(
                     request["method"],
                     url,
@@ -534,6 +556,13 @@ class IntegrationExecutor:
                         if "body" in request
                         else None
                     ),
+                )
+                _diagnostic(
+                    "integration_request_received",
+                    capability=capability,
+                    phase=phase,
+                    status=response.status_code,
+                    elapsed_ms=int((time.monotonic() - started) * 1000),
                 )
                 response.raise_for_status()
         except httpx.HTTPStatusError as exc:

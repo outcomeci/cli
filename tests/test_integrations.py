@@ -279,6 +279,34 @@ def test_executes_with_credential_but_returns_only_projected_output(tmp_path: Pa
     assert "hidden" not in json.dumps(result)
 
 
+def test_execute_emits_diagnostic_markers_bracketing_the_network_call(
+    tmp_path: Path, capsys
+) -> None:
+    """These are the only durable record of an in-flight call if the process
+    is killed abruptly before the normal completed/failed event can be
+    written (observed once: a Slack post whose response never got read)."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(201, json={"id": "T-1", "url": "https://example.test/T-1"})
+
+    executor = IntegrationExecutor(
+        compile_workflow(workflow(tmp_path)),
+        resolver=lambda _reference: "top-secret",
+        transport=httpx.MockTransport(handler),
+    )
+    executor.execute("tickets.create", {"title": "Broken button"}, phase="intake")
+
+    captured = capsys.readouterr().err
+    lines = [json.loads(line) for line in captured.strip().splitlines()]
+    sending = next(line for line in lines if line["event"] == "integration_request_sending")
+    received = next(line for line in lines if line["event"] == "integration_request_received")
+    assert sending["capability"] == "tickets.create"
+    assert sending["phase"] == "intake"
+    assert received["status"] == 201
+    assert isinstance(received["elapsed_ms"], int)
+    assert "top-secret" not in captured
+
+
 def test_bearer_auth_type_honors_credential_scheme_override(tmp_path: Path) -> None:
     path = workflow(tmp_path)
     value = yaml.safe_load(path.read_text())
