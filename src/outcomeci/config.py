@@ -735,7 +735,22 @@ def _load_v1alpha1(path: Path) -> dict[str, Any]:
         raise ConfigError(f"spec.instructions.{orchestrator_name}.path is required")
     _agent_policy(orchestrator, f"spec.instructions.{orchestrator_name}")
 
-    default = _agent_policy(agents.get("default", {}), "spec.agents.default")
+    default_raw = _mapping(agents.get("default", {}), "spec.agents.default")
+    unknown_default = set(default_raw) - {"runner", "model", "fallback"}
+    if unknown_default:
+        raise ConfigError(
+            f"spec.agents.default has unknown fields: {', '.join(sorted(unknown_default))}"
+        )
+    default = _agent_policy(default_raw, "spec.agents.default")
+    if "fallback" in default_raw:
+        fallback = _agent_policy(default_raw["fallback"], "spec.agents.default.fallback")
+        if not fallback.get("runner"):
+            raise ConfigError("spec.agents.default.fallback.runner is required")
+        if fallback["runner"] == default.get("runner", "codex"):
+            raise ConfigError(
+                "spec.agents.default.fallback.runner must differ from the default runner"
+            )
+        default["fallback"] = fallback
     phases = _mapping(agents.get("phases", {}), "spec.agents.phases")
     if not phases:
         raise ConfigError("spec.agents.phases must define at least one phase")

@@ -169,6 +169,51 @@ def test_compiles_fan_out_graph_and_effective_agent_policies(tmp_path: Path) -> 
     )
 
 
+def test_agent_default_fallback_compiles_and_survives_to_the_workflow_document(
+    tmp_path: Path,
+) -> None:
+    path = _workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["agents"]["default"]["fallback"] = {
+        "runner": "claude",
+        "model": "claude-opus-5",
+    }
+    path.write_text(yaml.safe_dump(value, sort_keys=False))
+    compiled = compile_workflow(path)
+    assert compiled["workflow"]["spec"]["agents"]["default"]["fallback"] == {
+        "runner": "claude",
+        "model": "claude-opus-5",
+    }
+
+
+@pytest.mark.parametrize(
+    "fallback,error",
+    [
+        ({"runner": "codex"}, "must differ from the default runner"),
+        ({"runner": "not-a-runner"}, "must be codex, claude, or opencode"),
+        ({}, "fallback.runner is required"),
+    ],
+)
+def test_agent_default_fallback_rejects_invalid_configuration(
+    tmp_path: Path, fallback: dict, error: str
+) -> None:
+    path = _workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["agents"]["default"]["fallback"] = fallback
+    path.write_text(yaml.safe_dump(value, sort_keys=False))
+    with pytest.raises(ConfigError, match=error):
+        compile_workflow(path)
+
+
+def test_agent_default_rejects_unknown_fields(tmp_path: Path) -> None:
+    path = _workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["agents"]["default"]["bogus"] = True
+    path.write_text(yaml.safe_dump(value, sort_keys=False))
+    with pytest.raises(ConfigError, match="unknown fields: bogus"):
+        compile_workflow(path)
+
+
 def test_requires_a_trigger(tmp_path: Path) -> None:
     path = _workflow(tmp_path)
     value = yaml.safe_load(path.read_text())

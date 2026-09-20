@@ -16,6 +16,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 from ..process import ExecutionError
 from ..publication import REPORT, REQUIREMENTS, prepare_publication
@@ -85,6 +86,42 @@ def workflow_failure_category(error: Exception) -> str:
     return "internal_failure"
 
 
+USAGE_LIMIT_PATTERNS = (
+    "usage limit",
+    "rate limit",
+    "rate-limited",
+    "quota",
+    "too many requests",
+    "429",
+)
+
+
+def _is_usage_limit_error(error: Exception) -> bool:
+    """Best-effort: agent CLIs don't expose a stable exit code or error type for
+    this, only free text in the message a failed process exits with."""
+    if not isinstance(error, ExecutionError):
+        return False
+    message = str(error).casefold()
+    return any(pattern in message for pattern in USAGE_LIMIT_PATTERNS)
+
+
+def _inject_agent_credential(root: Path, provider: str, credential: Any) -> dict[str, str]:
+    if provider == "codex":
+        home = root / ".codex"
+        home.mkdir(mode=0o700, exist_ok=True)
+        (home / "auth.json").write_text(
+            json.dumps(credential, separators=(",", ":")), encoding="utf-8"
+        )
+        os.chmod(home / "auth.json", 0o600)
+        (home / "config.toml").write_text('cli_auth_credentials_store = "file"\n', encoding="utf-8")
+        return {"CODEX_HOME": str(home)}
+    if provider == "claude":
+        return {"CLAUDE_CODE_OAUTH_TOKEN": str(credential)}
+    if provider == "opencode":
+        return {"OPENROUTER_API_KEY": str(credential)}
+    raise ContractError("unsupported workflow agent")
+
+
 def execute_workflow(launch: Launch, client: CoreClient) -> int:
     """Execute one immutable generic workflow claim with broker-private credentials."""
     from .. import local
@@ -120,26 +157,16 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
         provider = str(agent["provider"])
         credential = agent["credential"]
         credential_version = int(agent["credential_version"])
-        if provider == "codex":
-            home = root / ".codex"
-            home.mkdir(mode=0o700)
-            (home / "auth.json").write_text(
-                json.dumps(credential, separators=(",", ":")), encoding="utf-8"
-            )
-            os.chmod(home / "auth.json", 0o600)
-            (home / "config.toml").write_text(
-                'cli_auth_credentials_store = "file"\n', encoding="utf-8"
-            )
-            injected = {"CODEX_HOME": str(home)}
-        elif provider == "claude":
-            injected = {"CLAUDE_CODE_OAUTH_TOKEN": str(credential)}
-        elif provider == "opencode":
-            injected = {"OPENROUTER_API_KEY": str(credential)}
-        else:
-            raise ContractError("unsupported workflow agent")
+        injected = _inject_agent_credential(root, provider, credential)
         for key, value in injected.items():
             previous[key] = os.environ.get(key)
             os.environ[key] = value
+        fallback_spec = compile_workflow(config)["workflow"]["spec"]["agents"]["default"].get(
+            "fallback"
+        )
+        fallback_used = False
+        active_agent: str | None = None
+        active_model: str | None = None
 
         values = dict((claim.get("vault") or {}).get("values") or {})
         vault_expires = datetime.fromisoformat(str((claim.get("vault") or {})["expires_at"]))
@@ -181,18 +208,71 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
 
         heartbeat = threading.Thread(target=pulse, daemon=True)
         heartbeat.start()
-        result = local.trigger(
-            root,
-            config,
-            str(claim["trigger_name"]),
-            dict(claim["input"]),
-            on_created=created,
-            credential_resolver=resolver,
-            event_sink=policy_event,
-            policy_reviewer=policy_review,
-            execution_backend="outcomeci",
-            _container_isolated=True,
-        )
+
+        def call_trigger(agent_override: str | None, model_override: str | None):
+            return local.trigger(
+                root,
+                config,
+                str(claim["trigger_name"]),
+                dict(claim["input"]),
+                agent=agent_override,
+                model=model_override,
+                on_created=created,
+                credential_resolver=resolver,
+                event_sink=policy_event,
+                policy_reviewer=policy_review,
+                execution_backend="outcomeci",
+                _container_isolated=True,
+            )
+
+        def call_continue(agent_override: str | None, model_override: str | None):
+            return local.continue_run(
+                root,
+                config,
+                run_id,
+                approve=True,
+                agent=agent_override,
+                model=model_override,
+                credential_resolver=resolver,
+                event_sink=policy_event,
+                policy_reviewer=policy_review,
+                execution_backend="outcomeci",
+                _container_isolated=True,
+            )
+
+        def execute_call(factory):
+            nonlocal provider, credential_version, active_agent, active_model, fallback_used
+            try:
+                return factory(active_agent, active_model)
+            except ExecutionError as exc:
+                if fallback_used or fallback_spec is None or not _is_usage_limit_error(exc):
+                    raise
+                fallback_used = True
+                fallback_agent = client.workflow_agent_fallback(lease)
+                fallback_injected = _inject_agent_credential(
+                    root, str(fallback_agent["provider"]), fallback_agent["credential"]
+                )
+                for key, value in fallback_injected.items():
+                    previous.setdefault(key, os.environ.get(key))
+                    os.environ[key] = value
+                provider = str(fallback_agent["provider"])
+                credential_version = int(fallback_agent["credential_version"])
+                active_agent = provider
+                active_model = fallback_spec.get("model")
+                return local.retry(
+                    root,
+                    config,
+                    run_id,
+                    agent=active_agent,
+                    model=active_model,
+                    credential_resolver=resolver,
+                    event_sink=policy_event,
+                    policy_reviewer=policy_review,
+                    execution_backend="outcomeci",
+                    _container_isolated=True,
+                )
+
+        result = execute_call(call_trigger)
         run_id = str(result["run_id"])
         phase_count = len(compile_workflow(config)["instructions"]["phases"])
         while len(result.get("completed_phases", [])) != phase_count:
@@ -202,17 +282,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 raise ContractError("workflow recorded an error")
             if not result.get("ready_phases") or result.get("status") == "awaiting_input":
                 raise ContractError("workflow requires a durable continuation")
-            result = local.continue_run(
-                root,
-                config,
-                run_id,
-                approve=True,
-                credential_resolver=resolver,
-                event_sink=policy_event,
-                policy_reviewer=policy_review,
-                execution_backend="outcomeci",
-                _container_isolated=True,
-            )
+            result = execute_call(call_continue)
         if heartbeat_failure:
             raise CoreError("policy_evidence_upload_failed", True)
         if provider == "codex":

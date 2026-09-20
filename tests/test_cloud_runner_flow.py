@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest import mock
 
 from outcomeci.cloud_runner.main import (
+    _is_usage_limit_error,
     execute,
     execute_workflow,
     workflow_failure_category,
@@ -81,6 +82,17 @@ class FlowTests(unittest.TestCase):
         error = ExecutionError("codex failed with exit 1: private provider output", True)
 
         self.assertEqual(workflow_failure_category(error), "agent_process_failed")
+
+    def test_is_usage_limit_error_matches_common_phrasing(self):
+        for message in (
+            "codex failed with exit 1: Usage limit reached, try again later",
+            "claude failed with exit 1: rate limit exceeded",
+            "codex failed with exit 1: 429 Too Many Requests",
+            "codex failed with exit 1: monthly quota exceeded",
+        ):
+            self.assertTrue(_is_usage_limit_error(ExecutionError(message)))
+        self.assertFalse(_is_usage_limit_error(ExecutionError("codex failed with exit 1: boom")))
+        self.assertFalse(_is_usage_limit_error(ContractError("workflow recorded an error")))
 
     def test_generic_workflow_uses_scoped_vault_values_and_completes(self):
         claim = {
@@ -172,7 +184,10 @@ class FlowTests(unittest.TestCase):
                 mock.patch("outcomeci.local.trigger", side_effect=trigger),
                 mock.patch(
                     "outcomeci.config.compile_workflow",
-                    return_value={"instructions": {"phases": {"notify": {}}}},
+                    return_value={
+                        "instructions": {"phases": {"notify": {}}},
+                        "workflow": {"spec": {"agents": {"default": {}}}},
+                    },
                 ),
             ):
                 self.assertEqual(
@@ -278,7 +293,8 @@ class FlowTests(unittest.TestCase):
                 mock.patch(
                     "outcomeci.config.compile_workflow",
                     return_value={
-                        "instructions": {"phases": {"resolve_analytics": {}, "notify": {}}}
+                        "instructions": {"phases": {"resolve_analytics": {}, "notify": {}}},
+                        "workflow": {"spec": {"agents": {"default": {}}}},
                     },
                 ),
             ):
@@ -298,6 +314,214 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(continue_calls[0][0:2], ("run-1", True))
         self.assertEqual(client.completed[0][0:2], ("lease-secret", "completed"))
         self.assertEqual(client.completed[0][2]["run_id"], "run-1")
+
+    def test_usage_limit_swaps_to_the_declared_fallback_agent_and_stays_on_it(self):
+        claim = {
+            "content": "apiVersion: outcomeci.dev/v1alpha1\nkind: OutcomeWorkflow\n",
+            "files": {},
+            "trigger_name": "inbound",
+            "input": {"subject": "hello"},
+            "lease_token": "lease-secret",
+            "agent": {
+                "provider": "codex",
+                "credential": {"token": "agent-secret"},
+                "credential_version": 3,
+            },
+            "vault": {"expires_at": "2099-01-01T00:00:00+00:00", "values": {}},
+        }
+
+        class WorkflowClient:
+            completed = []
+            heartbeats = []
+            fallback_calls = []
+
+            def claim_workflow(self):
+                return claim
+
+            def workflow_start(self, token):
+                self.started = token
+
+            def workflow_heartbeat(self, token, events=None):
+                self.heartbeats.append((token, events or []))
+                return {"active": True, "policy_events_received": len(events or [])}
+
+            def workflow_agent_fallback(self, token):
+                self.fallback_calls.append(token)
+                return {
+                    "provider": "claude",
+                    "credential": "claude-secret",
+                    "credential_version": 9,
+                }
+
+            def workflow_complete(self, token, status, **values):
+                self.completed.append((token, status, values))
+
+        client = WorkflowClient()
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "private"
+            root.mkdir()
+            trigger_calls = []
+            retry_calls = []
+            continue_calls = []
+
+            def trigger(workspace, config, name, payload, **options):
+                trigger_calls.append(options)
+                options["on_created"]("run-1")
+                raise ExecutionError("codex failed with exit 1: Usage limit reached, try later")
+
+            def retry(root_arg, config_arg, run_id, **options):
+                retry_calls.append(options)
+                self.assertEqual(options["agent"], "claude")
+                self.assertEqual(options["model"], "claude-opus-5")
+                return {
+                    "run_id": run_id,
+                    "status": "awaiting_confirmation",
+                    "completed_phases": ["resolve_analytics"],
+                    "ready_phases": ["notify"],
+                }
+
+            def continue_run(root_arg, config_arg, run_id, *, approve, **options):
+                continue_calls.append(options)
+                self.assertEqual(options["agent"], "claude")
+                trace = root_arg / ".outcomeci" / "outcomes" / run_id / "transcripts"
+                trace.mkdir(parents=True, exist_ok=True)
+                return {
+                    "run_id": run_id,
+                    "status": "completed",
+                    "completed_phases": ["resolve_analytics", "notify"],
+                }
+
+            with (
+                mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.tempfile.mkdtemp",
+                    return_value=str(root),
+                ),
+                mock.patch("outcomeci.local.trigger", side_effect=trigger),
+                mock.patch("outcomeci.local.retry", side_effect=retry),
+                mock.patch("outcomeci.local.continue_run", side_effect=continue_run),
+                mock.patch(
+                    "outcomeci.config.compile_workflow",
+                    return_value={
+                        "instructions": {"phases": {"resolve_analytics": {}, "notify": {}}},
+                        "workflow": {
+                            "spec": {
+                                "agents": {
+                                    "default": {
+                                        "runner": "codex",
+                                        "fallback": {
+                                            "runner": "claude",
+                                            "model": "claude-opus-5",
+                                        },
+                                    }
+                                }
+                            }
+                        },
+                    },
+                ),
+            ):
+                self.assertEqual(
+                    execute_workflow(
+                        Launch(
+                            "workflow",
+                            "invocation-1",
+                            "boot",
+                            "https://api.outcomeci.com",
+                        ),
+                        client,
+                    ),
+                    0,
+                )
+        self.assertEqual(len(trigger_calls), 1)
+        self.assertEqual(len(retry_calls), 1)
+        self.assertEqual(len(continue_calls), 1)
+        self.assertEqual(client.fallback_calls, ["lease-secret"])
+        self.assertEqual(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"), None)  # restored
+        self.assertEqual(client.completed[0][0:2], ("lease-secret", "completed"))
+
+    def test_non_usage_limit_failure_never_triggers_the_fallback(self):
+        claim = {
+            "content": "apiVersion: outcomeci.dev/v1alpha1\nkind: OutcomeWorkflow\n",
+            "files": {},
+            "trigger_name": "inbound",
+            "input": {"subject": "hello"},
+            "lease_token": "lease-secret",
+            "agent": {
+                "provider": "codex",
+                "credential": {"token": "agent-secret"},
+                "credential_version": 3,
+            },
+            "vault": {"expires_at": "2099-01-01T00:00:00+00:00", "values": {}},
+        }
+
+        class WorkflowClient:
+            completed = []
+            heartbeats = []
+
+            def claim_workflow(self):
+                return claim
+
+            def workflow_start(self, token):
+                self.started = token
+
+            def workflow_heartbeat(self, token, events=None):
+                self.heartbeats.append((token, events or []))
+                return {"active": True, "policy_events_received": len(events or [])}
+
+            def workflow_agent_fallback(self, token):
+                raise AssertionError("workflow_agent_fallback should not be called")
+
+            def workflow_complete(self, token, status, **values):
+                self.completed.append((token, status, values))
+
+        client = WorkflowClient()
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "private"
+            root.mkdir()
+
+            def trigger(workspace, config, name, payload, **options):
+                options["on_created"]("run-1")
+                raise ExecutionError("codex failed with exit 1: unexpected tool error")
+
+            with (
+                mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.tempfile.mkdtemp",
+                    return_value=str(root),
+                ),
+                mock.patch("outcomeci.local.trigger", side_effect=trigger),
+                mock.patch(
+                    "outcomeci.local.retry",
+                    side_effect=AssertionError("retry should not be called"),
+                ),
+                mock.patch(
+                    "outcomeci.config.compile_workflow",
+                    return_value={
+                        "instructions": {"phases": {"notify": {}}},
+                        "workflow": {
+                            "spec": {
+                                "agents": {
+                                    "default": {
+                                        "runner": "codex",
+                                        "fallback": {"runner": "claude"},
+                                    }
+                                }
+                            }
+                        },
+                    },
+                ),
+                self.assertRaises(ExecutionError),
+            ):
+                execute_workflow(
+                    Launch(
+                        "workflow",
+                        "invocation-1",
+                        "boot",
+                        "https://api.outcomeci.com",
+                    ),
+                    client,
+                )
+        self.assertEqual(client.completed[0][1], "failed")
 
     def test_generic_workflow_awaiting_human_input_fails_without_looping(self):
         claim = {
@@ -359,7 +583,8 @@ class FlowTests(unittest.TestCase):
                 mock.patch(
                     "outcomeci.config.compile_workflow",
                     return_value={
-                        "instructions": {"phases": {"resolve_analytics": {}, "notify": {}}}
+                        "instructions": {"phases": {"resolve_analytics": {}, "notify": {}}},
+                        "workflow": {"spec": {"agents": {"default": {}}}},
                     },
                 ),
                 self.assertRaisesRegex(ContractError, "durable continuation"),
@@ -429,7 +654,10 @@ class FlowTests(unittest.TestCase):
                 mock.patch("outcomeci.local.trigger", side_effect=trigger),
                 mock.patch(
                     "outcomeci.config.compile_workflow",
-                    return_value={"instructions": {"phases": {"notify": {}}}},
+                    return_value={
+                        "instructions": {"phases": {"notify": {}}},
+                        "workflow": {"spec": {"agents": {"default": {}}}},
+                    },
                 ),
                 self.assertRaises(ExecutionError),
             ):
