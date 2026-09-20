@@ -901,7 +901,7 @@ class FlowTests(unittest.TestCase):
                 )
             self.assertFalse(root.exists())
 
-    def test_claude_authorization_reads_the_oauth_token_from_the_credentials_file(self):
+    def test_claude_authorization_extracts_the_token_from_a_plain_transcript(self):
         claim = AuthorizationClaim(
             provider="claude",
             command=("claude", "setup-token"),
@@ -929,12 +929,9 @@ class FlowTests(unittest.TestCase):
             root.mkdir()
 
             def fake_run(command, *, cwd, env, timeout, on_output, terminal, input_provider):
-                claude_home = root / ".claude"
-                claude_home.mkdir(parents=True, exist_ok=True)
-                (claude_home / ".credentials.json").write_text(
-                    json.dumps({"claudeAiOauth": {"accessToken": "sk-ant-oat01-real-token"}})
+                return ProcessResult(
+                    0, "Your OAuth token:\r\nsk-ant-oat01-real-token-1234567890\r\n", ""
                 )
-                return ProcessResult(0, "", "")
 
             with (
                 mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
@@ -954,11 +951,80 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(len(client.completions), 1)
         self.assertEqual(
             client.completions[0][1],
-            {"provider": "claude", "credential": "sk-ant-oat01-real-token"},
+            {"provider": "claude", "credential": "sk-ant-oat01-real-token-1234567890"},
         )
         self.assertEqual(client.failures, [])
 
-    def test_claude_authorization_fails_loudly_when_no_credentials_file_is_written(self):
+    def test_claude_authorization_survives_a_cursor_positioned_redraw_of_the_token(self):
+        """Ink-style TUIs redraw via cursor movement rather than printing
+        linearly. Naively stripping ANSI codes and concatenating what's left
+        can jump straight over characters a prior frame already drew,
+        silently truncating the token -- this reproduces that exact
+        corruption pattern with a synthetic (non-secret) token and asserts
+        the terminal-replay extraction reconstructs it correctly."""
+        claim = AuthorizationClaim(
+            provider="claude",
+            command=("claude", "setup-token"),
+            session_token="session-1",
+            expires_at="2099-01-01T00:00:00Z",
+        )
+
+        class Client:
+            def __init__(self):
+                self.completions: list[tuple] = []
+                self.failures: list[tuple] = []
+
+            def claim_authorization(self):
+                return claim
+
+            def complete(self, *args):
+                self.completions.append(args)
+
+            def fail(self, *args):
+                self.failures.append(args)
+
+        client = Client()
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "private"
+            root.mkdir()
+
+            # First frame draws the full token at column 1; a later frame
+            # redraws only a later segment via CHA (cursor horizontal
+            # absolute), leaving the earlier characters from the first frame
+            # in place -- exactly the pattern observed from a real
+            # `claude setup-token` run.
+            transcript = (
+                "sk-ant-oat01-placeholder-XXXXXXXXXXXXXXXXXX\r\n"
+                "\x1b[1A"  # cursor up onto the token's row
+                "\x1b[14G"  # jump to column 14, leaving "sk-ant-oat01-" from frame 1
+                "\x1b[K"  # erase to end of line before redrawing the rest
+                "real-token-1234567890"
+            )
+
+            def fake_run(command, *, cwd, env, timeout, on_output, terminal, input_provider):
+                return ProcessResult(0, transcript, "")
+
+            with (
+                mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.tempfile.mkdtemp",
+                    return_value=str(root),
+                ),
+                mock.patch("outcomeci.cloud_runner.main.run", side_effect=fake_run),
+            ):
+                self.assertEqual(
+                    authorize(
+                        Launch("authorize", "job_1", "boot", "https://api.outcomeci.com"),
+                        client,
+                    ),
+                    0,
+                )
+        self.assertEqual(
+            client.completions[0][1],
+            {"provider": "claude", "credential": "sk-ant-oat01-real-token-1234567890"},
+        )
+
+    def test_claude_authorization_fails_loudly_when_no_token_appears_in_the_transcript(self):
         claim = AuthorizationClaim(
             provider="claude",
             command=("claude", "setup-token"),

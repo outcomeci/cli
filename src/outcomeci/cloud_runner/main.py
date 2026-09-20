@@ -18,19 +18,21 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pyte
+
 from ..process import ExecutionError
 from ..publication import REPORT, REQUIREMENTS, prepare_publication
 from ..security import private_path
 from .client import CoreClient, CoreError
 from .models import ContractError, Launch
-from .process import run
+from .process import PTY_COLUMNS, PTY_ROWS, run
 from .providers import ADAPTERS
 from .redaction import redact_diagnostic
 
 URL = re.compile(r"https://[^\s<>'\"\x00-\x1f\x7f]+")
 USER_CODE = re.compile(r"\b[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+\b")
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
-CONTROL_CHAR = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+CLAUDE_TOKEN = re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b")
 HEARTBEAT_INTERVAL_SECONDS = 15.0
 WORKFLOW_ARTIFACT_FILE_LIMIT = 200
 WORKFLOW_ARTIFACT_FILE_BYTES = 2 * 1024 * 1024
@@ -334,6 +336,25 @@ def reconcile_failure(client: CoreClient, claim: object, category: str, retryabl
         )
 
 
+def render_terminal_screen(raw: str) -> str:
+    """Replay captured pty bytes through a virtual terminal and return the
+    text as it actually appears on screen.
+
+    Interactive CLIs built on TUI frameworks (Ink and similar) commonly
+    redraw by moving the cursor and rewriting only part of a line, rather
+    than printing linearly. Stripping escape codes and concatenating what's
+    left silently corrupts that output: a cursor move can jump over
+    characters a prior frame already drew, and naive concatenation both
+    skips those characters and never accounts for later frames overwriting
+    earlier ones. A real terminal emulator resolves this correctly because
+    it maintains persistent screen state across the whole stream, exactly
+    like a human's terminal would.
+    """
+    screen = pyte.Screen(PTY_COLUMNS, PTY_ROWS)
+    pyte.Stream(screen).feed(raw)
+    return "\n".join(screen.display)
+
+
 def safe_verification(provider: str, output: str) -> tuple[str, str | None] | None:
     output = ANSI_ESCAPE.sub("", output)
     url = URL.search(output)
@@ -457,21 +478,21 @@ def authorize(launch: Launch, client: CoreClient) -> int:
             if not isinstance(credential, dict):
                 raise ContractError("invalid Codex credential")
         else:
-            # `claude setup-token` persists the OAuth token to disk under $HOME
-            # (set to this isolated root above) rather than only printing it to
-            # the terminal, the same way Codex's own auth.json works. Read it
-            # from there instead of regex-scraping the captured pty transcript,
-            # which is fragile against masking, box-drawn UI and line wrapping.
-            creds_path = root / ".claude" / ".credentials.json"
-            try:
-                stored = json.loads(creds_path.read_text(encoding="utf-8"))
-                credential = stored["claudeAiOauth"]["accessToken"]
-            except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
-                client.fail(claim.session_token, "invalid_result", False)
-                raise ContractError("invalid Claude credential") from exc
-            if not isinstance(credential, str) or not credential.strip():
+            # `claude setup-token` only ever prints the token once ("you won't
+            # be able to see it again") -- it does not persist a credentials
+            # file the way Codex's auth.json does, so this has to come from
+            # the captured transcript. It renders through a TUI that redraws
+            # via cursor movement rather than printing linearly, so the raw
+            # bytes are replayed through a virtual terminal first: naively
+            # stripping escape codes and concatenating what's left can jump
+            # over characters a prior frame already drew (confirmed against
+            # real output), silently truncating the token.
+            transcript = render_terminal_screen(result.stdout + result.stderr)
+            found = CLAUDE_TOKEN.search(transcript)
+            if not found:
                 client.fail(claim.session_token, "invalid_result", False)
                 raise ContractError("invalid Claude credential")
+            credential = found.group(0)
         client.complete(claim.session_token, {"provider": claim.provider, "credential": credential})
         return 0
     except TimeoutError:
