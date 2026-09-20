@@ -143,6 +143,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
     heartbeat_failure: list[Exception] = []
     agent_update = None
     credential_version = None
+    provider: str | None = None
     try:
         config = root / "outcome.yml"
         config.write_text(str(claim["content"]), encoding="utf-8")
@@ -299,7 +300,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
         return 0
     except Exception as exc:
         auth_path = root / ".codex" / "auth.json"
-        if credential_version is not None and auth_path.is_file():
+        if provider == "codex" and credential_version is not None and auth_path.is_file():
             with suppress(OSError, json.JSONDecodeError):
                 agent_update = json.loads(auth_path.read_text())
         with suppress(CoreError):

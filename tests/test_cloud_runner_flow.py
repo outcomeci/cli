@@ -439,6 +439,102 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(os.environ.get("CLAUDE_CODE_OAUTH_TOKEN"), None)  # restored
         self.assertEqual(client.completed[0][0:2], ("lease-secret", "completed"))
 
+    def test_fallback_failure_does_not_attach_a_stale_codex_credential_writeback(self):
+        claim = {
+            "content": "apiVersion: outcomeci.dev/v1alpha1\nkind: OutcomeWorkflow\n",
+            "files": {},
+            "trigger_name": "inbound",
+            "input": {"subject": "hello"},
+            "lease_token": "lease-secret",
+            "agent": {
+                "provider": "codex",
+                "credential": {"token": "agent-secret"},
+                "credential_version": 3,
+            },
+            "vault": {"expires_at": "2099-01-01T00:00:00+00:00", "values": {}},
+        }
+
+        class WorkflowClient:
+            completed = []
+            heartbeats = []
+            fallback_calls = []
+
+            def claim_workflow(self):
+                return claim
+
+            def workflow_start(self, token):
+                self.started = token
+
+            def workflow_heartbeat(self, token, events=None):
+                self.heartbeats.append((token, events or []))
+                return {"active": True, "policy_events_received": len(events or [])}
+
+            def workflow_agent_fallback(self, token):
+                self.fallback_calls.append(token)
+                return {
+                    "provider": "claude",
+                    "credential": "claude-secret",
+                    "credential_version": 9,
+                }
+
+            def workflow_complete(self, token, status, **values):
+                self.completed.append((token, status, values))
+
+        client = WorkflowClient()
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "private"
+            root.mkdir()
+
+            def trigger(workspace, config, name, payload, **options):
+                options["on_created"]("run-1")
+                raise ExecutionError("codex failed with exit 1: Usage limit reached, try later")
+
+            def retry(root_arg, config_arg, run_id, **options):
+                self.assertEqual(options["agent"], "claude")
+                raise ExecutionError("claude failed with exit 1: authentication rejected")
+
+            with (
+                mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.tempfile.mkdtemp",
+                    return_value=str(root),
+                ),
+                mock.patch("outcomeci.local.trigger", side_effect=trigger),
+                mock.patch("outcomeci.local.retry", side_effect=retry),
+                mock.patch(
+                    "outcomeci.config.compile_workflow",
+                    return_value={
+                        "instructions": {"phases": {"resolve_analytics": {}, "notify": {}}},
+                        "workflow": {
+                            "spec": {
+                                "agents": {
+                                    "default": {
+                                        "runner": "codex",
+                                        "fallback": {"runner": "claude"},
+                                    }
+                                }
+                            }
+                        },
+                    },
+                ),
+                self.assertRaises(ExecutionError),
+            ):
+                execute_workflow(
+                    Launch(
+                        "workflow",
+                        "invocation-1",
+                        "boot",
+                        "https://api.outcomeci.com",
+                    ),
+                    client,
+                )
+        self.assertEqual(client.fallback_calls, ["lease-secret"])
+        self.assertEqual(len(client.completed), 1)
+        token, status, values = client.completed[0]
+        self.assertEqual((token, status), ("lease-secret", "failed"))
+        self.assertIsNone(values["agent_credential"])
+        self.assertEqual(values["expected_credential_version"], 9)
+
     def test_non_usage_limit_failure_never_triggers_the_fallback(self):
         claim = {
             "content": "apiVersion: outcomeci.dev/v1alpha1\nkind: OutcomeWorkflow\n",
