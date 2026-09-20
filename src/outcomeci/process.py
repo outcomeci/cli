@@ -148,6 +148,14 @@ def invoke(
         ):
             raise ExecutionError("Claude needs ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN")
         argv = ["claude", "--print", "--permission-mode", "acceptEdits"]
+        if container_isolated:
+            # Same reasoning as Codex above: OutcomeCI Cloud's Fargate task is
+            # the security boundary, and this runs fully non-interactively.
+            # acceptEdits only auto-approves file edits, not arbitrary tool
+            # calls -- the integration broker CLI still hits an approval
+            # prompt that can never be answered here, and Claude reports the
+            # call as rejected rather than actually invoking it.
+            argv = ["claude", "--print", "--dangerously-skip-permissions"]
         if read_only:
             argv = ["claude", "--print", "--tools", "", "--permission-mode", "default"]
         if model:
