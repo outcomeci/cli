@@ -818,6 +818,29 @@ def test_full_access_stays_inside_origin_and_method_policy(tmp_path: Path) -> No
         )
 
 
+def test_full_access_description_grounds_the_agent_in_the_real_origin(tmp_path: Path) -> None:
+    """A mode: full capability gives the agent no schema-level guidance on the
+    target API's own path conventions, so it has to guess -- observed once
+    with a real agent burning most of a request budget on wrong Slack API
+    paths before finding the right one. This can't be fixed per-API in code,
+    but every such capability can at least tell the agent what origin it's
+    actually calling instead of a generic placeholder description."""
+    path = workflow(tmp_path)
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["integrations"]["tickets"]["access"] = {
+        "mode": "full",
+        "methods": ["GET"],
+        "expose": {"items": "body.items"},
+    }
+    path.write_text(yaml.safe_dump(value), encoding="utf-8")
+
+    executor = IntegrationExecutor(compile_workflow(path), resolver=lambda _reference: "secret")
+    description = executor.describe("tickets.request")["description"]
+
+    assert "https://api.example.test" in description
+    assert "secret" not in description
+
+
 def test_imports_allowlisted_openapi_operations_as_patch(tmp_path: Path) -> None:
     path = workflow(tmp_path)
     value = yaml.safe_load(path.read_text())

@@ -370,9 +370,26 @@ class IntegrationExecutor:
             )
         operation = integration["operations"].get(operation_name)
         if operation_name == "request" and integration["access"]["mode"] == "full":
+            connection = next(
+                (
+                    item
+                    for item in self.compiled["workflow"]["spec"]["connections"]
+                    if item["ref"] == integration["connection"]
+                ),
+                None,
+            )
+            base_url = connection["base_url"] if connection else "the integration's fixed origin"
             return {
                 "name": capability,
-                "description": "Make an authorized request to the integration's fixed origin.",
+                "description": (
+                    f"Make an authorized request against {base_url}. path is relative to this "
+                    "exact origin, starting with a single leading slash. This tool cannot "
+                    "guess the target API's own routing conventions (e.g. some APIs nest every "
+                    "operation under a prefix like /api/ or /v1/ that isn't part of the "
+                    "documented endpoint name) -- confirm the exact path from that API's own "
+                    "documentation before calling, rather than retrying variations against the "
+                    "live integration."
+                ),
                 "input": {
                     "type": "object",
                     "required": ["method", "path"],
