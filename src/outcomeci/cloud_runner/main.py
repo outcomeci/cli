@@ -25,6 +25,7 @@ from ..publication import REPORT, REQUIREMENTS, prepare_publication
 from ..security import private_path
 from .client import CoreClient, CoreError
 from .models import ContractError, Launch
+from .monitoring import capture_exception, init_exception_monitoring
 from .process import PTY_COLUMNS, PTY_ROWS, run
 from .providers import ADAPTERS
 from .redaction import redact_diagnostic
@@ -304,7 +305,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
         if provider == "codex" and credential_version is not None and auth_path.is_file():
             with suppress(OSError, json.JSONDecodeError):
                 agent_update = json.loads(auth_path.read_text())
-        with suppress(CoreError):
+        try:
             client.workflow_complete(
                 lease,
                 "failed",
@@ -313,6 +314,26 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 detail=redact_diagnostic(exc),
                 expected_credential_version=credential_version,
                 agent_credential=agent_update,
+            )
+        except CoreError as completion_error:
+            # The original failure (exc) is what gets re-raised below; if the report
+            # of it also gets rejected, that's otherwise invisible -- the invocation
+            # just dangles until the lease reaper times it out with a generic message,
+            # burying the real cause. Surface it here instead.
+            print(
+                json.dumps(
+                    {
+                        "event": "workflow_completion_report_failed",
+                        "report_category": completion_error.category,
+                        "original_category": workflow_failure_category(exc),
+                    }
+                ),
+                file=sys.stderr,
+            )
+            capture_exception(
+                completion_error,
+                event="workflow_completion_report_failed",
+                original_category=workflow_failure_category(exc),
             )
         raise
     finally:
@@ -768,6 +789,7 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if args and args[0] == "oci":
         os.execvp("oci", args)
+    init_exception_monitoring()
     exception_type: str | None = None
     try:
         launch = Launch.from_env(dict(os.environ))
@@ -779,17 +801,22 @@ def main(argv: list[str] | None = None) -> int:
         if launch.mode == "publication":
             return execute_publication(launch, client)
         return execute(launch, client)
-    except TimeoutError:
+    except TimeoutError as error:
         category, retryable = "agent_timeout", True
+        capture_exception(error, category=category)
     except CoreError as error:
         category, retryable = error.category, error.retryable
-    except (ContractError, KeyError, json.JSONDecodeError):
+        capture_exception(error, category=category)
+    except (ContractError, KeyError, json.JSONDecodeError) as error:
         category, retryable = "invalid_job", False
+        capture_exception(error, category=category)
     except ExecutionError as error:
         category, retryable = workflow_failure_category(error), error.retryable
+        capture_exception(error, category=category)
     except Exception as error:
         category, retryable = "internal_failure", True
         exception_type = type(error).__name__
+        capture_exception(error, category=category)
     payload = {
         "event": "outcome_runner_failed",
         "category": category,
