@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from outcomeci.cloud_runner.client import CoreError
 from outcomeci.cloud_runner.main import (
     _is_usage_limit_error,
     authorize,
@@ -535,6 +536,79 @@ class FlowTests(unittest.TestCase):
         self.assertEqual((token, status), ("lease-secret", "failed"))
         self.assertIsNone(values["agent_credential"])
         self.assertEqual(values["expected_credential_version"], 9)
+
+    def test_a_rejected_completion_report_is_captured_instead_of_silently_swallowed(self):
+        claim = {
+            "content": "apiVersion: outcomeci.dev/v1alpha1\nkind: OutcomeWorkflow\n",
+            "files": {},
+            "trigger_name": "inbound",
+            "input": {"subject": "hello"},
+            "lease_token": "lease-secret",
+            "agent": {
+                "provider": "codex",
+                "credential": {"token": "agent-secret"},
+                "credential_version": 3,
+            },
+            "vault": {"expires_at": "2099-01-01T00:00:00+00:00", "values": {}},
+        }
+
+        class WorkflowClient:
+            heartbeats = []
+
+            def claim_workflow(self):
+                return claim
+
+            def workflow_start(self, token):
+                self.started = token
+
+            def workflow_heartbeat(self, token, events=None):
+                self.heartbeats.append((token, events or []))
+                return {"active": True, "policy_events_received": len(events or [])}
+
+            def workflow_complete(self, token, status, **values):
+                raise CoreError("core_conflict")
+
+        client = WorkflowClient()
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "private"
+            root.mkdir()
+
+            def trigger(workspace, config, name, payload, **options):
+                options["on_created"]("run-1")
+                raise ExecutionError("codex failed with exit 1: usage limit reached")
+
+            with (
+                mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.tempfile.mkdtemp",
+                    return_value=str(root),
+                ),
+                mock.patch("outcomeci.local.trigger", side_effect=trigger),
+                mock.patch(
+                    "outcomeci.config.compile_workflow",
+                    return_value={
+                        "instructions": {"phases": {"resolve_analytics": {}}},
+                        "workflow": {"spec": {"agents": {"default": {}}}},
+                    },
+                ),
+                mock.patch("outcomeci.cloud_runner.main.capture_exception") as capture,
+                self.assertRaises(ExecutionError),
+            ):
+                execute_workflow(
+                    Launch(
+                        "workflow",
+                        "invocation-1",
+                        "boot",
+                        "https://api.outcomeci.com",
+                    ),
+                    client,
+                )
+        capture.assert_called_once()
+        (reported_error,), kwargs = capture.call_args
+        self.assertIsInstance(reported_error, CoreError)
+        self.assertEqual(reported_error.category, "core_conflict")
+        self.assertEqual(kwargs["event"], "workflow_completion_report_failed")
+        self.assertEqual(kwargs["original_category"], "agent_process_failed")
 
     def test_non_usage_limit_failure_never_triggers_the_fallback(self):
         claim = {
