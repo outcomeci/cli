@@ -476,6 +476,48 @@ hook. The request operation returns `correlation_id`. Poll returns
 `streamable_http` or `stdio`, and tool names under `operations.request.tool`
 and `operations.poll.tool`.
 
+### Reaction delivery
+
+A `before` approval hook can resolve itself by polling for a Slack reaction,
+with no `oci human request`/`poll`/`accept` involved. The runtime resolves it
+directly, the same way locally and in OutcomeCI Cloud:
+
+```yaml
+integrations:
+  - type: human
+    timing: before
+    id: approve_fix
+    participant: {role: approver}
+    purpose: Approve opening a fix PR.
+    interaction: approval
+    delivery:
+      type: reaction
+      source: notify.outputs.delivery
+      emoji: "+1"
+      poll_interval_seconds: 20
+    on_timeout: fail
+    required: true
+    wait: {strategy: block, timeout_seconds: 300}
+  - type: api
+    capability: slack.get_reactions
+    required: false
+```
+
+`source` is `<phase>.outputs.<name>`, a direct `needs` dependency's own
+declared output holding the `channel` and `ts` of the message to watch. The
+phase also needs a `<connection>.get_reactions` capability (a plain
+schema-mode `GET /api/reactions.get` operation) declared `required: false` --
+the runtime's poll calls bypass the broker/effect-confirmation path entirely,
+so a `required: true` capability here can never be confirmed and always fails
+the phase.
+
+The runtime polls every `poll_interval_seconds` (default `20`) for up to
+`wait.timeout_seconds` (default `300`) for the configured `emoji` (default
+`+1`). `on_timeout: fail` (default) fails the run; `on_timeout: continue`
+resolves the hook without approval and lets the phase run anyway. Only
+`timing: before` and `interaction: approval` are supported -- there is no
+reject path, only unblock-or-timeout.
+
 Credentials remain in the named environment variable on the host side of the
 capability broker. OutcomeCI removes every connection-declared credential from
 the agent environment.
