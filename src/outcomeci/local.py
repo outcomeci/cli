@@ -391,15 +391,16 @@ def _finish_interaction(
     )
 
 
-def _provider_value(root: Path, run_id: str, value: str) -> str:
+def _provider_value(root: Path, run_id: str, integration: str, value: str) -> str:
     if not value.startswith("ref:"):
         return value
     journal = root / ".outcomeci" / ".broker" / run_id / "journal.json"
     try:
-        references = json.loads(journal.read_text(encoding="utf-8")).get("references", {})
+        state = json.loads(journal.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
-        references = {}
-    resolved = references.get(value)
+        state = {}
+    # The broker keeps one reference table per integration.
+    resolved = state.get("references", {}).get(integration, {}).get(value)
     if not isinstance(resolved, str) or not resolved:
         raise ExecutionError(f"reaction delivery source holds an unresolvable reference: {value}")
     return resolved
@@ -447,8 +448,8 @@ def _resolve_reaction(
         raise ExecutionError(f"reaction delivery source is missing channel/ts: {output['path']}")
     # With access.opaque_identifiers the producing agent only ever saw ref:
     # tokens, so that is what it wrote. The broker journal holds the real values.
-    channel = _provider_value(root, state["run_id"], channel)
-    ts = _provider_value(root, state["run_id"], ts)
+    channel = _provider_value(root, state["run_id"], "slack", channel)
+    ts = _provider_value(root, state["run_id"], "slack", ts)
     executor = IntegrationExecutor(compiled, resolver=credential_resolver, reviewed=True)
     emoji = delivery["emoji"]
     deadline = time.monotonic() + definition["wait"]["timeout_seconds"]

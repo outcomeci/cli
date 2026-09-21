@@ -11,6 +11,7 @@ import yaml
 from outcomeci import local
 from outcomeci.config import ConfigError, _human_interactions, compile_workflow
 from outcomeci.integrations import IntegrationExecutor as RealExecutor
+from outcomeci.policy import PolicyExecutor
 from outcomeci.process import ExecutionError
 
 
@@ -473,23 +474,33 @@ def test_resolve_reaction_resolves_opaque_references_from_the_broker_journal(
     tmp_path: Path, monkeypatch
 ):
     config = _workflow(tmp_path)
+    value = yaml.safe_load(config.read_text())
+    value["spec"]["integrations"]["slack"]["access"]["opaque_identifiers"] = True
+    config.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
     compiled = compile_workflow(config)
     hook = compiled["instructions"]["phases"]["approve"]["humans"]["before"][0]
-    _write_delivery(tmp_path, "run-1", channel="ref:sentry:id", ts="ref:resource:ts")
-    broker = tmp_path / ".outcomeci" / ".broker" / "run-1"
-    broker.mkdir(parents=True)
-    (broker / "journal.json").write_text(
-        json.dumps(
-            {
-                "calls": {},
-                "references": {
-                    "ref:sentry:id": "C0123456789",
-                    "ref:resource:ts": "1700000000.000100",
-                },
-            }
+
+    # Let the real broker write the journal, so this tracks its actual shape.
+    def provider(request: httpx.Request) -> httpx.Response:
+        body = {"ok": True, "message": {"reactions": [{"channel": "C0123456789", "ts": "17.01"}]}}
+        return httpx.Response(200, json=body)
+
+    broker = PolicyExecutor(
+        RealExecutor(
+            compiled,
+            resolver=lambda ref: "token",
+            reviewed=True,
+            transport=httpx.MockTransport(provider),
         ),
-        encoding="utf-8",
+        tmp_path / ".outcomeci" / ".broker" / "run-1",
+        {},
     )
+    shown = broker.execute(
+        "slack.get_reactions", {"channel": "C123", "timestamp": "1.0"}, phase="approve"
+    )["output"]["reactions"][0]
+    assert shown["channel"].startswith("ref:") and shown["ts"].startswith("ref:")
+    _write_delivery(tmp_path, "run-1", channel=shown["channel"], ts=shown["ts"])
+
     seen = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -500,7 +511,7 @@ def test_resolve_reaction_resolves_opaque_references_from_the_broker_journal(
     local._resolve_reaction(
         tmp_path, config, _run_state(), "approve", "before", hook, lambda ref: "token"
     )
-    assert seen == [{"channel": "C0123456789", "timestamp": "1700000000.000100"}]
+    assert seen == [{"channel": "C0123456789", "timestamp": "17.01"}]
 
 
 def test_resolve_reaction_rejects_an_unresolvable_reference(tmp_path: Path, monkeypatch):
