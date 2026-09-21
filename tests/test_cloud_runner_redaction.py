@@ -10,6 +10,7 @@ def test_redact_masks_api_key_shaped_tokens_outside_headers():
         "using [REDACTED] in the request"
     )
     assert redact("token ghp_abc12345supersecret leaked") == "token [REDACTED] leaked"
+    assert redact("token ghr_abc12345supersecret leaked") == "token [REDACTED] leaked"
 
 
 def test_redact_masks_jwts():
