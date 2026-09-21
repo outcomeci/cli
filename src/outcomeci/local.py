@@ -10,6 +10,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -23,7 +24,7 @@ from .capability import serve as serve_capability
 from .config import compile_workflow
 from .contracts import FORMAT_CHECKER, ContractError, validate_trigger_payload
 from .execution_events import event, safe_text
-from .integrations import CredentialResolver
+from .integrations import CredentialResolver, IntegrationExecutor
 from .manifest import build_manifest
 from .outcome import (
     _select_sessions,
@@ -353,13 +354,135 @@ def _interaction_path(root: Path, run_id: str, phase: str, interaction_id: str) 
     )
 
 
+def _finish_interaction(
+    root: Path,
+    state: dict[str, Any],
+    phase: str,
+    timing: str,
+    definition: dict[str, Any],
+    *,
+    status: str,
+    message: str,
+) -> None:
+    """Write an interaction as already-resolved, without ever passing through
+    the durable awaiting_input pause -- used by delivery types (currently
+    only 'reaction') that the runtime itself resolves synchronously."""
+    request = {
+        "schema_version": 1,
+        "run_id": state["run_id"],
+        "phase": phase,
+        "timing": timing,
+        "status": status,
+        "requested_at": datetime.now(UTC).isoformat(),
+        **definition,
+        "response": {"message": message, "responded_at": datetime.now(UTC).isoformat()},
+    }
+    path = _interaction_path(root, state["run_id"], phase, definition["id"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    state.setdefault("interaction_history", []).append(
+        {
+            "phase": phase,
+            "timing": timing,
+            "id": definition["id"],
+            "status": status,
+            "path": str(path),
+        }
+    )
+
+
+def _resolve_reaction(
+    root: Path,
+    config: Path,
+    state: dict[str, Any],
+    phase: str,
+    timing: str,
+    definition: dict[str, Any],
+    credential_resolver: CredentialResolver | None,
+) -> None:
+    """Poll Slack for the configured reaction on a prior phase's message,
+    blocking the current call for up to wait.timeout_seconds. Runtime-driven,
+    not agent-driven -- IntegrationExecutor(reviewed=True) bypasses the
+    independent policy-review agent deliberately: this is a fixed,
+    non-agent-controllable action (check this exact message's reactions),
+    not an arbitrary agent-initiated request."""
+    if credential_resolver is None:
+        raise ExecutionError("reaction delivery requires a credential resolver")
+    delivery = definition["delivery"]
+    compiled = compile_workflow(config)
+    producer, _, output_name = delivery["source"].partition(".outputs.")
+    try:
+        output = next(
+            item
+            for item in compiled["instructions"]["phases"][producer]["expects"]["outputs"]
+            if item["name"] == output_name
+        )
+    except (KeyError, StopIteration) as exc:
+        raise ExecutionError(
+            f"reaction delivery source is unresolvable: {delivery['source']}"
+        ) from exc
+    source_file = root / ".outcomeci" / "outcomes" / state["run_id"] / output["path"]
+    try:
+        value = json.loads(source_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ExecutionError(
+            f"reaction delivery source could not be read: {output['path']}"
+        ) from exc
+    channel, ts = value.get("channel"), value.get("ts")
+    if not isinstance(channel, str) or not isinstance(ts, str):
+        raise ExecutionError(f"reaction delivery source is missing channel/ts: {output['path']}")
+    executor = IntegrationExecutor(compiled, resolver=credential_resolver, reviewed=True)
+    emoji = delivery["emoji"]
+    deadline = time.monotonic() + definition["wait"]["timeout_seconds"]
+    while True:
+        result = executor.execute(
+            "slack.get_reactions", {"channel": channel, "timestamp": ts}, phase=phase
+        )
+        reactions = (result.get("output") or {}).get("reactions") or []
+        if any(
+            isinstance(item, dict) and item.get("name") == emoji and item.get("count", 0) >= 1
+            for item in reactions
+        ):
+            _finish_interaction(
+                root,
+                state,
+                phase,
+                timing,
+                definition,
+                status="approved",
+                message=f"Approved via Slack :{emoji}: reaction",
+            )
+            return
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(delivery["poll_interval_seconds"])
+    if definition.get("on_timeout") == "continue":
+        _finish_interaction(
+            root,
+            state,
+            phase,
+            timing,
+            definition,
+            status="answered",
+            message="Approval window expired",
+        )
+        return
+    raise ExecutionError(f"approval window expired for interaction {definition['id']}")
+
+
 def _open_interaction(
     root: Path,
     state: dict[str, Any],
     phase: str,
     timing: str,
     definition: dict[str, Any],
-) -> dict[str, Any]:
+    *,
+    config: Path | None = None,
+    credential_resolver: CredentialResolver | None = None,
+) -> dict[str, Any] | None:
+    if definition.get("delivery", {}).get("type") == "reaction":
+        _resolve_reaction(root, config, state, phase, timing, definition, credential_resolver)
+        return None
     request = {
         "schema_version": 1,
         "run_id": state["run_id"],
@@ -733,7 +856,9 @@ def start(
     }
     before = _first_required_interaction(compiled, first, "before", state)
     if before:
-        return _open_interaction(root, state, first, "before", before)
+        opened = _open_interaction(root, state, first, "before", before, config=config)
+        if opened is not None:
+            return opened
     return _execute(root, config, state, agent=agent, model=model)
 
 
@@ -789,7 +914,17 @@ def trigger(
         on_created(state["run_id"])
     before = _first_required_interaction(compiled, first, "before", state)
     if before:
-        return _open_interaction(root, state, first, "before", before)
+        opened = _open_interaction(
+            root,
+            state,
+            first,
+            "before",
+            before,
+            config=config,
+            credential_resolver=credential_resolver,
+        )
+        if opened is not None:
+            return opened
     return _execute(
         root,
         config,
@@ -831,8 +966,9 @@ def begin(root: Path, config: Path, intent: str) -> dict[str, Any]:
     state["phases"] = _phase_states(compiled, state)
     before = _first_required_interaction(compiled, state["phase"], "before", state)
     if before:
-        opened = _open_interaction(root, state, state["phase"], "before", before)
-        return {**opened, "outcome_root": str(_record(root, state["run_id"]).parent)}
+        opened = _open_interaction(root, state, state["phase"], "before", before, config=config)
+        if opened is not None:
+            return {**opened, "outcome_root": str(_record(root, state["run_id"]).parent)}
     _write(root, state)
     return {**state, "outcome_root": str(_record(root, state["run_id"]).parent)}
 
@@ -1320,7 +1456,17 @@ def respond(
     if timing == "before":
         next_interaction = _first_required_interaction(compiled, phase, "before", state)
         if next_interaction:
-            return _open_interaction(root, state, phase, "before", next_interaction)
+            opened = _open_interaction(
+                root,
+                state,
+                phase,
+                "before",
+                next_interaction,
+                config=config,
+                credential_resolver=credential_resolver,
+            )
+            if opened is not None:
+                return opened
     if not execute:
         state["status"] = "running"
         _write(root, state)
