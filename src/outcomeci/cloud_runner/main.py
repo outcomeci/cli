@@ -243,6 +243,25 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 _container_isolated=True,
             )
 
+        def call_respond(agent_override: str | None, model_override: str | None):
+            resume = dict(claim["resume"])
+            return local.respond(
+                root,
+                config,
+                str(resume["run_id"]),
+                str(resume["interaction_id"]),
+                str(resume.get("message") or ""),
+                approve=bool(resume.get("approve")),
+                reject=bool(resume.get("reject")),
+                agent=agent_override,
+                model=model_override,
+                credential_resolver=resolver,
+                event_sink=policy_event,
+                policy_reviewer=policy_review,
+                execution_backend="outcomeci",
+                _container_isolated=True,
+            )
+
         def execute_call(factory):
             nonlocal provider, credential_version, active_agent, active_model, fallback_used
             try:
@@ -275,15 +294,44 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                     _container_isolated=True,
                 )
 
-        result = execute_call(call_trigger)
-        run_id = str(result["run_id"])
+        resume = claim.get("resume")
+        if resume:
+            run_id = str(resume["run_id"])
+            for artifact in client.workflow_restore_artifacts(lease):
+                target = (root / str(artifact["path"])).resolve()
+                if not target.is_relative_to(root.resolve()):
+                    raise ContractError("workflow restored artifact escaped its root")
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(base64.b64decode(artifact["content_base64"], validate=True))
+            result = execute_call(call_respond)
+        else:
+            result = execute_call(call_trigger)
+            run_id = str(result["run_id"])
         phase_count = len(compile_workflow(config)["instructions"]["phases"])
         while len(result.get("completed_phases", [])) != phase_count:
             if heartbeat_failure:
                 raise CoreError("policy_evidence_upload_failed", True)
             if result.get("status") == "error":
                 raise ContractError("workflow recorded an error")
-            if not result.get("ready_phases") or result.get("status") == "awaiting_input":
+            if result.get("status") == "awaiting_input":
+                if provider == "codex":
+                    agent_update = json.loads((root / ".codex" / "auth.json").read_text())
+                pending = result.get("pending_interaction") or {}
+                client.workflow_complete(
+                    lease,
+                    "awaiting_input",
+                    run_id=run_id,
+                    artifacts=workflow_artifacts(root, run_id),
+                    pending_interaction={
+                        "phase": pending.get("phase"),
+                        "timing": pending.get("timing"),
+                        "id": pending.get("id"),
+                    },
+                    expected_credential_version=credential_version,
+                    agent_credential=agent_update,
+                )
+                return 0
+            if not result.get("ready_phases"):
                 raise ContractError("workflow requires a durable continuation")
             result = execute_call(call_continue)
         if heartbeat_failure:
