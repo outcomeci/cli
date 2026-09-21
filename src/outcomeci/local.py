@@ -1024,6 +1024,11 @@ def continue_run(
             approve=True,
             agent=agent,
             model=model,
+            credential_resolver=credential_resolver,
+            event_sink=event_sink,
+            policy_reviewer=policy_reviewer,
+            execution_backend=execution_backend,
+            _container_isolated=_container_isolated,
         )
     if state.get("status") != "awaiting_confirmation":
         raise ExecutionError(f"outcome cannot continue from {state.get('status')}")
@@ -1243,6 +1248,11 @@ def respond(
     agent: str | None = None,
     model: str | None = None,
     execute: bool = True,
+    credential_resolver: CredentialResolver | None = None,
+    event_sink: Callable[[dict[str, Any]], None] | None = None,
+    policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+    execution_backend: str = "filesystem",
+    _container_isolated: bool = False,
 ) -> dict[str, Any]:
     state = _read(root, run_id)
     if approve and reject:
@@ -1317,4 +1327,15 @@ def respond(
         return state
     state["status"] = "queued"
     _write(root, state)
-    return _execute(root, config, state, agent=agent, model=model)
+    return _execute(
+        root,
+        config,
+        state,
+        agent=agent,
+        model=model,
+        credential_resolver=credential_resolver,
+        event_sink=event_sink,
+        policy_reviewer=policy_reviewer,
+        execution_backend=execution_backend,
+        _container_isolated=_container_isolated,
+    )

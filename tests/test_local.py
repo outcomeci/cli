@@ -62,6 +62,109 @@ def test_continue_run_forwards_the_cloud_execution_context(tmp_path: Path, monke
     assert captured["_container_isolated"] is True
 
 
+def test_respond_forwards_the_cloud_execution_context(tmp_path: Path, monkeypatch) -> None:
+    request_path = tmp_path / "interaction.json"
+    request_path.write_text(
+        json.dumps({"interaction": "approval", "status": "pending"}), encoding="utf-8"
+    )
+    state = {
+        "run_id": "run-1",
+        "status": "awaiting_input",
+        "completed_phases": [],
+        "pending_interaction": {
+            "phase": "plan",
+            "timing": "before",
+            "id": "approval-1",
+            "path": str(request_path),
+        },
+    }
+    local._write(tmp_path, state)
+    monkeypatch.setattr(
+        local,
+        "compile_workflow",
+        lambda config: {
+            "instructions": {"phases": {"plan": {"needs": [], "humans": {"before": []}}}}
+        },
+    )
+    captured = {}
+
+    def fake_execute(root, config, state, **options):
+        captured.update(options)
+        return {"run_id": state["run_id"], "status": "completed"}
+
+    monkeypatch.setattr(local, "_execute", fake_execute)
+    resolver = lambda reference: "value"  # noqa: E731
+
+    result = local.respond(
+        tmp_path,
+        tmp_path / "outcome.yml",
+        "run-1",
+        "approval-1",
+        "Looks good.",
+        approve=True,
+        credential_resolver=resolver,
+        execution_backend="outcomeci",
+        _container_isolated=True,
+    )
+
+    assert result["status"] == "completed"
+    assert captured["credential_resolver"] is resolver
+    assert captured["execution_backend"] == "outcomeci"
+    assert captured["_container_isolated"] is True
+
+
+def test_continue_run_forwards_the_cloud_execution_context_through_respond(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """continue_run's own embedded respond() call used to drop the cloud
+    execution kwargs -- masked only because the cloud runner never reached
+    this path legitimately before durable pause/resume existed."""
+    state = {
+        "run_id": "run-1",
+        "status": "awaiting_input",
+        "completed_phases": ["plan"],
+        "pending_interaction": {"id": "approval-1"},
+    }
+    local._write(tmp_path, state)
+    monkeypatch.setattr(
+        local,
+        "compile_workflow",
+        lambda config: {
+            "instructions": {"phases": {"plan": {"needs": []}, "notify": {"needs": ["plan"]}}}
+        },
+    )
+    respond_options = {}
+
+    def fake_respond(root, config, run_id, interaction_id, message, **options):
+        respond_options.update(options)
+        return {
+            "run_id": run_id,
+            "status": "awaiting_confirmation",
+            "completed_phases": ["plan"],
+        }
+
+    monkeypatch.setattr(local, "respond", fake_respond)
+    monkeypatch.setattr(
+        local, "_execute", lambda root, config, state, **options: {"status": "completed"}
+    )
+    resolver = lambda reference: "value"  # noqa: E731
+
+    result = local.continue_run(
+        tmp_path,
+        tmp_path / "outcome.yml",
+        "run-1",
+        approve=True,
+        credential_resolver=resolver,
+        execution_backend="outcomeci",
+        _container_isolated=True,
+    )
+
+    assert result["status"] == "completed"
+    assert respond_options["credential_resolver"] is resolver
+    assert respond_options["execution_backend"] == "outcomeci"
+    assert respond_options["_container_isolated"] is True
+
+
 def _fake_invoke(
     agent: str, model: str | None, prompt: str, workspace: Path, timeout: int, **kwargs
 ) -> str:

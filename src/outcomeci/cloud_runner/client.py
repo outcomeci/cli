@@ -139,6 +139,7 @@ class CoreClient:
         expected_credential_version: int | None = None,
         agent_credential: Any | None = None,
         retryable: bool = False,
+        pending_interaction: dict[str, str] | None = None,
     ) -> None:
         self._post(
             "complete",
@@ -152,8 +153,19 @@ class CoreClient:
                 "expected_credential_version": expected_credential_version,
                 "agent_credential": agent_credential,
                 "retryable": retryable,
+                "pending_interaction": pending_interaction,
             },
         )
+
+    def workflow_restore_artifacts(self, lease_token: str) -> list[dict[str, str]]:
+        """Fetch the artifact bundle a paused run stored -- the counterpart to
+        the artifacts workflow_complete(status="awaiting_input") sends. Kept
+        as a separate call rather than embedded in claim_workflow()'s
+        response, which is sized for content/files/vault, not a
+        base64-inflated 20MiB artifact bundle."""
+        result = self._post("artifacts/restore", {"lease_token": lease_token})
+        artifacts = result.get("artifacts")
+        return artifacts if isinstance(artifacts, list) else []
 
     def verification(
         self, session_token: str, url: str, code: str | None, expires_at: str | None

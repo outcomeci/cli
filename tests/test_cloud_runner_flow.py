@@ -765,7 +765,7 @@ class FlowTests(unittest.TestCase):
                 )
         self.assertEqual(client.completed[0][1], "failed")
 
-    def test_generic_workflow_awaiting_human_input_fails_without_looping(self):
+    def test_generic_workflow_reports_awaiting_input_and_returns_zero(self):
         claim = {
             "content": "apiVersion: outcomeci.dev/v1alpha1\nkind: OutcomeWorkflow\n",
             "files": {},
@@ -804,11 +804,20 @@ class FlowTests(unittest.TestCase):
 
             def trigger(workspace, config, name, payload, **options):
                 options["on_created"]("run-1")
+                trace = workspace / ".outcomeci" / "outcomes" / "run-1" / "transcripts"
+                trace.mkdir(parents=True)
+                (trace / "codex.jsonl").write_text('{"type":"event"}\n')
                 return {
                     "run_id": "run-1",
                     "status": "awaiting_input",
                     "completed_phases": [],
                     "ready_phases": [],
+                    "pending_interaction": {
+                        "phase": "plan",
+                        "timing": "before",
+                        "id": "approval-1",
+                        "path": str(workspace / "interaction.json"),
+                    },
                 }
 
             with (
@@ -829,7 +838,207 @@ class FlowTests(unittest.TestCase):
                         "workflow": {"spec": {"agents": {"default": {}}}},
                     },
                 ),
-                self.assertRaisesRegex(ContractError, "durable continuation"),
+            ):
+                result = execute_workflow(
+                    Launch(
+                        "workflow",
+                        "invocation-1",
+                        "boot",
+                        "https://api.outcomeci.com",
+                    ),
+                    client,
+                )
+        self.assertEqual(result, 0)
+        self.assertEqual(client.completed[0][0:2], ("lease-secret", "awaiting_input"))
+        values = client.completed[0][2]
+        self.assertEqual(values["run_id"], "run-1")
+        self.assertEqual(
+            values["pending_interaction"],
+            {"phase": "plan", "timing": "before", "id": "approval-1"},
+        )
+        self.assertEqual(
+            [item["path"] for item in values["artifacts"]],
+            [".outcomeci/outcomes/run-1/transcripts/codex.jsonl"],
+        )
+
+    def test_generic_workflow_resumes_from_a_restored_artifact_bundle(self):
+        claim = {
+            "content": "apiVersion: outcomeci.dev/v1alpha1\nkind: OutcomeWorkflow\n",
+            "files": {},
+            "trigger_name": "inbound",
+            "input": {"subject": "hello"},
+            "lease_token": "lease-secret",
+            "agent": {
+                "provider": "codex",
+                "credential": {"token": "agent-secret"},
+                "credential_version": 3,
+            },
+            "vault": {"expires_at": "2099-01-01T00:00:00+00:00", "values": {}},
+            "resume": {
+                "run_id": "run-1",
+                "interaction_id": "approval-1",
+                "message": "looks good",
+                "approve": True,
+                "reject": False,
+            },
+        }
+        restored_content = b'{"schema_version":1,"run_id":"run-1"}'
+
+        class WorkflowClient:
+            completed = []
+            heartbeats = []
+
+            def claim_workflow(self):
+                return claim
+
+            def workflow_start(self, token):
+                self.started = token
+
+            def workflow_heartbeat(self, token, events=None):
+                self.heartbeats.append((token, events or []))
+                return {"active": True, "policy_events_received": len(events or [])}
+
+            def workflow_restore_artifacts(self, token):
+                return [
+                    {
+                        "path": ".outcomeci/outcomes/run-1/run.json",
+                        "content_base64": base64.b64encode(restored_content).decode(),
+                        "sha256": "unused-in-test",
+                    }
+                ]
+
+            def workflow_complete(self, token, status, **values):
+                self.completed.append((token, status, values))
+
+        client = WorkflowClient()
+        respond_calls = []
+
+        def respond(workspace, config, run_id, interaction_id, message, **options):
+            respond_calls.append((run_id, interaction_id, message, options))
+            self.assertEqual(
+                (workspace / ".outcomeci" / "outcomes" / "run-1" / "run.json").read_bytes(),
+                restored_content,
+            )
+            return {
+                "run_id": "run-1",
+                "status": "completed",
+                "completed_phases": ["notify"],
+            }
+
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "private"
+            root.mkdir()
+
+            with (
+                mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.tempfile.mkdtemp",
+                    return_value=str(root),
+                ),
+                mock.patch("outcomeci.local.respond", side_effect=respond),
+                mock.patch(
+                    "outcomeci.local.trigger",
+                    side_effect=AssertionError("trigger should not be called on resume"),
+                ),
+                mock.patch(
+                    "outcomeci.config.compile_workflow",
+                    return_value={
+                        "instructions": {"phases": {"notify": {}}},
+                        "workflow": {"spec": {"agents": {"default": {}}}},
+                    },
+                ),
+            ):
+                result = execute_workflow(
+                    Launch(
+                        "workflow",
+                        "invocation-1",
+                        "boot",
+                        "https://api.outcomeci.com",
+                    ),
+                    client,
+                )
+        self.assertEqual(result, 0)
+        self.assertEqual(len(respond_calls), 1)
+        run_id, interaction_id, message, options = respond_calls[0]
+        self.assertEqual((run_id, interaction_id, message), ("run-1", "approval-1", "looks good"))
+        self.assertTrue(options["approve"])
+        self.assertFalse(options["reject"])
+        self.assertEqual(options["execution_backend"], "outcomeci")
+        self.assertIs(options["_container_isolated"], True)
+        self.assertEqual(client.completed[0][0:2], ("lease-secret", "completed"))
+        self.assertEqual(client.completed[0][2]["run_id"], "run-1")
+
+    def test_generic_workflow_rejects_a_restored_artifact_that_escapes_its_root(self):
+        claim = {
+            "content": "apiVersion: outcomeci.dev/v1alpha1\nkind: OutcomeWorkflow\n",
+            "files": {},
+            "trigger_name": "inbound",
+            "input": {"subject": "hello"},
+            "lease_token": "lease-secret",
+            "agent": {
+                "provider": "codex",
+                "credential": {"token": "agent-secret"},
+                "credential_version": 3,
+            },
+            "vault": {"expires_at": "2099-01-01T00:00:00+00:00", "values": {}},
+            "resume": {
+                "run_id": "run-1",
+                "interaction_id": "approval-1",
+                "message": "looks good",
+                "approve": True,
+                "reject": False,
+            },
+        }
+
+        class WorkflowClient:
+            completed = []
+            heartbeats = []
+
+            def claim_workflow(self):
+                return claim
+
+            def workflow_start(self, token):
+                self.started = token
+
+            def workflow_heartbeat(self, token, events=None):
+                self.heartbeats.append((token, events or []))
+                return {"active": True, "policy_events_received": len(events or [])}
+
+            def workflow_restore_artifacts(self, token):
+                return [
+                    {
+                        "path": "../escape.txt",
+                        "content_base64": base64.b64encode(b"nope").decode(),
+                        "sha256": "unused-in-test",
+                    }
+                ]
+
+            def workflow_complete(self, token, status, **values):
+                self.completed.append((token, status, values))
+
+        client = WorkflowClient()
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "private"
+            root.mkdir()
+
+            with (
+                mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.tempfile.mkdtemp",
+                    return_value=str(root),
+                ),
+                mock.patch(
+                    "outcomeci.local.respond",
+                    side_effect=AssertionError("respond should not be called"),
+                ),
+                mock.patch(
+                    "outcomeci.config.compile_workflow",
+                    return_value={
+                        "instructions": {"phases": {"notify": {}}},
+                        "workflow": {"spec": {"agents": {"default": {}}}},
+                    },
+                ),
+                self.assertRaisesRegex(ContractError, "escaped its root"),
             ):
                 execute_workflow(
                     Launch(
