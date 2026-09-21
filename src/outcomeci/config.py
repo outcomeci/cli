@@ -180,12 +180,53 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
                 item.get("delivery", {"type": "local"}),
                 f"{field}.{timing}[{index}].delivery",
             )
-            if delivery.get("type") not in {"local", "slack", "custom"}:
+            if delivery.get("type") not in {"local", "slack", "custom", "reaction"}:
                 raise ConfigError(f"{field}.{timing}[{index}].delivery.type is unsupported")
             if delivery.get("type") in {"slack", "custom"} and not isinstance(
                 delivery.get("connection"), str
             ):
                 raise ConfigError(f"{field}.{timing}[{index}].delivery.connection is required")
+            if delivery.get("type") == "reaction":
+                if interaction != "approval":
+                    raise ConfigError(
+                        f"{field}.{timing}[{index}].delivery.type: reaction requires interaction: approval"
+                    )
+                if timing != "before":
+                    raise ConfigError(
+                        f"{field}.{timing}[{index}].delivery.type: reaction is only supported for timing: before"
+                    )
+                unknown_reaction = set(delivery) - {
+                    "type",
+                    "source",
+                    "emoji",
+                    "poll_interval_seconds",
+                }
+                if unknown_reaction:
+                    raise ConfigError(
+                        f"{field}.{timing}[{index}].delivery has unknown fields: "
+                        + ", ".join(sorted(unknown_reaction))
+                    )
+                source = delivery.get("source")
+                if not isinstance(source, str) or not re.fullmatch(
+                    r"[a-z][a-z0-9_-]{0,62}\.outputs\.[a-z][a-z0-9_-]{0,62}", source
+                ):
+                    raise ConfigError(
+                        f"{field}.{timing}[{index}].delivery.source must reference <phase>.outputs.<name>"
+                    )
+                emoji = delivery.get("emoji", "+1")
+                if not isinstance(emoji, str) or not emoji.strip():
+                    raise ConfigError(f"{field}.{timing}[{index}].delivery.emoji must be non-empty")
+                delivery["emoji"] = emoji.strip()
+                poll_interval = delivery.get("poll_interval_seconds", 20)
+                if not isinstance(poll_interval, int) or not 5 <= poll_interval <= 60:
+                    raise ConfigError(
+                        f"{field}.{timing}[{index}].delivery.poll_interval_seconds must be between 5 and 60"
+                    )
+                delivery["poll_interval_seconds"] = poll_interval
+            elif "on_timeout" in item:
+                raise ConfigError(
+                    f"{field}.{timing}[{index}].on_timeout is only supported with delivery.type: reaction"
+                )
             targets = delivery.get("targets", [])
             if not isinstance(targets, list):
                 raise ConfigError(f"{field}.{timing}[{index}].delivery.targets must be a list")
@@ -211,9 +252,12 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
                 )
             if normalized_targets:
                 delivery["targets"] = normalized_targets
-            wait = _mapping(
-                item.get("wait", {"strategy": "ask"}), f"{field}.{timing}[{index}].wait"
+            wait_default = (
+                {"strategy": "block", "timeout_seconds": 300}
+                if delivery.get("type") == "reaction"
+                else {"strategy": "ask"}
             )
+            wait = _mapping(item.get("wait", wait_default), f"{field}.{timing}[{index}].wait")
             if wait.get("strategy") not in {"ask", "block", "continue"}:
                 raise ConfigError(f"{field}.{timing}[{index}].wait.strategy is unsupported")
             if wait.get("timeout_seconds") is not None and (
@@ -223,6 +267,17 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
                 raise ConfigError(
                     f"{field}.{timing}[{index}].wait.timeout_seconds must be between 0 and 86400"
                 )
+            if delivery.get("type") == "reaction":
+                if wait.get("timeout_seconds") is None:
+                    wait["timeout_seconds"] = 300
+                if wait.get("strategy") != "block" or not wait["timeout_seconds"]:
+                    raise ConfigError(
+                        f"{field}.{timing}[{index}].delivery.type: reaction requires "
+                        "wait.strategy: block and a positive wait.timeout_seconds"
+                    )
+            on_timeout = item.get("on_timeout", "fail")
+            if delivery.get("type") == "reaction" and on_timeout not in {"fail", "continue"}:
+                raise ConfigError(f"{field}.{timing}[{index}].on_timeout is unsupported")
             normalized = {
                 "id": interaction_id,
                 "participant": participant,
@@ -231,6 +286,8 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
                 "required": required,
                 "delivery": delivery,
             }
+            if delivery.get("type") == "reaction":
+                normalized["on_timeout"] = on_timeout
             normalized["wait"] = {
                 "strategy": wait["strategy"],
                 **(
@@ -839,6 +896,22 @@ def _load_v1alpha1(path: Path) -> dict[str, Any]:
                 raise ConfigError(
                     f"input {phase_name}.{item['name']} must come from a direct dependency"
                 )
+        for timing_group in phase["humans"].values():
+            for hook in timing_group:
+                if hook["delivery"].get("type") != "reaction":
+                    continue
+                source = hook["delivery"]["source"]
+                match = re.fullmatch(
+                    r"([a-z][a-z0-9_-]{0,62})\.outputs\.([a-z][a-z0-9_-]{0,62})", source
+                )
+                if not match or (match.group(1), match.group(2)) not in outputs:
+                    raise ConfigError(
+                        f"phase {phase_name} human hook {hook['id']} references unknown output: {source}"
+                    )
+                if match.group(1) not in phase["needs"]:
+                    raise ConfigError(
+                        f"phase {phase_name} human hook {hook['id']} must reference a direct dependency's output"
+                    )
 
     indegree = {name: len(value["needs"]) for name, value in normalized_phases.items()}
     remaining = set(normalized_phases)

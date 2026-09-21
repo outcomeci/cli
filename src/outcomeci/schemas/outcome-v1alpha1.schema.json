@@ -156,6 +156,7 @@
         "required": {"type": "boolean"},
         "delivery": {"type": "object"},
         "wait": {"type": "object"},
+        "on_timeout": {"enum": ["fail", "continue"]},
         "availability": {"enum": ["on_demand", "always"]}
       },
       "additionalProperties": false
