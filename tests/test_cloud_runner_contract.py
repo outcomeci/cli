@@ -92,6 +92,7 @@ class ContractTests(unittest.TestCase):
         ):
             client.claim_execution()
         self.assertEqual(raised.exception.category, "core_conflict")
+        self.assertTrue(raised.exception.retryable)
 
     def test_client_preserves_effect_evidence_conflicts(self):
         client = CoreClient("https://api.outcomeci.com", "job", "bootstrap", "workflow")
@@ -115,6 +116,64 @@ class ContractTests(unittest.TestCase):
         ):
             client.claim_workflow()
         self.assertEqual(raised.exception.category, "workflow_effect_evidence_missing")
+        self.assertFalse(raised.exception.retryable)
+
+    def test_client_treats_lease_and_connection_conflicts_as_retryable(self):
+        client = CoreClient("https://api.outcomeci.com", "job", "bootstrap", "workflow")
+        error = urllib.error.HTTPError(
+            "https://api.outcomeci.com",
+            409,
+            "error",
+            None,
+            io.BytesIO(
+                json.dumps(
+                    {"detail": "configured agent connection is already running another workflow"}
+                ).encode()
+            ),
+        )
+        with (
+            mock.patch("urllib.request.urlopen", side_effect=error),
+            self.assertRaises(CoreError) as raised,
+        ):
+            client.claim_workflow()
+        self.assertEqual(raised.exception.category, "core_conflict")
+        self.assertTrue(raised.exception.retryable)
+
+        lease_error = urllib.error.HTTPError(
+            "https://api.outcomeci.com",
+            409,
+            "error",
+            None,
+            io.BytesIO(json.dumps({"detail": "workflow is not awaiting start"}).encode()),
+        )
+        with (
+            mock.patch("urllib.request.urlopen", side_effect=lease_error),
+            self.assertRaises(CoreError) as raised,
+        ):
+            client.claim_workflow()
+        self.assertEqual(raised.exception.category, "lease_conflict")
+        self.assertTrue(raised.exception.retryable)
+
+    def test_client_treats_credential_and_policy_conflicts_as_non_retryable(self):
+        client = CoreClient("https://api.outcomeci.com", "job", "bootstrap", "workflow")
+        for detail, category in (
+            ("agent credential changed during workflow", "credential_conflict"),
+            ("policy review digest mismatch", "policy_review_conflict"),
+        ):
+            error = urllib.error.HTTPError(
+                "https://api.outcomeci.com",
+                409,
+                "error",
+                None,
+                io.BytesIO(json.dumps({"detail": detail}).encode()),
+            )
+            with (
+                mock.patch("urllib.request.urlopen", side_effect=error),
+                self.assertRaises(CoreError) as raised,
+            ):
+                client.claim_workflow()
+            self.assertEqual(raised.exception.category, category)
+            self.assertFalse(raised.exception.retryable)
 
     def test_safe_helpers_preserve_scoped_credentials(self):
         with tempfile.TemporaryDirectory() as directory:

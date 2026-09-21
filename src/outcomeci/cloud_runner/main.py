@@ -314,6 +314,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 detail=redact_diagnostic(exc),
                 expected_credential_version=credential_version,
                 agent_credential=agent_update,
+                retryable=isinstance(exc, CoreError) and exc.retryable,
             )
         except CoreError as completion_error:
             # The original failure (exc) is what gets re-raised below; if the report
