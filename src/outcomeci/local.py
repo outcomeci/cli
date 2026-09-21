@@ -587,68 +587,75 @@ contract above. Use paths relative to this repository.
             return persisted
         _write_effect_receipts(root, outcome_root, state["run_id"], phase)
         try:
-            _validate_outputs(compiled, outcome_root, phase)
-        except ExecutionError as validation_error:
-            if event_sink:
-                event_sink(
-                    event(
-                        "artifact.repair_started",
-                        phase,
-                        "workflow.outputs",
-                        "Output contract repair started",
-                        reason=safe_text(str(validation_error)),
-                        level="warning",
-                    )
-                )
             try:
-                repair_summary = _repair_outputs(
-                    root,
-                    compiled,
-                    outcome_root,
-                    phase,
-                    runner,
-                    chosen_model,
-                    validation_error,
-                    writable_artifacts,
-                    connection_secrets,
-                    container_isolated=_container_isolated,
-                )
                 _validate_outputs(compiled, outcome_root, phase)
-            except ExecutionError as repair_error:
+            except ExecutionError as validation_error:
                 if event_sink:
                     event_sink(
                         event(
-                            "artifact.repair_failed",
+                            "artifact.repair_started",
                             phase,
                             "workflow.outputs",
-                            "Output contract repair failed",
-                            reason=safe_text(str(repair_error)),
-                            level="error",
+                            "Output contract repair started",
+                            reason=safe_text(str(validation_error)),
+                            level="warning",
                         )
                     )
-                raise
-            if event_sink:
-                event_sink(
-                    event(
-                        "artifact.repair_completed",
+                try:
+                    repair_summary = _repair_outputs(
+                        root,
+                        compiled,
+                        outcome_root,
                         phase,
-                        "workflow.outputs",
-                        "Output contract repair completed",
+                        runner,
+                        chosen_model,
+                        validation_error,
+                        writable_artifacts,
+                        connection_secrets,
+                        container_isolated=_container_isolated,
                     )
+                    _validate_outputs(compiled, outcome_root, phase)
+                except ExecutionError as repair_error:
+                    if event_sink:
+                        event_sink(
+                            event(
+                                "artifact.repair_failed",
+                                phase,
+                                "workflow.outputs",
+                                "Output contract repair failed",
+                                reason=safe_text(str(repair_error)),
+                                level="error",
+                            )
+                        )
+                    raise
+                if event_sink:
+                    event_sink(
+                        event(
+                            "artifact.repair_completed",
+                            phase,
+                            "workflow.outputs",
+                            "Output contract repair completed",
+                        )
+                    )
+                summary = f"{summary}\n{repair_summary}"
+            _validate_required_effects(root, compiled, state["run_id"], phase)
+            if phase == "intake":
+                trajectory = json.loads(
+                    (outcome_root / "intake" / "trajectory.json").read_text(encoding="utf-8")
                 )
-            summary = f"{summary}\n{repair_summary}"
-        _validate_required_effects(root, compiled, state["run_id"], phase)
-        if phase == "intake":
-            trajectory = json.loads(
-                (outcome_root / "intake" / "trajectory.json").read_text(encoding="utf-8")
+                _validate_trajectory(
+                    trajectory,
+                    {"intent_context": {"ontology_revision_id": context_revision}},
+                )
+        finally:
+            # Copy the agent's session transcript in regardless of whether the
+            # validation above succeeded -- a phase that fails required-effects
+            # or output validation is exactly the case someone needs to inspect
+            # what the agent actually did, and this used to run only on the
+            # success path, leaving failed runs with no transcript at all.
+            transcripts = _transcripts(
+                runner, outcome_root, phase, workspace=root, since=phase_started_at
             )
-            _validate_trajectory(
-                trajectory,
-                {"intent_context": {"ontology_revision_id": context_revision}},
-            )
-        transcripts = _transcripts(
-            runner, outcome_root, phase, workspace=root, since=phase_started_at
-        )
     except (ExecutionError, OSError, json.JSONDecodeError) as exc:
         state.update({"status": "error", "error": str(exc)})
         state["phases"] = _phase_states(compiled, state)

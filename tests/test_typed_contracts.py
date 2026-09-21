@@ -408,6 +408,37 @@ def test_execution_repairs_invalid_output_once_without_capabilities(
     ]
 
 
+def test_transcripts_are_captured_even_when_required_effects_are_missing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """_transcripts() used to run only after required-effects validation passed,
+    so a phase that failed that check (e.g. the agent never actually called its
+    required capability) left no transcript to debug from at all. It must run
+    regardless of whether validation below it succeeds or fails."""
+    path = typed_workflow(tmp_path)
+    monkeypatch.setattr(local, "serve_capability", lambda *args, **kwargs: nullcontext({}))
+    transcript_calls = []
+
+    def fake_transcripts(*args, **kwargs):
+        transcript_calls.append((args, kwargs))
+        return {"usage_records": 0, "files": [], "usage": [], "usage_path": "unused"}
+
+    monkeypatch.setattr(local, "_transcripts", fake_transcripts)
+
+    def invoke(*args, **kwargs):
+        output = next(item for item in kwargs["writable_paths"] if item.name == "delivery.json")
+        output.write_text('{"status":"delivered"}')
+        return "complete"
+
+    monkeypatch.setattr(local, "invoke", invoke)
+
+    with pytest.raises(ExecutionError, match="evidence is missing"):
+        local.trigger(tmp_path, path, "inbound", email_payload())
+
+    assert len(transcript_calls) == 1
+    assert transcript_calls[0][0][2] == "notify"
+
+
 def test_instruction_symlink_cannot_read_private_vault(tmp_path: Path) -> None:
     from outcomeci.config import _relative_path
 
