@@ -70,19 +70,24 @@ class CoreClient:
             if error.code in (401, 403):
                 raise CoreError("claim_rejected") from error
             if error.code == 409:
-                category = "core_conflict"
+                # lease_conflict/core_conflict are contention with another
+                # concurrently running invocation (e.g. an agent connection
+                # already in use) -- transient, and worth retrying. The other
+                # 409 categories are real data/state problems a bare retry
+                # won't fix, so they stay non-retryable.
+                category, retryable = "core_conflict", True
                 with suppress(Exception):
                     body = json.loads(error.read(4097))
                     detail = str(body.get("detail", "")).casefold()
                     if "lease" in detail or "workflow is not" in detail:
                         category = "lease_conflict"
                     elif "effect evidence" in detail:
-                        category = "workflow_effect_evidence_missing"
+                        category, retryable = "workflow_effect_evidence_missing", False
                     elif "credential changed" in detail:
-                        category = "credential_conflict"
+                        category, retryable = "credential_conflict", False
                     elif "policy review digest" in detail:
-                        category = "policy_review_conflict"
-                raise CoreError(category) from error
+                        category, retryable = "policy_review_conflict", False
+                raise CoreError(category, retryable) from error
             raise CoreError("core_unavailable", error.code >= 500) from error
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
             raise CoreError("core_unavailable", True) from error
@@ -133,6 +138,7 @@ class CoreClient:
         detail: str | None = None,
         expected_credential_version: int | None = None,
         agent_credential: Any | None = None,
+        retryable: bool = False,
     ) -> None:
         self._post(
             "complete",
@@ -145,6 +151,7 @@ class CoreClient:
                 "detail": detail,
                 "expected_credential_version": expected_credential_version,
                 "agent_credential": agent_credential,
+                "retryable": retryable,
             },
         )
 
