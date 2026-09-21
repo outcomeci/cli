@@ -9,7 +9,7 @@ SENSITIVE_KEY = re.compile(
     r"(?:token|secret|authorization|auth_json|credential|password|cookie)", re.I
 )
 BEARER = re.compile(r"(?i)bearer\s+[A-Za-z0-9._~+/=-]+")
-TOKENISH = re.compile(r"\b(?:sk-[A-Za-z0-9_-]{8,}|gh[opsu]_[A-Za-z0-9_]{8,})\b")
+TOKENISH = re.compile(r"\b(?:sk-[A-Za-z0-9_-]{8,}|gh[oprsu]_[A-Za-z0-9_]{8,})\b")
 JWT = re.compile(r"\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*\b")
 PEM_BLOCK = re.compile(r"-----BEGIN [A-Z ]+-----.*?-----END [A-Z ]+-----", re.DOTALL)
 
