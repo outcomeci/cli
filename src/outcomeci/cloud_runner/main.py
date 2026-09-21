@@ -778,29 +778,47 @@ def execute_publication(launch: Launch, client: CoreClient) -> int:
                 raise ContractError("invalid publication file path")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(base64.b64decode(encoded, validate=True))
-        pseudo_claim = SimpleNamespace(
-            auth_json=hydration.get("auth_json"),
-            oauth_token=hydration.get("oauth_token"),
-            api_key=hydration.get("api_key"),
-        )
-        env = ADAPTERS[provider].hydrate(pseudo_claim, root, safe_env(root))
-        previous = {key: os.environ.get(key) for key in env}
-        os.environ.update(env)
-        try:
-            result = prepare_publication(
-                package / filename,
-                output,
-                agent=provider,
-                model=job.get("model"),
-                sensitive_terms=list(job.get("sensitive_terms") or []),
-                container_isolated=True,
+
+        def hydrate_and_run(active_provider: str, active_hydration: dict, active_model):
+            pseudo_claim = SimpleNamespace(
+                auth_json=active_hydration.get("auth_json"),
+                oauth_token=active_hydration.get("oauth_token"),
+                api_key=active_hydration.get("api_key"),
             )
-        finally:
-            for key, value in previous.items():
-                if value is None:
-                    os.environ.pop(key, None)
-                else:
-                    os.environ[key] = value
+            env = ADAPTERS[active_provider].hydrate(pseudo_claim, root, safe_env(root))
+            previous = {key: os.environ.get(key) for key in env}
+            os.environ.update(env)
+            try:
+                return prepare_publication(
+                    package / filename,
+                    output,
+                    agent=active_provider,
+                    model=active_model,
+                    sensitive_terms=list(job.get("sensitive_terms") or []),
+                    container_isolated=True,
+                )
+            finally:
+                for key, value in previous.items():
+                    if value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = value
+
+        try:
+            result = hydrate_and_run(provider, hydration, job.get("model"))
+        except ExecutionError as exc:
+            # Publication has no per-workflow declared fallback (unlike
+            # workflow execution) -- it's a platform action tied to the
+            # requesting user's own connection, not a workflow's agents
+            # spec -- so a usage-limit hit always retries once on Claude.
+            if provider == "claude" or not _is_usage_limit_error(exc):
+                raise
+            fallback = client.publication_agent_fallback(str(claim.get("completion_token")))
+            provider = "claude"
+            shutil.rmtree(output, ignore_errors=True)
+            result = hydrate_and_run(
+                provider, {"provider": "claude", "oauth_token": fallback["credential"]}, None
+            )
         public_files: dict[str, str] = {}
         for path in sorted(output.rglob("*")):
             if (

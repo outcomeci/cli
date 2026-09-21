@@ -12,6 +12,7 @@ from outcomeci.cloud_runner.main import (
     _is_usage_limit_error,
     authorize,
     execute,
+    execute_publication,
     execute_workflow,
     workflow_failure_category,
 )
@@ -1423,6 +1424,194 @@ class FlowTests(unittest.TestCase):
                 )
         self.assertEqual(client.completions, [])
         self.assertEqual(client.failures, [("session-1", "invalid_result", False)])
+
+
+def publication_claim(agent="codex"):
+    hydration = (
+        {"provider": "codex", "auth_json": {"token": "codex-secret"}}
+        if agent == "codex"
+        else {"provider": "claude", "oauth_token": "claude-secret"}
+    )
+    return {
+        "job": {
+            "job_id": "pub-1",
+            "agent": agent,
+            "model": None,
+            "source_filename": "outcome.yml",
+            "content": "apiVersion: outcomeci.dev/v1alpha1\nkind: OutcomeWorkflow\n",
+            "files": {},
+            "sensitive_terms": [],
+        },
+        "completion_token": "completion-secret",
+        "lease_id": "lease-1",
+        "lease_expires_at": "2099-01-01T00:00:00Z",
+        "hydration": hydration,
+    }
+
+
+class PublicationClient:
+    def __init__(self, claim):
+        self.claim = claim
+        self.completions = []
+        self.failures = []
+        self.fallback_calls = []
+
+    def claim_publication(self):
+        return self.claim
+
+    def complete_publication(self, token, payload):
+        self.completions.append((token, payload))
+
+    def fail(self, token, category, retryable):
+        self.failures.append((token, category, retryable))
+
+    def publication_agent_fallback(self, token):
+        self.fallback_calls.append(token)
+        return {
+            "provider": "claude",
+            "credential": "claude-fallback-secret",
+            "credential_version": 9,
+        }
+
+
+def _fake_prepare_publication_writing_output(source, destination, **_options):
+    destination.mkdir(parents=True, exist_ok=True)
+    (destination / "outcome.yml").write_text(
+        "apiVersion: outcomeci.dev/v1alpha1\nkind: OutcomeWorkflow\n"
+    )
+    return {
+        "package_digest": "digest-1",
+        "workflow_revision": "rev-1",
+        "compiler_version": "1",
+        "requirements": [],
+        "replacement_report": [],
+        "workflow_file": "outcome.yml",
+    }
+
+
+class PublicationFallbackTests(unittest.TestCase):
+    def test_publication_completes_without_needing_a_fallback(self):
+        client = PublicationClient(publication_claim(agent="codex"))
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "private"
+            root.mkdir()
+            with (
+                mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.tempfile.mkdtemp",
+                    return_value=str(root),
+                ),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.prepare_publication",
+                    side_effect=_fake_prepare_publication_writing_output,
+                ),
+            ):
+                result = execute_publication(
+                    Launch("publication", "pub-1", "boot", "https://api.outcomeci.com"),
+                    client,
+                )
+        self.assertEqual(result, 0)
+        self.assertEqual(client.fallback_calls, [])
+        self.assertEqual(len(client.completions), 1)
+        self.assertEqual(client.completions[0][0], "completion-secret")
+
+    def test_a_codex_usage_limit_falls_back_to_claude_and_completes(self):
+        client = PublicationClient(publication_claim(agent="codex"))
+        attempts = []
+
+        def fake_prepare_publication(source, destination, *, agent, **options):
+            attempts.append(agent)
+            if agent == "codex":
+                raise ExecutionError(
+                    "codex failed with exit 1: ERROR: You've hit your usage limit.",
+                    True,
+                )
+            return _fake_prepare_publication_writing_output(
+                source, destination, agent=agent, **options
+            )
+
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "private"
+            root.mkdir()
+            with (
+                mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.tempfile.mkdtemp",
+                    return_value=str(root),
+                ),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.prepare_publication",
+                    side_effect=fake_prepare_publication,
+                ),
+            ):
+                result = execute_publication(
+                    Launch("publication", "pub-1", "boot", "https://api.outcomeci.com"),
+                    client,
+                )
+        self.assertEqual(result, 0)
+        self.assertEqual(attempts, ["codex", "claude"])
+        self.assertEqual(client.fallback_calls, ["completion-secret"])
+        self.assertEqual(len(client.completions), 1)
+
+    def test_a_claude_usage_limit_does_not_fall_back_again(self):
+        client = PublicationClient(publication_claim(agent="claude"))
+
+        def fake_prepare_publication(source, destination, *, agent, **options):
+            raise ExecutionError(
+                "claude failed with exit 1: usage limit reached, try again later", True
+            )
+
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "private"
+            root.mkdir()
+            with (
+                mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.tempfile.mkdtemp",
+                    return_value=str(root),
+                ),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.prepare_publication",
+                    side_effect=fake_prepare_publication,
+                ),
+                self.assertRaises(ExecutionError),
+            ):
+                execute_publication(
+                    Launch("publication", "pub-1", "boot", "https://api.outcomeci.com"),
+                    client,
+                )
+        self.assertEqual(client.fallback_calls, [])
+        self.assertEqual(client.completions, [])
+        self.assertEqual(len(client.failures), 1)
+        self.assertEqual(client.failures[0][0:2], ("completion-secret", "agent_process_failed"))
+
+    def test_a_non_usage_limit_failure_does_not_fall_back(self):
+        client = PublicationClient(publication_claim(agent="codex"))
+
+        def fake_prepare_publication(source, destination, *, agent, **options):
+            raise ExecutionError("codex failed with exit 1: syntax error", False)
+
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "private"
+            root.mkdir()
+            with (
+                mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.tempfile.mkdtemp",
+                    return_value=str(root),
+                ),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.prepare_publication",
+                    side_effect=fake_prepare_publication,
+                ),
+                self.assertRaises(ExecutionError),
+            ):
+                execute_publication(
+                    Launch("publication", "pub-1", "boot", "https://api.outcomeci.com"),
+                    client,
+                )
+        self.assertEqual(client.fallback_calls, [])
+        self.assertEqual(len(client.failures), 1)
 
 
 if __name__ == "__main__":
