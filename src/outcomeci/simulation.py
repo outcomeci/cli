@@ -36,6 +36,8 @@ ALLOWED_ACTIONS = {
     "email.send",
     "email.wait",
     "console.log",
+    "docs.fetch",
+    "cli.exec",
 }
 ALLOWED_ASSERTIONS = {
     "workflow.compiles",
@@ -55,6 +57,13 @@ ALLOWED_ASSERTIONS = {
     "email.content_not_exposed",
     "workflow.completed",
     "workflow.receipt_logged",
+    "docs.cli_available",
+    "docs.init_succeeds",
+    "docs.init_creates_workflow",
+    "docs.init_creates_agent_instructions",
+    "docs.status_succeeds",
+    "docs.status_reports_run_id",
+    "docs.run_artifacts_recorded",
 }
 
 

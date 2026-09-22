@@ -6,6 +6,8 @@ import argparse
 import hashlib
 import json
 import os
+import shlex
+import subprocess
 import sys
 import threading
 import time
@@ -23,6 +25,7 @@ from .cloud import (
     sync_workflow,
 )
 from .config import compile_workflow
+from .docs import fetch_fixtures
 from .integrations import IntegrationExecutor, local_credential_resolver
 from .local import advance, begin, compile_context, respond, validate_artifacts
 from .local_vault import initialize as initialize_vault
@@ -186,8 +189,127 @@ def _materialize(root: Path, phase: str) -> dict[str, Any]:
     return {"status": "artifacts_written", "phase": phase, "run_id": run_id}
 
 
+def _docs_state(context: dict[str, Any]) -> dict[str, Any]:
+    return context.setdefault("docs_proof", {"pages": {}, "commands": [], "captures": {}})
+
+
+def _substitute(text: str, captures: dict[str, Any], substitute: dict[str, str] | None) -> str:
+    for placeholder, capture_key in (substitute or {}).items():
+        if capture_key not in captures:
+            raise ExecutionError(f"no captured value for {capture_key!r}")
+        text = text.replace(placeholder, str(captures[capture_key]))
+    return text
+
+
+def _docs_fetch(context: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+    page = str(request["page"])
+    fixtures = fetch_fixtures(page)
+    _docs_state(context)["pages"][page] = fixtures
+    return {"status": "fetched", "page": page, "fixtures": sorted(fixtures)}
+
+
+def _cli_exec(root: Path, context: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
+    state = _docs_state(context)
+    if "command" in request:
+        command, fixture_id = str(request["command"]), str(request.get("id", request["command"]))
+    else:
+        page, fixture_id = str(request["page"]), str(request["fixture"])
+        fixtures = state["pages"].get(page)
+        if fixtures is None or fixture_id not in fixtures:
+            raise ExecutionError(f"doc fixture {page}/{fixture_id} was not fetched")
+        fixture = fixtures[fixture_id]
+        if fixture["kind"] != "cmd":
+            raise ExecutionError(f"doc fixture {page}/{fixture_id} is not an executable command")
+        command = fixture["body"]
+    command = _substitute(command, state["captures"], request.get("substitute"))
+    argv = shlex.split(command)
+    if not argv or argv[0] != "oci":
+        raise ExecutionError("cli.exec only runs documented `oci` commands")
+    completed = subprocess.run(argv, cwd=root, text=True, capture_output=True, check=False)
+    record = {
+        "id": fixture_id,
+        "command": command,
+        "exit_code": completed.returncode,
+        "stdout": completed.stdout,
+    }
+    state["commands"].append(record)
+    for capture_key, json_path in (request.get("capture") or {}).items():
+        if completed.returncode != 0:
+            continue
+        try:
+            value: Any = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise ExecutionError(f"cli.exec output for {fixture_id} was not JSON") from exc
+        for part in json_path.split("."):
+            value = value[part]
+        state["captures"][capture_key] = value
+    if request.get("expect_success", True) and completed.returncode != 0:
+        raise ExecutionError(
+            f"documented command failed: {command}\n{(completed.stderr or completed.stdout)[-2000:]}"
+        )
+    return {"status": "executed", "id": fixture_id, "exit_code": completed.returncode}
+
+
+def _status_reports_run(record: dict[str, Any] | None, run_id: Any) -> bool:
+    if record is None or run_id is None or record["exit_code"] != 0:
+        return False
+    try:
+        parsed = json.loads(record["stdout"])
+    except json.JSONDecodeError:
+        return False
+    return parsed.get("run_id") == run_id
+
+
+def _docs_assertions(
+    root: Path, context: dict[str, Any], request: dict[str, Any]
+) -> dict[str, Any]:
+    state = context["docs_proof"]
+    commands = {item["id"]: item for item in state["commands"]}
+
+    def command_ok(fixture_id: str) -> bool:
+        item = commands.get(fixture_id)
+        return item is not None and item["exit_code"] == 0
+
+    outcomes_dir_exists = False
+    quickstart = state["pages"].get("quickstart", {})
+    if "outcomes-dir" in quickstart:
+        relative = _substitute(
+            quickstart["outcomes-dir"]["body"].strip(), state["captures"], {"<run-id>": "run_id"}
+        )
+        outcomes_dir_exists = (root / relative).is_dir()
+
+    checks = {
+        "docs.cli_available": command_ok("cli-available"),
+        "docs.init_succeeds": command_ok("init"),
+        "docs.init_creates_workflow": (root / "outcome.yml").exists(),
+        "docs.init_creates_agent_instructions": (
+            root / ".claude" / "skills" / "outcome" / "SKILL.md"
+        ).exists(),
+        "docs.status_succeeds": command_ok("status"),
+        "docs.status_reports_run_id": _status_reports_run(
+            commands.get("status"), state["captures"].get("run_id")
+        ),
+        "docs.run_artifacts_recorded": outcomes_dir_exists,
+    }
+    expected = request.get("expected", [])
+    failed = [name for name in expected if not checks.get(name, False)]
+    if failed:
+        raise ExecutionError(f"failed docs assertions: {', '.join(failed)}")
+    context["final_state"] = {
+        "status": "passed",
+        "commands": [item["id"] for item in state["commands"]],
+    }
+    _write(root, context)
+    return {
+        "status": "passed",
+        "assertions": [{"name": name, "passed": checks[name]} for name in expected],
+    }
+
+
 def _assertions(root: Path, request: dict[str, Any]) -> dict[str, Any]:
     context = _read(root)
+    if context.get("docs_proof") is not None:
+        return _docs_assertions(root, context, request)
     if context.get("email_proof") is not None:
         proof = context["email_proof"]
         events = proof.get("events", [])
@@ -393,6 +515,14 @@ def execute(action: str, root: Path, request: dict[str, Any], fault: bool) -> di
         if result["phase"] != request["phase"]:
             raise ExecutionError(f"expected to advance to {request['phase']}")
         return {"status": result["status"], "phase": result["phase"]}
+    if action == "docs.fetch":
+        result = _docs_fetch(context, request)
+        _write(root, context)
+        return result
+    if action == "cli.exec":
+        result = _cli_exec(root, context, request)
+        _write(root, context)
+        return result
     if action == "simulation.assert":
         return _assertions(root, request)
     raise ExecutionError(f"unsupported simulation action {action}")
