@@ -31,11 +31,13 @@ esac
 
 python -m pip install --user --no-cache-dir --upgrade outcomeci-cli
 export PATH="$HOME/.local/bin:$PATH"
+CLI_VERSION=$(python -m pip show outcomeci-cli | awk '/^Version:/{print $2}')
 
-echo "testing $(oci --version) against ${OUTCOMECI_DOCS_BASE_URL} (${PROOF_ENVIRONMENT}, via ${PROOF_INSTALL_SOURCE})"
+echo "testing outcomeci-cli ${CLI_VERSION} against ${OUTCOMECI_DOCS_BASE_URL} (${PROOF_ENVIRONMENT}, via ${PROOF_INSTALL_SOURCE})"
 
 oci proof run --name docs-quickstart-v1 --workspace /proof --report /proof/report.json
 EXIT_CODE=$?
+PASSED=$([ "$EXIT_CODE" -eq 0 ] && echo 1 || echo 0)
 
 # The alarm reads this metric, not the task's exit code: EventBridge Scheduler
 # doesn't surface RunTask container exit codes as a CloudWatch metric on its
@@ -44,6 +46,16 @@ aws cloudwatch put-metric-data \
   --namespace "OutcomeCI/DocsProof" \
   --metric-name ProofPassed \
   --dimensions "Environment=${PROOF_ENVIRONMENT}" \
-  --value "$([ "$EXIT_CODE" -eq 0 ] && echo 1 || echo 0)"
+  --value "$PASSED"
+
+# A second, version-dimensioned metric — deliberately separate from the one
+# above, so adding it can never change what the environment-level alarm
+# matches. This is what the release promote workflow checks: it will not
+# promote a version staging hasn't run this proof against and passed.
+aws cloudwatch put-metric-data \
+  --namespace "OutcomeCI/DocsProof" \
+  --metric-name ProofPassedByVersion \
+  --dimensions "Environment=${PROOF_ENVIRONMENT},Version=${CLI_VERSION}" \
+  --value "$PASSED"
 
 exit "$EXIT_CODE"
