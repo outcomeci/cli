@@ -904,7 +904,9 @@ def trigger(
     encoded = json.dumps(payload, separators=(",", ":")).encode()
     limit = 2 * 1024 * 1024 if definition["type"] == "webhook.received" else 1024 * 1024
     if len(encoded) > limit:
-        raise ExecutionError("trigger payload exceeds the 1 MiB local limit")
+        raise ExecutionError(
+            f"trigger payload exceeds the {limit // (1024 * 1024)} MiB local limit"
+        )
     try:
         validate_trigger_payload(definition["type"], payload)
     except ContractError as exc:

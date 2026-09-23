@@ -285,6 +285,28 @@ def test_manual_execution_requires_manual_trigger(tmp_path: Path) -> None:
         local.begin(tmp_path, path, "This must arrive by email")
 
 
+def test_webhook_trigger_rejects_oversized_payload_with_the_actual_limit(tmp_path: Path) -> None:
+    initialize(tmp_path, "filesystem")
+    path = tmp_path / "outcome.yml"
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["triggers"] = {"inbound": {"type": "webhook.received"}}
+    path.write_text(yaml.safe_dump(value, sort_keys=False))
+    oversized = {"data": "x" * (2 * 1024 * 1024 + 1)}
+    with pytest.raises(ExecutionError, match=re.escape("exceeds the 2 MiB local limit")):
+        local.trigger(tmp_path, path, "inbound", oversized)
+
+
+def test_email_trigger_rejects_oversized_payload_with_the_actual_limit(tmp_path: Path) -> None:
+    initialize(tmp_path, "filesystem")
+    path = tmp_path / "outcome.yml"
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["triggers"] = {"mail": {"type": "email.received"}}
+    path.write_text(yaml.safe_dump(value, sort_keys=False))
+    oversized = {"subject": "x" * (1024 * 1024 + 1)}
+    with pytest.raises(ExecutionError, match=re.escape("exceeds the 1 MiB local limit")):
+        local.trigger(tmp_path, path, "mail", oversized)
+
+
 def test_ready_set_supports_parallel_phases_and_join(tmp_path: Path) -> None:
     initialize(tmp_path, "filesystem")
     compiled = local.compile_workflow(tmp_path / "outcome.yml")
