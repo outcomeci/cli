@@ -15,7 +15,7 @@ from typing import Any
 
 import yaml
 
-from .process import ExecutionError
+from ..process import ExecutionError
 
 REPORT_SCHEMA = "outcomeci.proof-report/v1alpha1"
 FAULT_EXIT = 86
@@ -36,6 +36,21 @@ ALLOWED_ACTIONS = {
     "email.send",
     "email.wait",
     "console.log",
+    "docs.fetch",
+    "cli.exec",
+    "vault.put_credential",
+    "vault.rotate_credential",
+    "vault.resolve_credential",
+    "vault.generate_jwt_credential",
+    "connection.authenticate",
+    "credential.resolve_env",
+    "cloud.mock_session",
+    "cloud.vault_put",
+    "cloud.vault_rotate",
+    "cloud.vault_verify",
+    "agent.start_run",
+    "agent.approve_intake",
+    "agent.verify_run",
 }
 ALLOWED_ASSERTIONS = {
     "workflow.compiles",
@@ -55,11 +70,33 @@ ALLOWED_ASSERTIONS = {
     "email.content_not_exposed",
     "workflow.completed",
     "workflow.receipt_logged",
+    "docs.cli_available",
+    "docs.init_succeeds",
+    "docs.init_creates_workflow",
+    "docs.init_creates_agent_instructions",
+    "docs.status_succeeds",
+    "docs.status_reports_run_id",
+    "docs.run_artifacts_recorded",
+    "credential.api_key_authenticates",
+    "credential.basic_authenticates",
+    "credential.bearer_authenticates",
+    "credential.oauth2_client_credentials_authenticates",
+    "credential.oauth2_refresh_token_authenticates",
+    "credential.jwt_bearer_authenticates",
+    "credential.env_reference_resolves",
+    "vault.rotation_takes_effect",
+    "cloud_vault.rotation_takes_effect",
+    "cloud_vault.grants_survive_rotation",
+    "cloud_session.expired_token_auto_refreshes",
+    "agent.claude_completes_intake",
+    "agent.claude_writes_valid_artifacts",
+    "agent.codex_completes_intake",
+    "agent.codex_writes_valid_artifacts",
 }
 
 
 def bundled_definition(name: str = "local-first-v1") -> Path:
-    return Path(str(files("outcomeci").joinpath(f"proofs/{name}.proof.yml")))
+    return Path(str(files("outcomeci.proof_runner").joinpath(f"proofs/{name}.proof.yml")))
 
 
 def load_definition(path: Path) -> dict[str, Any]:
@@ -157,7 +194,7 @@ def _step(
     argv = [
         sys.executable,
         "-m",
-        "outcomeci.simulation_step",
+        "outcomeci.proof_runner.step",
         step["action"],
         "--workspace",
         str(workspace),
@@ -166,7 +203,7 @@ def _step(
     ]
     if fault:
         argv.append("--fault-after-write")
-    source_root = str(Path(__file__).resolve().parents[1])
+    source_root = str(Path(__file__).resolve().parents[2])
     inherited_pythonpath = os.environ.get("PYTHONPATH", "")
     env = {
         **os.environ,
