@@ -65,14 +65,14 @@ made — check one off once it's actually fixed and verified, not just filed.
   with no type-level distinction. Consider renaming the cloud-ID ones to
   `--workspace-id` now, since it's a breaking change either way and this is
   the release to make it in.
-- [ ] `cli.py` has a working `_print_json`/`_workflow_path` helper that
+- [x] `cli.py` has a working `_print_json`/`_workflow_path` helper that
   ~40% of call sites bypass by hand (16 sites for the former, 4 for the
   latter) — mechanical fix.
-- [ ] `policy.py`'s `execute()` repeats a "deny → event → save → raise"
+- [x] `policy.py`'s `execute()` repeats a "deny → event → save → raise"
   triplet 4 times.
-- [ ] `capability.py`'s two invoke functions duplicate the entire broker
+- [x] `capability.py`'s two invoke functions duplicate the entire broker
   socket exchange.
-- [ ] `custom.py`'s two MCP transports hardcode the same `initialize`
+- [x] `custom.py`'s two MCP transports hardcode the same `initialize`
   payload separately — risk of protocol-version drift between them.
 - [ ] Inconsistent eager vs. lazy imports in `cli.py` (`tunnels`,
   `webhooks.listen`, `debug.run`, `slack_vault.sync_credentials` lazy,
@@ -86,7 +86,7 @@ made — check one off once it's actually fixed and verified, not just filed.
   different safety postures (one uses atomic `O_EXCL`, two use plain
   `write_text`+`chmod`) and two different directory names (`.codex` vs
   `codex`) for the same artifact.
-- [ ] The SIGTERM→wait→SIGKILL sequence and the temp-workdir-with-chmod-
+- [x] The SIGTERM→wait→SIGKILL sequence and the temp-workdir-with-chmod-
   and-cleanup scaffold are each duplicated across `main.py`'s four entry
   points.
 - [ ] Minor: `redaction.py`'s dict/list branches are dead code in

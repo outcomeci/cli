@@ -18,7 +18,7 @@ from urllib.parse import urlparse
 from uuid import UUID
 
 from .cloud import _authorized_request, credentials_path
-from .process import ExecutionError
+from .process import ExecutionError, terminate_gracefully
 
 VERSION = "0.71.0"
 CHECKSUMS = {
@@ -240,12 +240,7 @@ def start(workspace_id: str, target: str, *, ttl_seconds: int = 900, public: boo
         pass
     finally:
         if process and process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+            terminate_gracefully(process, timeout=5)
         try:
             _request(workspace_id, method="DELETE", session_id=str(grant["id"]))
         except ExecutionError:

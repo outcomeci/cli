@@ -24,6 +24,16 @@ class Result:
     stderr: str
 
 
+def terminate_gracefully(process: subprocess.Popen, *, timeout: float = 2) -> None:
+    """Ask a subprocess to exit, then force it after `timeout` seconds."""
+    process.terminate()
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
 def command(
     argv: list[str],
     *,

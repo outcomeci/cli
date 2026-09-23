@@ -16,7 +16,7 @@ from typing import Any
 import jsonschema
 import yaml
 
-from .process import ExecutionError
+from .process import ExecutionError, terminate_gracefully
 
 REQUEST_INPUT = {
     "type": "object",
@@ -155,42 +155,49 @@ def _mcp_result(value: dict[str, Any]) -> dict[str, Any]:
     raise ExecutionError("custom MCP tool returned no structured result")
 
 
+_MCP_PROTOCOL_VERSION = "2025-06-18"
+
+
+def _mcp_initialize_message() -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "initialize",
+        "params": {
+            "protocolVersion": _MCP_PROTOCOL_VERSION,
+            "capabilities": {},
+            "clientInfo": {"name": "outcomeci", "version": "1"},
+        },
+    }
+
+
+def _mcp_initialized_notification() -> dict[str, Any]:
+    return {"jsonrpc": "2.0", "method": "notifications/initialized"}
+
+
+def _mcp_tool_call_message(tool: str, payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {"name": tool, "arguments": payload},
+    }
+
+
 def _mcp_http(
     connection: dict[str, Any], operation: str, payload: dict[str, Any]
 ) -> dict[str, Any]:
     endpoint = str(connection["transport"]["endpoint"])
     headers = _headers(connection)
-    initialized, response_headers = _post(
-        endpoint,
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": {"name": "outcomeci", "version": "1"},
-            },
-        },
-        headers,
-    )
+    initialized, response_headers = _post(endpoint, _mcp_initialize_message(), headers)
     if initialized.get("error"):
         raise ExecutionError(f"custom MCP initialization failed: {initialized['error']}")
     session = response_headers.get("Mcp-Session-Id") or response_headers.get("mcp-session-id")
     if session:
         headers["Mcp-Session-Id"] = session
-    _post(endpoint, {"jsonrpc": "2.0", "method": "notifications/initialized"}, headers)
+    _post(endpoint, _mcp_initialized_notification(), headers)
     tool = str(connection["operations"][operation].get("tool", f"human_{operation}"))
-    result, _ = _post(
-        endpoint,
-        {
-            "jsonrpc": "2.0",
-            "id": 2,
-            "method": "tools/call",
-            "params": {"name": tool, "arguments": payload},
-        },
-        headers,
-    )
+    result, _ = _post(endpoint, _mcp_tool_call_message(tool, payload), headers)
     return _mcp_result(result)
 
 
@@ -205,22 +212,8 @@ def _mcp_stdio(
     ):
         raise ExecutionError("custom MCP stdio transport requires a command list")
     tool = str(connection["operations"][operation].get("tool", f"human_{operation}"))
-    initialize = {
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "initialize",
-        "params": {
-            "protocolVersion": "2025-06-18",
-            "capabilities": {},
-            "clientInfo": {"name": "outcomeci", "version": "1"},
-        },
-    }
-    tool_call = {
-        "jsonrpc": "2.0",
-        "id": 2,
-        "method": "tools/call",
-        "params": {"name": tool, "arguments": payload},
-    }
+    initialize = _mcp_initialize_message()
+    tool_call = _mcp_tool_call_message(tool, payload)
     try:
         process = subprocess.Popen(
             command,
@@ -254,10 +247,7 @@ def _mcp_stdio(
         if initialized.get("error"):
             raise ExecutionError(f"custom MCP initialization failed: {initialized['error']}")
         process.stdin.write(
-            json.dumps(
-                {"jsonrpc": "2.0", "method": "notifications/initialized"}, separators=(",", ":")
-            )
-            + "\n"
+            json.dumps(_mcp_initialized_notification(), separators=(",", ":")) + "\n"
         )
         process.stdin.flush()
         response = exchange(tool_call, 2)
@@ -265,12 +255,7 @@ def _mcp_stdio(
         raise ExecutionError(f"custom MCP stdio transport failed: {exc}", True) from exc
     finally:
         if "process" in locals():
-            process.terminate()
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait()
+            terminate_gracefully(process)
     return _mcp_result(response)
 
 
