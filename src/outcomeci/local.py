@@ -860,6 +860,51 @@ contract above. Use paths relative to this repository.
     return state
 
 
+def _new_run(
+    compiled: dict[str, Any], intent: str, *, trigger: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """The initial queued-run state start() (manual) and trigger() (every
+    other trigger type) both build before checking for a before-phase gate."""
+    state = {
+        "schema_version": 2,
+        "run_id": _id(intent),
+        "intent": intent,
+        "phase": _ready(compiled, [])[0],
+        "status": "queued",
+        "completed_phases": [],
+        "ready_phases": _ready(compiled, []),
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    if trigger is not None:
+        state["trigger"] = trigger
+    return state
+
+
+def _before_gate(
+    root: Path,
+    config: Path,
+    compiled: dict[str, Any],
+    state: dict[str, Any],
+    *,
+    credential_resolver: CredentialResolver | None = None,
+) -> dict[str, Any] | None:
+    """If the run's first phase has a required `before` interaction, open it
+    and return the paused state; None means the caller should proceed
+    straight to _execute()."""
+    before = _first_required_interaction(compiled, state["phase"], "before", state)
+    if not before:
+        return None
+    return _open_interaction(
+        root,
+        state,
+        state["phase"],
+        "before",
+        before,
+        config=config,
+        credential_resolver=credential_resolver,
+    )
+
+
 def start(
     root: Path,
     config: Path,
@@ -873,22 +918,10 @@ def start(
     compiled = compile_workflow(config)
     if not any(trigger["type"] == "manual" for trigger in compiled["triggers"].values()):
         raise ExecutionError("workflow does not declare a manual trigger")
-    first = _ready(compiled, [])[0]
-    state = {
-        "schema_version": 2,
-        "run_id": _id(intent),
-        "intent": intent.strip(),
-        "phase": first,
-        "status": "queued",
-        "completed_phases": [],
-        "ready_phases": _ready(compiled, []),
-        "created_at": datetime.now(UTC).isoformat(),
-    }
-    before = _first_required_interaction(compiled, first, "before", state)
-    if before:
-        opened = _open_interaction(root, state, first, "before", before, config=config)
-        if opened is not None:
-            return opened
+    state = _new_run(compiled, intent.strip())
+    opened = _before_gate(root, config, compiled, state)
+    if opened is not None:
+        return opened
     return _execute(root, config, state, agent=agent, model=model)
 
 
@@ -929,34 +962,17 @@ def trigger(
         if isinstance(subject, str) and subject.strip()
         else f"{definition['type']} received"
     )
-    first = _ready(compiled, [])[0]
-    state = {
-        "schema_version": 2,
-        "run_id": _id(intent),
-        "intent": intent,
-        "trigger": {"name": trigger_name, "type": definition["type"], "value": payload},
-        "phase": first,
-        "status": "queued",
-        "completed_phases": [],
-        "ready_phases": _ready(compiled, []),
-        "created_at": datetime.now(UTC).isoformat(),
-    }
+    state = _new_run(
+        compiled,
+        intent,
+        trigger={"name": trigger_name, "type": definition["type"], "value": payload},
+    )
     if on_created is not None:
         _write(root, state)
         on_created(state["run_id"])
-    before = _first_required_interaction(compiled, first, "before", state)
-    if before:
-        opened = _open_interaction(
-            root,
-            state,
-            first,
-            "before",
-            before,
-            config=config,
-            credential_resolver=credential_resolver,
-        )
-        if opened is not None:
-            return opened
+    opened = _before_gate(root, config, compiled, state, credential_resolver=credential_resolver)
+    if opened is not None:
+        return opened
     return _execute(
         root,
         config,

@@ -100,7 +100,7 @@ made — check one off once it's actually fixed and verified, not just filed.
 - [ ] `local.py`: `_execute`/`continue_run`/`retry`/`respond`/`trigger` all
   redeclare and forward the same 7-keyword signature — a dataclass would
   remove ~40 lines and prevent a new option being forgotten in one caller.
-- [ ] `local.py`: `start()` and `trigger()` duplicate the run-bootstrap
+- [x] `local.py`: `start()` and `trigger()` duplicate the run-bootstrap
   dict + before-gate logic.
 - [x] `local.py:691`: the single largest, most behaviorally significant
   agent prompt is the only one of five not extracted to `templates.py`,
