@@ -102,7 +102,7 @@ def parser() -> argparse.ArgumentParser:
     tunnel_commands = tunnel.add_subparsers(dest="tunnel_command", required=True)
     for name in ("start", "status", "stop"):
         action = tunnel_commands.add_parser(name)
-        action.add_argument("--workspace", required=True)
+        action.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
         if name == "start":
             action.add_argument("--target", required=True)
             action.add_argument("--ttl-seconds", type=int, default=900)
@@ -164,7 +164,7 @@ def parser() -> argparse.ArgumentParser:
     workflow_listen = workflow_commands.add_parser(
         "listen", help="Execute queued workflow triggers locally"
     )
-    workflow_listen.add_argument("--workspace", required=True, help="Cloud workspace identifier")
+    workflow_listen.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     workflow_listen.add_argument("--workflow", required=True, help="Cloud workflow identifier")
     workflow_listen.add_argument("--dir", type=Path, default=Path.cwd())
     workflow_listen.add_argument("--config", type=Path, default=Path("outcome.yml"))
@@ -178,7 +178,7 @@ def parser() -> argparse.ArgumentParser:
         "debug",
         help="Run a backend: outcomeci workflow locally against real cloud vault credentials",
     )
-    workflow_debug.add_argument("--workspace", required=True, help="Cloud workspace identifier")
+    workflow_debug.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     workflow_debug.add_argument("--workflow", required=True, help="Cloud workflow identifier")
     workflow_debug.add_argument("--dir", type=Path, default=Path.cwd())
     workflow_debug.add_argument("--config", type=Path, default=Path("outcome.yml"))
@@ -200,7 +200,7 @@ def parser() -> argparse.ArgumentParser:
         "effects (e.g. sending Slack messages) later phases perform",
     )
     workflow_sync.add_argument("file", type=Path)
-    workflow_sync.add_argument("--workspace", required=True)
+    workflow_sync.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     workflow_sync.add_argument("--name")
     workflow_sync.add_argument(
         "--patch", type=Path, help="OutcomeWorkflowPatch that produced this version"
@@ -213,10 +213,10 @@ def parser() -> argparse.ArgumentParser:
     )
     vault_commands = vault.add_subparsers(dest="vault_command", required=True)
     vault_list = vault_commands.add_parser("list")
-    vault_list.add_argument("--workspace", required=True)
+    vault_list.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     vault_put = vault_commands.add_parser("put")
     vault_put.add_argument("path")
-    vault_put.add_argument("--workspace", required=True)
+    vault_put.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     vault_put.add_argument("--name")
     vault_put.add_argument("--value")
     vault_put.add_argument("--value-stdin", action="store_true")
@@ -248,16 +248,16 @@ def parser() -> argparse.ArgumentParser:
     )
     vault_rotate = vault_commands.add_parser("rotate")
     vault_rotate.add_argument("entry_id")
-    vault_rotate.add_argument("--workspace", required=True)
+    vault_rotate.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     vault_rotate.add_argument("--value")
     vault_rotate.add_argument("--value-stdin", action="store_true")
     vault_grant = vault_commands.add_parser("grant")
     vault_grant.add_argument("entry_id")
-    vault_grant.add_argument("--workspace", required=True)
+    vault_grant.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     vault_grant.add_argument("--workflow", action="append", default=[])
     vault_revoke = vault_commands.add_parser("revoke")
     vault_revoke.add_argument("entry_id")
-    vault_revoke.add_argument("--workspace", required=True)
+    vault_revoke.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     local_vault = vault_commands.add_parser("local", help="Manage an encrypted offline Vault")
     local_vault_commands = local_vault.add_subparsers(dest="local_vault_command", required=True)
     local_vault_init = local_vault_commands.add_parser("init")
@@ -488,13 +488,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "tunnel":
             if args.tunnel_command == "start":
                 tunnels.start(
-                    args.workspace, args.target, ttl_seconds=args.ttl_seconds, public=args.public
+                    args.workspace_id,
+                    args.target,
+                    ttl_seconds=args.ttl_seconds,
+                    public=args.public,
                 )
             else:
                 _print_json(
-                    tunnels.status(args.workspace)
+                    tunnels.status(args.workspace_id)
                     if args.tunnel_command == "status"
-                    else tunnels.stop(args.workspace)
+                    else tunnels.stop(args.workspace_id)
                 )
             return 0
         if args.command == "proof":
@@ -553,7 +556,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 root = args.dir.resolve()
                 config = (root / args.config).resolve()
                 webhooks.listen(
-                    args.workspace,
+                    args.workspace_id,
                     args.workflow,
                     root,
                     config,
@@ -567,7 +570,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result = debug.run(
                     root,
                     config,
-                    args.workspace,
+                    args.workspace_id,
                     args.workflow,
                     trigger_name=args.trigger,
                     invocation_id=args.invocation_id,
@@ -580,7 +583,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
             result = sync_workflow(
                 args.file,
-                args.workspace,
+                args.workspace_id,
                 args.name,
                 "create" if args.create else "version",
                 patch_path=args.patch,
@@ -605,7 +608,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     _print_json(put_local_vault_entry(workspace, args.path, value))
                 return 0
             if args.vault_command == "list":
-                result = vault_request(args.workspace, "list")
+                result = vault_request(args.workspace_id, "list")
             elif args.vault_command in {"put", "rotate"}:
                 reads_stdin = args.value_stdin or getattr(args, "secrets_json_stdin", False)
                 value = sys.stdin.read().rstrip("\n") if reads_stdin else args.value
@@ -633,7 +636,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         ):
                             raise ExecutionError("--secrets-json-stdin requires string fields")
                     result = vault_request(
-                        args.workspace,
+                        args.workspace_id,
                         "put_credential" if typed else "put",
                         path=args.path,
                         display_name=args.name or args.path,
@@ -655,14 +658,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                 else:
                     result = vault_request(
-                        args.workspace, "rotate", entry_id=args.entry_id, value=value
+                        args.workspace_id, "rotate", entry_id=args.entry_id, value=value
                     )
             elif args.vault_command == "grant":
                 result = vault_request(
-                    args.workspace, "grant", entry_id=args.entry_id, workflow_ids=args.workflow
+                    args.workspace_id, "grant", entry_id=args.entry_id, workflow_ids=args.workflow
                 )
             else:
-                result = vault_request(args.workspace, "revoke", entry_id=args.entry_id)
+                result = vault_request(args.workspace_id, "revoke", entry_id=args.entry_id)
             _print_json(result or {"ok": True})
             return 0
         if args.command == "init":

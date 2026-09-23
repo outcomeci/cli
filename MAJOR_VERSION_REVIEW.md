@@ -60,7 +60,7 @@ made — check one off once it's actually fixed and verified, not just filed.
 - [x] `process.py`'s `invoke()` and `invoke_conversation()` duplicate ~50
   lines of per-agent (codex/claude/opencode) credential/env logic — root
   cause of both showing up as complexity outliers (39 and 16).
-- [ ] `cli.py`'s `--workspace` flag means three incompatible things across
+- [x] `cli.py`'s `--workspace` flag means three incompatible things across
   subcommands (local path / cloud workspace ID / fixed container mount)
   with no type-level distinction. Consider renaming the cloud-ID ones to
   `--workspace-id` now, since it's a breaking change either way and this is
