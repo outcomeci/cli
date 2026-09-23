@@ -93,6 +93,17 @@ spec:
   connections: []
 """
 
+EXECUTION_TASK = """{shared}
+
+{instructions}
+
+{environment} Write durable artifacts beneath {outcome_root}. During intake, plan, and tasks, do not modify product source files. Only execute API capabilities listed for this phase, using `oci integration execute <capability> --phase {phase} --input-stdin`; the capability broker owns credentials and authorization. Only use human tools for a hook declared on this current phase with Slack or custom delivery and configured targets. Never discover targets or change hook assignments during execution. Use only readable names; never request or expose provider IDs. Before a wired hook with wait strategy `ask`, ask the requester how long to wait or whether to continue. Deliver it with `oci human request <interaction-id> --run {run_id} --workspace {root}`; add `--continue` only when the requester chose to keep working. Otherwise poll for exactly their bounded duration using `oci human poll <interaction-id> --run {run_id} --wait <seconds> --workspace {root}`. Apply a received response with `oci human accept` and preserve it as outcome context.
+{intake_contract}
+{context_json}"""
+
+EXECUTION_CLI_ADDENDUM = """
+The authoritative CLI for this run is `{runtime_cli}`. Use this absolute command instead of bare `oci` in every tool invocation; login shells may select an older globally installed CLI. For API requests use `{runtime_cli} integration execute <capability> --phase {phase} --input-stdin`. Do not fall back to a global CLI."""
+
 CONSTITUTION = """# OutcomeCI Constitution
 
 ## Principles

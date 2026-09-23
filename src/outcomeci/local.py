@@ -20,6 +20,7 @@ from typing import Any
 from jsonschema import ValidationError
 from jsonschema import validate as validate_json
 
+from . import templates
 from .capability import serve as serve_capability
 from .config import compile_workflow
 from .contracts import FORMAT_CHECKER, ContractError, validate_trigger_payload
@@ -688,9 +689,19 @@ contract above. Use paths relative to this repository.
         else f"This is a filesystem-backed local Standup. Work in {root}. "
         "There is no OutcomeCI Cloud or Digital Twin; inspect the local repository directly."
     )
-    prompt = f"{shared}\n\n{instructions}\n\n{environment} Write durable artifacts beneath {outcome_root}. During intake, plan, and tasks, do not modify product source files. Only execute API capabilities listed for this phase, using `oci integration execute <capability> --phase {phase} --input-stdin`; the capability broker owns credentials and authorization. Only use human tools for a hook declared on this current phase with Slack or custom delivery and configured targets. Never discover targets or change hook assignments during execution. Use only readable names; never request or expose provider IDs. Before a wired hook with wait strategy `ask`, ask the requester how long to wait or whether to continue. Deliver it with `oci human request <interaction-id> --run {state['run_id']} --workspace {root}`; add `--continue` only when the requester chose to keep working. Otherwise poll for exactly their bounded duration using `oci human poll <interaction-id> --run {state['run_id']} --wait <seconds> --workspace {root}`. Apply a received response with `oci human accept` and preserve it as outcome context.\n{intake_contract}\n{json.dumps(context, separators=(',', ':'))}"
+    prompt = templates.EXECUTION_TASK.format(
+        shared=shared,
+        instructions=instructions,
+        environment=environment,
+        outcome_root=outcome_root,
+        phase=phase,
+        run_id=state["run_id"],
+        root=root,
+        intake_contract=intake_contract,
+        context_json=json.dumps(context, separators=(",", ":")),
+    )
     runtime_cli = shlex.join([sys.executable, "-m", "outcomeci.cli"])
-    prompt += f"\nThe authoritative CLI for this run is `{runtime_cli}`. Use this absolute command instead of bare `oci` in every tool invocation; login shells may select an older globally installed CLI. For API requests use `{runtime_cli} integration execute <capability> --phase {phase} --input-stdin`. Do not fall back to a global CLI."
+    prompt += templates.EXECUTION_CLI_ADDENDUM.format(runtime_cli=runtime_cli, phase=phase)
     state.update(
         {
             "status": "running",

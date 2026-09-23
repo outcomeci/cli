@@ -102,7 +102,7 @@ made — check one off once it's actually fixed and verified, not just filed.
   remove ~40 lines and prevent a new option being forgotten in one caller.
 - [ ] `local.py`: `start()` and `trigger()` duplicate the run-bootstrap
   dict + before-gate logic.
-- [ ] `local.py:691`: the single largest, most behaviorally significant
+- [x] `local.py:691`: the single largest, most behaviorally significant
   agent prompt is the only one of five not extracted to `templates.py`,
   breaking the file's own convention.
 - [x] `local.py`: `_validate_required_effects` and `_write_effect_receipts`
