@@ -9,7 +9,11 @@ set -uo pipefail
 
 : "${PROOF_ENVIRONMENT:?PROOF_ENVIRONMENT is required}"
 : "${PROOF_INSTALL_SOURCE:?PROOF_INSTALL_SOURCE is required}"
-: "${OUTCOMECI_DOCS_BASE_URL:?OUTCOMECI_DOCS_BASE_URL is required}"
+: "${PROOF_NAME:?PROOF_NAME is required, e.g. docs-quickstart-v1 or vault-credentials-v1}"
+
+if [ "$PROOF_NAME" = "docs-quickstart-v1" ]; then
+  : "${OUTCOMECI_DOCS_BASE_URL:?OUTCOMECI_DOCS_BASE_URL is required for docs-quickstart-v1}"
+fi
 
 case "$PROOF_INSTALL_SOURCE" in
   codeartifact)
@@ -33,29 +37,31 @@ python -m pip install --user --no-cache-dir --upgrade outcomeci-cli
 export PATH="$HOME/.local/bin:$PATH"
 CLI_VERSION=$(python -m pip show outcomeci-cli | awk '/^Version:/{print $2}')
 
-echo "testing outcomeci-cli ${CLI_VERSION} against ${OUTCOMECI_DOCS_BASE_URL} (${PROOF_ENVIRONMENT}, via ${PROOF_INSTALL_SOURCE})"
+echo "testing outcomeci-cli ${CLI_VERSION} proof=${PROOF_NAME} (${PROOF_ENVIRONMENT}, via ${PROOF_INSTALL_SOURCE})"
 
-oci proof run --name docs-quickstart-v1 --workspace /proof --report /proof/report.json
+oci proof run --name "$PROOF_NAME" --workspace /proof --report /proof/report.json
 EXIT_CODE=$?
 PASSED=$([ "$EXIT_CODE" -eq 0 ] && echo 1 || echo 0)
 
 # The alarm reads this metric, not the task's exit code: EventBridge Scheduler
 # doesn't surface RunTask container exit codes as a CloudWatch metric on its
-# own, so the container reports its own pass/fail.
+# own, so the container reports its own pass/fail. Dimensioned by which proof
+# ran too, since one task now runs one of several proofs, each with its own
+# alarm.
 aws cloudwatch put-metric-data \
   --namespace "OutcomeCI/DocsProof" \
   --metric-name ProofPassed \
-  --dimensions "Environment=${PROOF_ENVIRONMENT}" \
+  --dimensions "Environment=${PROOF_ENVIRONMENT},Proof=${PROOF_NAME}" \
   --value "$PASSED"
 
 # A second, version-dimensioned metric — deliberately separate from the one
 # above, so adding it can never change what the environment-level alarm
 # matches. This is what the release promote workflow checks: it will not
-# promote a version staging hasn't run this proof against and passed.
+# promote a version staging hasn't run every gating proof against and passed.
 aws cloudwatch put-metric-data \
   --namespace "OutcomeCI/DocsProof" \
   --metric-name ProofPassedByVersion \
-  --dimensions "Environment=${PROOF_ENVIRONMENT},Version=${CLI_VERSION}" \
+  --dimensions "Environment=${PROOF_ENVIRONMENT},Proof=${PROOF_NAME},Version=${CLI_VERSION}" \
   --value "$PASSED"
 
 exit "$EXIT_CODE"
