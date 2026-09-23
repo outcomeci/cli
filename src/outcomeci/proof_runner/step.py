@@ -35,6 +35,7 @@ from ..repository import initialize, validate
 from ..security import atomic_write_json
 from . import agents, cloud_vault, credentials, webhook_trigger
 from .docs import fetch_fixtures
+from .mock_http import send_json
 from .simulation import FAULT_EXIT
 
 CONTEXT = Path(".outcomeci/simulation-context.json")
@@ -119,12 +120,9 @@ def _integration(root: Path) -> dict[str, Any]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             observed["authorized"] = self.headers.get("Authorization") == f"Bearer {expected}"
-            body = json.dumps({"accepted": observed["authorized"]}).encode()
-            self.send_response(200 if observed["authorized"] else 401)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            send_json(
+                self, 200 if observed["authorized"] else 401, {"accepted": observed["authorized"]}
+            )
 
         def log_message(self, format: str, *args: object) -> None:
             return

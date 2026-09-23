@@ -140,7 +140,7 @@ made — check one off once it's actually fixed and verified, not just filed.
   roughly halve its complexity.
 - [x] The "evaluate checks → raise → write final_state → return" tail is
   duplicated across all 6 proofs' assertion functions in `step.py`.
-- [ ] Three independent hand-rolled mock-HTTP-server implementations
+- [x] Three independent hand-rolled mock-HTTP-server implementations
   (`step.py`, `credentials.py`, `cloud_vault.py`), two with a byte-identical
   `_send()` helper.
 - [x] `cli.py`'s `--name` choices tuple is manually kept in sync with the

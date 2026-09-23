@@ -30,6 +30,7 @@ from ..integrations import IntegrationExecutor, environment_resolver, local_cred
 from ..local_vault import put as put_vault
 from ..local_vault import resolve as resolve_vault
 from ..process import ExecutionError
+from .mock_http import send_json
 
 CONNECTION_AUTH_TYPES = {
     "api_key",
@@ -258,12 +259,7 @@ def _mock_authorization_server(auth_type: str, expected: Any) -> ThreadingHTTPSe
 
     class Handler(BaseHTTPRequestHandler):
         def _send(self, status: int, body: dict[str, Any]) -> None:
-            encoded = json.dumps(body).encode()
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(encoded)))
-            self.end_headers()
-            self.wfile.write(encoded)
+            send_json(self, status, body)
 
         def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler naming)
             if self.path != "/verify":

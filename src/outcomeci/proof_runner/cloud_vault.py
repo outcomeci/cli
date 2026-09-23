@@ -18,6 +18,7 @@ from typing import Any
 
 from ..cloud import credentials_path, vault_request
 from ..process import ExecutionError
+from .mock_http import send_json
 
 MOCK_PORT = 8767
 STATE_FILE = Path(".outcomeci/mock-cloud-vault.json")
@@ -64,12 +65,7 @@ def mock_session(root: Path) -> dict[str, Any]:
 def _mock_cloud_server(root: Path) -> ThreadingHTTPServer:
     class Handler(BaseHTTPRequestHandler):
         def _send(self, status: int, body: dict[str, Any]) -> None:
-            encoded = json.dumps(body).encode()
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(encoded)))
-            self.end_headers()
-            self.wfile.write(encoded)
+            send_json(self, status, body)
 
         def _body(self) -> dict[str, Any]:
             length = int(self.headers.get("Content-Length", 0))
