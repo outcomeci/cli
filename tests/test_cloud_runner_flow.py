@@ -1,6 +1,7 @@
 import base64
 import json
 import os
+import stat
 import tempfile
 import time
 import unittest
@@ -9,7 +10,10 @@ from unittest import mock
 
 from outcomeci.cloud_runner.client import CoreError
 from outcomeci.cloud_runner.main import (
+    CODEX_FILE_AUTH_CONFIG,
+    _inject_agent_credential,
     _is_usage_limit_error,
+    _write_private_file,
     authorize,
     execute,
     execute_publication,
@@ -1525,6 +1529,38 @@ class FlowTests(unittest.TestCase):
                 )
         self.assertEqual(client.completions, [])
         self.assertEqual(client.failures, [("session-1", "invalid_result", False)])
+
+    def test_write_private_file_is_never_world_or_group_readable(self):
+        with tempfile.TemporaryDirectory() as parent:
+            path = Path(parent) / "secret.txt"
+            _write_private_file(path, "s3cr3t")
+            self.assertEqual(path.read_text(encoding="utf-8"), "s3cr3t")
+            self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_write_private_file_can_overwrite_in_place(self):
+        # Unlike CodexAdapter.hydrate's O_EXCL write, this must tolerate
+        # being called twice in the same root -- a fallback to a different
+        # agent re-injects a credential after this one already wrote here.
+        with tempfile.TemporaryDirectory() as parent:
+            path = Path(parent) / "secret.txt"
+            _write_private_file(path, "first")
+            _write_private_file(path, "second")
+            self.assertEqual(path.read_text(encoding="utf-8"), "second")
+
+    def test_inject_codex_credential_writes_auth_and_file_auth_config(self):
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent)
+            injected = _inject_agent_credential(root, "codex", {"token": "codex-secret"})
+            home = root / ".codex"
+            self.assertEqual(injected, {"CODEX_HOME": str(home)})
+            self.assertEqual(
+                json.loads((home / "auth.json").read_text(encoding="utf-8")),
+                {"token": "codex-secret"},
+            )
+            self.assertEqual(
+                (home / "config.toml").read_text(encoding="utf-8"), CODEX_FILE_AUTH_CONFIG
+            )
+            self.assertEqual(stat.S_IMODE((home / "auth.json").stat().st_mode), 0o600)
 
 
 def publication_claim(agent="codex"):

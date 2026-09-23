@@ -28,6 +28,7 @@ from .models import ContractError, Launch
 from .monitoring import capture_exception, init_exception_monitoring
 from .process import PTY_COLUMNS, PTY_ROWS, run
 from .providers import ADAPTERS
+from .providers.codex import FILE_AUTH_CONFIG as CODEX_FILE_AUTH_CONFIG
 from .redaction import redact_diagnostic
 
 URL = re.compile(r"https://[^\s<>'\"\x00-\x1f\x7f]+")
@@ -107,15 +108,24 @@ def _is_usage_limit_error(error: Exception) -> bool:
     return any(pattern in message for pattern in USAGE_LIMIT_PATTERNS)
 
 
+def _write_private_file(path: Path, content: str) -> None:
+    """Write `content` to `path` with 0600 permissions from creation -- no
+    window at default permissions the way write_text() + a later chmod()
+    has. Overwrites in place (not O_EXCL): unlike CodexAdapter.hydrate,
+    which always gets a fresh root, this can run twice in one root when a
+    workflow falls back to a different agent after this one already wrote
+    its credential here."""
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write(content)
+
+
 def _inject_agent_credential(root: Path, provider: str, credential: Any) -> dict[str, str]:
     if provider == "codex":
         home = root / ".codex"
         home.mkdir(mode=0o700, exist_ok=True)
-        (home / "auth.json").write_text(
-            json.dumps(credential, separators=(",", ":")), encoding="utf-8"
-        )
-        os.chmod(home / "auth.json", 0o600)
-        (home / "config.toml").write_text('cli_auth_credentials_store = "file"\n', encoding="utf-8")
+        _write_private_file(home / "auth.json", json.dumps(credential, separators=(",", ":")))
+        _write_private_file(home / "config.toml", CODEX_FILE_AUTH_CONFIG)
         return {"CODEX_HOME": str(home)}
     if provider == "claude":
         return {"CLAUDE_CODE_OAUTH_TOKEN": str(credential)}
@@ -522,10 +532,7 @@ def authorize(launch: Launch, client: CoreClient) -> int:
         if claim.provider == "codex":
             codex_home = root / "codex"
             codex_home.mkdir(mode=0o700)
-            (codex_home / "config.toml").write_text(
-                'cli_auth_credentials_store = "file"\n', encoding="utf-8"
-            )
-            os.chmod(codex_home / "config.toml", 0o600)
+            _write_private_file(codex_home / "config.toml", CODEX_FILE_AUTH_CONFIG)
             env["CODEX_HOME"] = str(codex_home)
         published = False
         pending = ""

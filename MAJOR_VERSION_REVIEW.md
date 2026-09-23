@@ -82,7 +82,7 @@ made — check one off once it's actually fixed and verified, not just filed.
 
 - [x] Six near-identical "unwrap `detail`, raise `ExecutionError`" blocks in
   `cloud.py` — one helper.
-- [ ] Codex credential-file writing is implemented three times with two
+- [x] Codex credential-file writing is implemented three times with two
   different safety postures (one uses atomic `O_EXCL`, two use plain
   `write_text`+`chmod`) and two different directory names (`.codex` vs
   `codex`) for the same artifact.
@@ -121,7 +121,7 @@ made — check one off once it's actually fixed and verified, not just filed.
 
 ## Slack/vault (slack.py, slack_vault.py, humans.py, local_vault.py, publication.py)
 
-- [ ] `targets()` and `_directory()` in `slack.py` both re-fetch the same
+- [x] `targets()` and `_directory()` in `slack.py` both re-fetch the same
   Slack API data and duplicate the same filter logic — doubles API calls
   per invocation.
 - [x] Path-validation line duplicated verbatim between `local_vault.py` and
