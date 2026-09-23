@@ -725,6 +725,138 @@ def _load_integration_packages(path: Path, spec: dict[str, Any]) -> None:
     spec["integration_packages"] = sorted(normalized, key=lambda item: item["name"])
 
 
+def _validate_custom_connection(item: dict[str, Any], index: int) -> None:
+    """Validate a `provider: custom` connection's transport, operations,
+    auth, and optional request/response contract schemas. Read-only: unlike
+    the `http` provider branch beside this call site, nothing here writes
+    back into `item`."""
+    transport = _mapping(item.get("transport"), f"spec.connections[{index}].transport")
+    transport_type = transport.get("type")
+    if transport_type == "http":
+        if not isinstance(transport.get("endpoint"), str) or not transport["endpoint"].startswith(
+            ("http://", "https://")
+        ):
+            raise ConfigError(f"spec.connections[{index}].transport.endpoint must be an HTTP URL")
+    elif transport_type == "mcp":
+        protocol = transport.get("protocol")
+        if protocol == "streamable_http" and (
+            not isinstance(transport.get("endpoint"), str)
+            or not transport["endpoint"].startswith(("http://", "https://"))
+        ):
+            raise ConfigError(f"spec.connections[{index}].transport.endpoint must be an HTTP URL")
+        if protocol == "stdio" and (
+            not isinstance(transport.get("command"), list)
+            or not transport["command"]
+            or not all(isinstance(part, str) for part in transport["command"])
+        ):
+            raise ConfigError(
+                f"spec.connections[{index}].transport.command must be a non-empty string list"
+            )
+        if protocol not in {"streamable_http", "stdio"}:
+            raise ConfigError(f"spec.connections[{index}].transport.protocol is unsupported")
+    else:
+        raise ConfigError(f"spec.connections[{index}].transport.type is unsupported")
+    operations = _mapping(item.get("operations"), f"spec.connections[{index}].operations")
+    for operation in ("request", "poll"):
+        operation_value = _mapping(
+            operations.get(operation),
+            f"spec.connections[{index}].operations.{operation}",
+        )
+        if transport_type == "http" and not isinstance(operation_value.get("path"), str):
+            raise ConfigError(f"spec.connections[{index}].operations.{operation}.path is required")
+        if transport_type == "mcp" and not isinstance(operation_value.get("tool"), str):
+            raise ConfigError(f"spec.connections[{index}].operations.{operation}.tool is required")
+    auth = item.get("auth", {})
+    if auth:
+        auth = _mapping(auth, f"spec.connections[{index}].auth")
+        if set(auth) - {"env", "header", "scheme"} or not isinstance(auth.get("env"), str):
+            raise ConfigError(
+                f"spec.connections[{index}].auth must reference an environment variable"
+            )
+    contract = item.get("contract", {})
+    if contract:
+        contract = _mapping(contract, f"spec.connections[{index}].contract")
+        if set(contract) - {"request", "poll"}:
+            raise ConfigError(f"spec.connections[{index}].contract supports only request and poll")
+        for operation, operation_contract in contract.items():
+            operation_contract = _mapping(
+                operation_contract,
+                f"spec.connections[{index}].contract.{operation}",
+            )
+            if set(operation_contract) - {"input", "output"}:
+                raise ConfigError(
+                    f"spec.connections[{index}].contract.{operation} supports only input and output"
+                )
+            for direction, schema in operation_contract.items():
+                if not isinstance(schema, dict):
+                    raise ConfigError(
+                        f"spec.connections[{index}].contract.{operation}.{direction} must be an inline JSON Schema"
+                    )
+                try:
+                    jsonschema.validators.validator_for(schema).check_schema(schema)
+                except jsonschema.SchemaError as exc:
+                    raise ConfigError(
+                        f"spec.connections[{index}].contract.{operation}.{direction} is not a valid JSON Schema: {exc.message}"
+                    ) from exc
+
+
+def _validate_phase_graph(
+    normalized_phases: dict[str, Any],
+    phases: dict[str, Any],
+    triggers: dict[str, Any],
+    outputs: dict[tuple[str, str], dict[str, Any]],
+) -> None:
+    """Cross-phase validation once every phase's own contract is already
+    normalized: dependency edges point at real, non-self phases; every
+    input's `from` resolves to a declared producer that's a direct
+    dependency (or a known trigger/runtime/context source); the same for
+    reaction hooks' output sources."""
+    for phase_name, phase in normalized_phases.items():
+        for dependency in phase["needs"]:
+            if dependency == phase_name:
+                raise ConfigError(f"phase {phase_name} cannot depend on itself")
+            if dependency not in phases:
+                raise ConfigError(f"phase {phase_name} needs unknown phase {dependency}")
+        for item in phase["inputs"]:
+            source = item["from"]
+            if source.startswith(("runtime.", "context.")):
+                continue
+            if source.startswith("trigger."):
+                trigger_name = source.removeprefix("trigger.")
+                if trigger_name not in triggers:
+                    raise ConfigError(
+                        f"input {phase_name}.{item['name']} references unknown trigger {trigger_name}"
+                    )
+                continue
+            match = re.fullmatch(
+                r"([a-z][a-z0-9_-]{0,62})\.outputs\.([a-z][a-z0-9_-]{0,62})", source
+            )
+            if not match or (match.group(1), match.group(2)) not in outputs:
+                raise ConfigError(
+                    f"input {phase_name}.{item['name']} has no declared producer: {source}"
+                )
+            if match.group(1) not in phase["needs"]:
+                raise ConfigError(
+                    f"input {phase_name}.{item['name']} must come from a direct dependency"
+                )
+        for timing_group in phase["humans"].values():
+            for hook in timing_group:
+                if hook["delivery"].get("type") != "reaction":
+                    continue
+                source = hook["delivery"]["source"]
+                match = re.fullmatch(
+                    r"([a-z][a-z0-9_-]{0,62})\.outputs\.([a-z][a-z0-9_-]{0,62})", source
+                )
+                if not match or (match.group(1), match.group(2)) not in outputs:
+                    raise ConfigError(
+                        f"phase {phase_name} human hook {hook['id']} references unknown output: {source}"
+                    )
+                if match.group(1) not in phase["needs"]:
+                    raise ConfigError(
+                        f"phase {phase_name} human hook {hook['id']} must reference a direct dependency's output"
+                    )
+
+
 def _load_v1alpha1(path: Path) -> dict[str, Any]:
     try:
         root = _mapping(yaml.safe_load(path.read_text(encoding="utf-8")), "document")
@@ -867,50 +999,7 @@ def _load_v1alpha1(path: Path) -> dict[str, Any]:
             "required_capabilities": required_capabilities,
         }
 
-    for phase_name, phase in normalized_phases.items():
-        for dependency in phase["needs"]:
-            if dependency == phase_name:
-                raise ConfigError(f"phase {phase_name} cannot depend on itself")
-            if dependency not in phases:
-                raise ConfigError(f"phase {phase_name} needs unknown phase {dependency}")
-        for item in phase["inputs"]:
-            source = item["from"]
-            if source.startswith(("runtime.", "context.")):
-                continue
-            if source.startswith("trigger."):
-                trigger_name = source.removeprefix("trigger.")
-                if trigger_name not in triggers:
-                    raise ConfigError(
-                        f"input {phase_name}.{item['name']} references unknown trigger {trigger_name}"
-                    )
-                continue
-            match = re.fullmatch(
-                r"([a-z][a-z0-9_-]{0,62})\.outputs\.([a-z][a-z0-9_-]{0,62})", source
-            )
-            if not match or (match.group(1), match.group(2)) not in outputs:
-                raise ConfigError(
-                    f"input {phase_name}.{item['name']} has no declared producer: {source}"
-                )
-            if match.group(1) not in phase["needs"]:
-                raise ConfigError(
-                    f"input {phase_name}.{item['name']} must come from a direct dependency"
-                )
-        for timing_group in phase["humans"].values():
-            for hook in timing_group:
-                if hook["delivery"].get("type") != "reaction":
-                    continue
-                source = hook["delivery"]["source"]
-                match = re.fullmatch(
-                    r"([a-z][a-z0-9_-]{0,62})\.outputs\.([a-z][a-z0-9_-]{0,62})", source
-                )
-                if not match or (match.group(1), match.group(2)) not in outputs:
-                    raise ConfigError(
-                        f"phase {phase_name} human hook {hook['id']} references unknown output: {source}"
-                    )
-                if match.group(1) not in phase["needs"]:
-                    raise ConfigError(
-                        f"phase {phase_name} human hook {hook['id']} must reference a direct dependency's output"
-                    )
+    _validate_phase_graph(normalized_phases, phases, triggers, outputs)
 
     indegree = {name: len(value["needs"]) for name, value in normalized_phases.items()}
     remaining = set(normalized_phases)
@@ -952,86 +1041,7 @@ def _load_v1alpha1(path: Path) -> dict[str, Any]:
                 )
             item["allow_private_network"] = allow_private
         if provider == "custom":
-            transport = _mapping(item.get("transport"), f"spec.connections[{index}].transport")
-            transport_type = transport.get("type")
-            if transport_type == "http":
-                if not isinstance(transport.get("endpoint"), str) or not transport[
-                    "endpoint"
-                ].startswith(("http://", "https://")):
-                    raise ConfigError(
-                        f"spec.connections[{index}].transport.endpoint must be an HTTP URL"
-                    )
-            elif transport_type == "mcp":
-                protocol = transport.get("protocol")
-                if protocol == "streamable_http" and (
-                    not isinstance(transport.get("endpoint"), str)
-                    or not transport["endpoint"].startswith(("http://", "https://"))
-                ):
-                    raise ConfigError(
-                        f"spec.connections[{index}].transport.endpoint must be an HTTP URL"
-                    )
-                if protocol == "stdio" and (
-                    not isinstance(transport.get("command"), list)
-                    or not transport["command"]
-                    or not all(isinstance(part, str) for part in transport["command"])
-                ):
-                    raise ConfigError(
-                        f"spec.connections[{index}].transport.command must be a non-empty string list"
-                    )
-                if protocol not in {"streamable_http", "stdio"}:
-                    raise ConfigError(
-                        f"spec.connections[{index}].transport.protocol is unsupported"
-                    )
-            else:
-                raise ConfigError(f"spec.connections[{index}].transport.type is unsupported")
-            operations = _mapping(item.get("operations"), f"spec.connections[{index}].operations")
-            for operation in ("request", "poll"):
-                operation_value = _mapping(
-                    operations.get(operation),
-                    f"spec.connections[{index}].operations.{operation}",
-                )
-                if transport_type == "http" and not isinstance(operation_value.get("path"), str):
-                    raise ConfigError(
-                        f"spec.connections[{index}].operations.{operation}.path is required"
-                    )
-                if transport_type == "mcp" and not isinstance(operation_value.get("tool"), str):
-                    raise ConfigError(
-                        f"spec.connections[{index}].operations.{operation}.tool is required"
-                    )
-            auth = item.get("auth", {})
-            if auth:
-                auth = _mapping(auth, f"spec.connections[{index}].auth")
-                if set(auth) - {"env", "header", "scheme"} or not isinstance(auth.get("env"), str):
-                    raise ConfigError(
-                        f"spec.connections[{index}].auth must reference an environment variable"
-                    )
-            contract = item.get("contract", {})
-            if contract:
-                contract = _mapping(contract, f"spec.connections[{index}].contract")
-                if set(contract) - {"request", "poll"}:
-                    raise ConfigError(
-                        f"spec.connections[{index}].contract supports only request and poll"
-                    )
-                for operation, operation_contract in contract.items():
-                    operation_contract = _mapping(
-                        operation_contract,
-                        f"spec.connections[{index}].contract.{operation}",
-                    )
-                    if set(operation_contract) - {"input", "output"}:
-                        raise ConfigError(
-                            f"spec.connections[{index}].contract.{operation} supports only input and output"
-                        )
-                    for direction, schema in operation_contract.items():
-                        if not isinstance(schema, dict):
-                            raise ConfigError(
-                                f"spec.connections[{index}].contract.{operation}.{direction} must be an inline JSON Schema"
-                            )
-                        try:
-                            jsonschema.validators.validator_for(schema).check_schema(schema)
-                        except jsonschema.SchemaError as exc:
-                            raise ConfigError(
-                                f"spec.connections[{index}].contract.{operation}.{direction} is not a valid JSON Schema: {exc.message}"
-                            ) from exc
+            _validate_custom_connection(item, index)
     normalized_integrations = _integrations(spec, {item["ref"]: item for item in connections})
     spec["integrations"] = normalized_integrations
     available_capabilities = (

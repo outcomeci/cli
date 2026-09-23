@@ -111,7 +111,7 @@ made — check one off once it's actually fixed and verified, not just filed.
 - [x] `config.py`: a 14-times-repeated non-empty-string guard with
   inconsistent error wording has no shared helper, unlike the file's
   existing `_mapping()` pattern.
-- [ ] `config.py`: `_load_v1alpha1` (complexity 81) inlines two ~80-line
+- [x] `config.py`: `_load_v1alpha1` (complexity 81 -> 47) inlined two ~80-line
   blocks instead of following its own file's helper-extraction convention
   used everywhere else in it.
 - [x] `repository.py`: the two agent-skill mirror paths (`.agents/skills/...`,
