@@ -231,6 +231,45 @@ def test_claude_conversation_resumes_with_read_tools(monkeypatch, tmp_path: Path
     assert "Read,Grep,Glob" in calls[0][0]
 
 
+def test_claude_requires_injected_auth(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    with pytest.raises(process.ExecutionError, match="ANTHROPIC_API_KEY"):
+        process.invoke("claude", None, "prompt", tmp_path, 10)
+
+
+def test_opencode_requires_injected_auth(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    with pytest.raises(process.ExecutionError, match="OPENROUTER_API_KEY"):
+        process.invoke("opencode", "openrouter/anthropic/claude-sonnet-4", "prompt", tmp_path, 10)
+
+
+def test_opencode_requires_an_openrouter_prefixed_model(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-secret")
+    with pytest.raises(process.ExecutionError, match="openrouter/<model>"):
+        process.invoke("opencode", "claude-sonnet-4", "prompt", tmp_path, 10)
+
+
+def test_unsupported_agent_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(process.ExecutionError, match="unsupported agent"):
+        process.invoke("gemini", None, "prompt", tmp_path, 10)
+
+
+def test_opencode_conversation_requires_injected_auth(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    with pytest.raises(process.ExecutionError, match="OPENROUTER_API_KEY"):
+        process.invoke_conversation(
+            "opencode", None, "openrouter/anthropic/claude-sonnet-4", "question", tmp_path, 10
+        )
+
+
+def test_claude_conversation_requires_injected_auth(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    with pytest.raises(process.ExecutionError, match="ANTHROPIC_API_KEY"):
+        process.invoke_conversation("claude", None, None, "question", tmp_path, 10)
+
+
 def test_codex_conversation_falls_back_when_session_has_active_writer(
     monkeypatch, tmp_path: Path
 ) -> None:

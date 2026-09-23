@@ -48,7 +48,7 @@ made — check one off once it's actually fixed and verified, not just filed.
 
 ## Cross-cutting: one atomic-write helper, not nine
 
-- [ ] `tmp = path.with_suffix(".tmp"); tmp.write_text(...); tmp.replace(path)`
+- [x] `tmp = path.with_suffix(".tmp"); tmp.write_text(...); tmp.replace(path)`
   is hand-rolled 9+ times: `local.py:573`, `worker.py:16`, `slack.py:427`,
   `humans.py:60,134,215`, `local_vault.py:70`, `proof_runner/simulation.py:194`,
   `proof_runner/step.py:52`. This is the durable-state write path for run
