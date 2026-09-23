@@ -74,7 +74,7 @@ made — check one off once it's actually fixed and verified, not just filed.
   socket exchange.
 - [x] `custom.py`'s two MCP transports hardcode the same `initialize`
   payload separately — risk of protocol-version drift between them.
-- [ ] Inconsistent eager vs. lazy imports in `cli.py` (`tunnels`,
+- [x] Inconsistent eager vs. lazy imports in `cli.py` (`tunnels`,
   `webhooks.listen`, `debug.run`, `slack_vault.sync_credentials` lazy,
   everything else eager) with no documented reason.
 
@@ -114,9 +114,9 @@ made — check one off once it's actually fixed and verified, not just filed.
 - [ ] `config.py`: `_load_v1alpha1` (complexity 81) inlines two ~80-line
   blocks instead of following its own file's helper-extraction convention
   used everywhere else in it.
-- [ ] `repository.py`: the two agent-skill mirror paths (`.agents/skills/...`,
+- [x] `repository.py`: the two agent-skill mirror paths (`.agents/skills/...`,
   `.claude/skills/...`) are hardcoded independently in two functions.
-- [ ] `config.py:1208`: a dangling orphan comment left over from a prior
+- [x] `config.py:1208`: a dangling orphan comment left over from a prior
   edit (confirmed via `git blame`) — delete or rewrite.
 
 ## Slack/vault (slack.py, slack_vault.py, humans.py, local_vault.py, publication.py)
@@ -124,7 +124,7 @@ made — check one off once it's actually fixed and verified, not just filed.
 - [ ] `targets()` and `_directory()` in `slack.py` both re-fetch the same
   Slack API data and duplicate the same filter logic — doubles API calls
   per invocation.
-- [ ] Path-validation line duplicated verbatim between `local_vault.py` and
+- [x] Path-validation line duplicated verbatim between `local_vault.py` and
   `slack_vault.py`.
 - [x] Architecture question resolved: `slack_vault.py` is not redundant
   with `local_vault.py` — it correctly composes (`local_vault.initialize`/
@@ -143,7 +143,7 @@ made — check one off once it's actually fixed and verified, not just filed.
 - [ ] Three independent hand-rolled mock-HTTP-server implementations
   (`step.py`, `credentials.py`, `cloud_vault.py`), two with a byte-identical
   `_send()` helper.
-- [ ] `cli.py`'s `--name` choices tuple is manually kept in sync with the
+- [x] `cli.py`'s `--name` choices tuple is manually kept in sync with the
   `proofs/*.proof.yml` directory rather than derived from it (minor).
 - [x] Checked and clean: no leftover duplication from the PR #64/#65/#67
   consolidation in `tests/test_proof_runner.py`; all 6 proof YAMLs are

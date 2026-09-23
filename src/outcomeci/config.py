@@ -1205,7 +1205,6 @@ def compile_workflow(path: Path) -> dict[str, Any]:
     context_files = (
         _filesystem_context(root, context) if context.get("provider") == "filesystem" else []
     )
-    # to the role-neutral orchestrator key.
     reviewers = {}
     for name, integration in spec.get("integrations", {}).items():
         if integration.get("policy"):

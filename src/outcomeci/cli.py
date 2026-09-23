@@ -12,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-from . import __version__
+from . import __version__, debug, slack_vault, tunnels, webhooks
 from .capability import invoke as invoke_capability
 from .capability import invoke_integration
 from .cloud import auth_status as cloud_auth_status
@@ -54,7 +54,7 @@ from .locking import verify_lock, write_lock
 from .mcp_server import serve as serve_mcp
 from .outcome import run as run_outcome
 from .process import ExecutionError
-from .proof_runner import bundled_definition
+from .proof_runner import bundled_definition, bundled_proof_names
 from .proof_runner import run as run_simulation
 from .publication import prepare_publication
 from .repository import RepositoryError, initialize, update, validate
@@ -279,17 +279,7 @@ def parser() -> argparse.ArgumentParser:
     proof_run = proof_commands.add_parser("run")
     proof_source = proof_run.add_mutually_exclusive_group()
     proof_source.add_argument("--definition", type=Path)
-    proof_source.add_argument(
-        "--name",
-        choices=(
-            "local-first-v1",
-            "email-trigger-v1",
-            "docs-quickstart-v1",
-            "vault-credentials-v1",
-            "agent-driven-v1",
-            "webhook-trigger-v1",
-        ),
-    )
+    proof_source.add_argument("--name", choices=bundled_proof_names())
     proof_run.add_argument("--workspace", type=Path, default=Path("/proof"))
     proof_run.add_argument("--report", type=Path)
     outcome = commands.add_parser("outcome")
@@ -496,8 +486,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         if args.command == "tunnel":
-            from . import tunnels
-
             if args.tunnel_command == "start":
                 tunnels.start(
                     args.workspace, args.target, ttl_seconds=args.ttl_seconds, public=args.public
@@ -562,11 +550,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _print_json(result, sort_keys=True)
                 return 0
             if args.workflow_command == "listen":
-                from .webhooks import listen
-
                 root = args.dir.resolve()
                 config = (root / args.config).resolve()
-                listen(
+                webhooks.listen(
                     args.workspace,
                     args.workflow,
                     root,
@@ -576,11 +562,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 return 0
             if args.workflow_command == "debug":
-                from .debug import run as run_debug
-
                 root = args.dir.resolve()
                 config = (root / args.config).resolve()
-                result = run_debug(
+                result = debug.run(
                     root,
                     config,
                     args.workspace,
@@ -1029,10 +1013,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     sort_keys=True,
                 )
             elif args.slack_command == "sync-credentials":
-                from .slack_vault import sync_credentials
-
                 _print_json(
-                    sync_credentials(
+                    slack_vault.sync_credentials(
                         args.workspace,
                         local=args.local,
                         cloud_workspace=args.cloud,

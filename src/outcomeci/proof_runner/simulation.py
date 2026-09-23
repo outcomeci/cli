@@ -108,6 +108,16 @@ def bundled_definition(name: str = "local-first-v1") -> Path:
     return Path(str(files("outcomeci.proof_runner").joinpath(f"proofs/{name}.proof.yml")))
 
 
+def bundled_proof_names() -> tuple[str, ...]:
+    """Every proof shipped in proofs/, derived from the directory instead of
+    kept in sync by hand wherever a proof name needs to be listed (e.g.
+    cli.py's `oci proof run --name` choices)."""
+    proofs = Path(str(files("outcomeci.proof_runner").joinpath("proofs")))
+    return tuple(
+        sorted(path.name.removesuffix(".proof.yml") for path in proofs.glob("*.proof.yml"))
+    )
+
+
 def load_definition(path: Path) -> dict[str, Any]:
     try:
         value = yaml.safe_load(path.read_text(encoding="utf-8"))

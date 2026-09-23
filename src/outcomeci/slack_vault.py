@@ -12,7 +12,7 @@ from typing import Any
 import httpx
 
 from .cloud import vault_request
-from .local_vault import VAULT_FILE, initialize, put
+from .local_vault import VAULT_FILE, initialize, is_valid_vault_path, put
 from .slack import PROJECT_RELATIVE, SlackError, _require_slack
 
 
@@ -69,7 +69,7 @@ def sync_credentials(
 ) -> dict[str, Any]:
     if local == bool(cloud_workspace):
         raise SlackError("Select exactly one destination: --local or --cloud WORKSPACE_ID")
-    if not path or path.startswith("/") or ".." in Path(path).parts:
+    if not is_valid_vault_path(path):
         raise SlackError("Vault path must be a relative logical path")
     if not local and vault_workspace is not None:
         raise SlackError("--vault-workspace is only valid with --local")

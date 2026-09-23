@@ -112,8 +112,12 @@ def initialize(root: Path) -> dict[str, Any]:
     return {"initialized": True, "vault": str(path), "key_file": str(key_path)}
 
 
+def is_valid_vault_path(path: str) -> bool:
+    return bool(path) and not path.startswith("/") and ".." not in Path(path).parts
+
+
 def put(root: Path, path: str, value: str) -> dict[str, Any]:
-    if not path or path.startswith("/") or ".." in Path(path).parts:
+    if not is_valid_vault_path(path):
         raise ExecutionError("Vault path must be a relative logical path")
     envelope, key, payload = _load(root)
     existing = payload["entries"].get(path, {})
