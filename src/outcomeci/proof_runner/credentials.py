@@ -117,6 +117,17 @@ def generate_jwt_credential(
         "subject": str(request.get("subject", request["issuer"])),
         "algorithm": "RS256",
     }
+    # Unlike every other credential type here, this secret is code-generated
+    # rather than operator-supplied, so it never carries the
+    # oci_vault_proof_ marker credentials.never_exposed otherwise greps for.
+    # Record one unbroken base64 line of the key body (workspace-local
+    # state, never written to the ledger/report) so that check can fall
+    # back to an exact-match scan for this credential too. A single line
+    # with no newlines survives JSON-encoding unchanged (unlike the full,
+    # multi-line PEM), so the scan still catches a leak that went through
+    # json.dumps on its way into the ledger.
+    key_body_line = private_pem.splitlines()[1]
+    context.setdefault("generated_secrets", []).append(key_body_line)
     return put_credential(root, context, {"path": path, "value": value})
 
 

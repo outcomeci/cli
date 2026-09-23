@@ -214,7 +214,8 @@ def _vault_credentials_assertions(
         "credential.env_reference_resolves": context.get("env_credential_matches", False),
         "vault.rotation_takes_effect": rotation_checks.get("bearer", False)
         and rotation_checks.get("oauth2_client_credentials", False),
-        "credentials.never_exposed": "oci_vault_proof_" not in visible,
+        "credentials.never_exposed": "oci_vault_proof_" not in visible
+        and not any(secret in visible for secret in context.get("generated_secrets", [])),
         "cloud_vault.rotation_takes_effect": context.get("cloud_rotation_verified", False),
         "cloud_vault.grants_survive_rotation": context.get("cloud_grants_survive", False),
         "cloud_session.expired_token_auto_refreshes": context.get("cloud_session_refreshed", False),
