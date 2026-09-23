@@ -287,6 +287,7 @@ def parser() -> argparse.ArgumentParser:
             "docs-quickstart-v1",
             "vault-credentials-v1",
             "agent-driven-v1",
+            "webhook-trigger-v1",
         ),
     )
     proof_run.add_argument("--workspace", type=Path, default=Path("/proof"))
