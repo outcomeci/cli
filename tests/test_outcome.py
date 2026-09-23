@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import httpx
 import pytest
 
 from outcomeci import outcome
@@ -9,6 +10,7 @@ from outcomeci.outcome import (
     _expected,
     _managed_artifacts,
     _managed_state,
+    _open_pull_request,
     _publish_implementation,
     _transcripts,
     _validate_claim_phase,
@@ -195,3 +197,50 @@ def test_implementation_publication_is_runner_owned(tmp_path: Path, monkeypatch)
             "pull_request_url": "https://github.com/outcomeci/repo/pull/12",
         }
     ]
+
+
+def _fake_stream(handler):
+    def stream(method, url, *, json=None, headers=None, timeout=None, follow_redirects=None):
+        return httpx.Client(transport=httpx.MockTransport(handler)).stream(
+            method, url, json=json, headers=headers
+        )
+
+    return stream
+
+
+def test_open_pull_request_sends_the_bearer_token_and_returns_the_pr(monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-token")
+    captured = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["url"] = str(request.url)
+        captured["authorization"] = request.headers["authorization"]
+        return httpx.Response(
+            201, json={"number": 42, "html_url": "https://github.com/outcomeci/repo/pull/42"}
+        )
+
+    monkeypatch.setattr(outcome.httpx, "stream", _fake_stream(handler))
+
+    number, url = _open_pull_request("outcomeci/repo", "main", "feature", "Ship it", "Body")
+
+    assert (number, url) == (42, "https://github.com/outcomeci/repo/pull/42")
+    assert captured["authorization"] == "Bearer gh-token"
+    assert captured["url"] == "https://api.github.com/repos/outcomeci/repo/pulls"
+
+
+def test_open_pull_request_raises_on_an_http_error_status(monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-token")
+    handler = lambda request: httpx.Response(422, json={"message": "Validation failed"})  # noqa: E731
+    monkeypatch.setattr(outcome.httpx, "stream", _fake_stream(handler))
+
+    with pytest.raises(ExecutionError, match="could not create a pull request"):
+        _open_pull_request("outcomeci/repo", "main", "feature", "Ship it", "Body")
+
+
+def test_open_pull_request_rejects_a_malformed_success_payload(monkeypatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-token")
+    handler = lambda request: httpx.Response(201, json={"unexpected": True})  # noqa: E731
+    monkeypatch.setattr(outcome.httpx, "stream", _fake_stream(handler))
+
+    with pytest.raises(ExecutionError, match="invalid pull request"):
+        _open_pull_request("outcomeci/repo", "main", "feature", "Ship it", "Body")

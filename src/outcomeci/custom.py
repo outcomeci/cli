@@ -7,12 +7,11 @@ import os
 import select
 import subprocess
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Any
 
+import httpx
 import jsonschema
 import yaml
 
@@ -109,16 +108,20 @@ def _decode(body: bytes, content_type: str = "") -> dict[str, Any]:
 def _post(
     url: str, payload: dict[str, Any], headers: dict[str, str]
 ) -> tuple[dict[str, Any], dict[str, str]]:
-    request = urllib.request.Request(
-        url, json.dumps(payload).encode(), headers=headers, method="POST"
-    )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return _decode(response.read(), response.headers.get("Content-Type", "")), dict(
-                response.headers
-            )
-    except (urllib.error.URLError, TimeoutError) as exc:
+        response = httpx.post(
+            url,
+            content=json.dumps(payload).encode(),
+            headers=headers,
+            timeout=30,
+            follow_redirects=False,
+        )
+    except httpx.HTTPError as exc:
         raise ExecutionError(f"custom human transport request failed: {exc}", True) from exc
+    return (
+        _decode(response.content, response.headers.get("Content-Type", "")),
+        dict(response.headers),
+    )
 
 
 def _http(connection: dict[str, Any], operation: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -134,12 +137,13 @@ def _http(connection: dict[str, Any], operation: str, payload: dict[str, Any]) -
     data = json.dumps(payload).encode() if method != "GET" else None
     if method == "GET" and payload:
         url += ("&" if "?" in url else "?") + urllib.parse.urlencode(payload)
-    request = urllib.request.Request(url, data, headers=headers, method=method)
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return _decode(response.read(), response.headers.get("Content-Type", ""))
-    except (urllib.error.URLError, TimeoutError) as exc:
+        response = httpx.request(
+            method, url, content=data, headers=headers, timeout=30, follow_redirects=False
+        )
+    except httpx.HTTPError as exc:
         raise ExecutionError(f"custom human transport request failed: {exc}", True) from exc
+    return _decode(response.content, response.headers.get("Content-Type", ""))
 
 
 def _mcp_result(value: dict[str, Any]) -> dict[str, Any]:

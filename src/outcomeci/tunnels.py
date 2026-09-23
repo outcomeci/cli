@@ -12,10 +12,11 @@ import ssl
 import subprocess
 import tarfile
 import tempfile
-import urllib.request
 from pathlib import Path
 from urllib.parse import urlparse
 from uuid import UUID
+
+import httpx
 
 from .cloud import _authorized_request, credentials_path
 from .process import ExecutionError, terminate_gracefully
@@ -96,14 +97,24 @@ def client_binary() -> Path:
     if archive.exists():
         data = archive.read_bytes()
     else:
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        url = (
+            f"https://github.com/fatedier/frp/releases/download/v{VERSION}/"
+            f"frp_{VERSION}_{system}_{arch}.tar.gz"
+        )
         try:
-            with opener.open(
-                f"https://github.com/fatedier/frp/releases/download/v{VERSION}/frp_{VERSION}_{system}_{arch}.tar.gz",
-                timeout=60,
+            # trust_env=False: ignore HTTP_PROXY/HTTPS_PROXY so an
+            # env-configured proxy can never intercept this pinned-checksum
+            # binary download.
+            with httpx.stream(
+                "GET", url, timeout=60, follow_redirects=True, trust_env=False
             ) as response:
-                data = response.read(64 * 1024 * 1024 + 1)
-        except OSError as exc:
+                raw = bytearray()
+                for chunk in response.iter_bytes():
+                    raw.extend(chunk)
+                    if len(raw) > 64 * 1024 * 1024:
+                        break
+                data = bytes(raw)
+        except httpx.HTTPError as exc:
             raise ExecutionError("Could not download the pinned frpc release") from exc
     if len(data) > 64 * 1024 * 1024 or hashlib.sha256(data).hexdigest() != digest:
         raise ExecutionError("frpc release checksum does not match")

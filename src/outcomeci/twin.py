@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import json
 import os
-import urllib.error
-import urllib.request
 from typing import Any
+
+import httpx
 
 
 class TwinError(RuntimeError):
@@ -14,7 +14,12 @@ class TwinError(RuntimeError):
 
 
 def search(
-    query: str, repository_ids: list[str], limit: int, component_limit: int
+    query: str,
+    repository_ids: list[str],
+    limit: int,
+    component_limit: int,
+    *,
+    transport: httpx.BaseTransport | None = None,
 ) -> dict[str, Any]:
     api_url = os.environ.get("OUTCOMECI_API_URL", "").rstrip("/")
     job_id = os.environ.get("OUTCOMECI_JOB_ID", "")
@@ -35,18 +40,27 @@ def search(
         "component_limit": component_limit,
         "stale_after_hours": 24,
     }
-    request = urllib.request.Request(
-        f"{api_url}/v1/internal/outcome-jobs/{job_id}/ontology/search",
-        data=json.dumps(body, separators=(",", ":")).encode(),
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
-        method="POST",
-    )
+    url = f"{api_url}/v1/internal/outcome-jobs/{job_id}/ontology/search"
+    headers = {"Authorization": f"Bearer {token}"}
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            result = json.loads(response.read(1_048_577))
-    except urllib.error.HTTPError as exc:
-        raise TwinError(f"Digital Twin returned HTTP {exc.code}") from exc
-    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        with (
+            httpx.Client(transport=transport, timeout=30, follow_redirects=True) as client,
+            client.stream("POST", url, json=body, headers=headers) as response,
+        ):
+            if response.status_code >= 400:
+                raise TwinError(f"Digital Twin returned HTTP {response.status_code}")
+            # Bounded read, not response.json(): an unbounded body from a
+            # broken or malicious endpoint must not be pulled fully into
+            # memory before we even look at it.
+            raw = bytearray()
+            for chunk in response.iter_bytes():
+                raw.extend(chunk)
+                if len(raw) > 1_048_576:
+                    break
+            result = json.loads(bytes(raw))
+    except httpx.HTTPError as exc:
+        raise TwinError("Digital Twin search failed") from exc
+    except json.JSONDecodeError as exc:
         raise TwinError("Digital Twin search failed") from exc
     if not isinstance(result, dict):
         raise TwinError("Digital Twin returned an invalid response")

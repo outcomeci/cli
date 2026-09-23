@@ -7,12 +7,11 @@ import json
 import os
 import stat
 import time
-import urllib.error
-import urllib.request
 import webbrowser
 from pathlib import Path
 from typing import Any
 
+import httpx
 import yaml
 
 from .config import compile_workflow
@@ -45,28 +44,23 @@ def _request(
     token: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     headers = {"Accept": "application/json"}
-    data = None
-    if body is not None:
-        headers["Content-Type"] = "application/json"
-        data = json.dumps(body).encode()
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(
-        f"{api_url.rstrip('/')}/v1{path}", data=data, headers=headers, method=method
-    )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            raw = response.read()
-            return response.status, json.loads(raw) if raw else {}
-    except urllib.error.HTTPError as exc:
-        raw = exc.read()
-        try:
-            value = json.loads(raw) if raw else {}
-        except json.JSONDecodeError:
-            value = {}
-        return exc.code, value
-    except OSError as exc:
+        response = httpx.request(
+            method,
+            f"{api_url.rstrip('/')}/v1{path}",
+            json=body,
+            headers=headers,
+            timeout=30,
+            follow_redirects=True,
+        )
+    except httpx.HTTPError as exc:
         raise ExecutionError(f"could not reach OutcomeCI Cloud: {exc}") from exc
+    try:
+        return response.status_code, json.loads(response.content) if response.content else {}
+    except json.JSONDecodeError:
+        return response.status_code, {}
 
 
 def _write_credentials(value: dict[str, Any]) -> None:

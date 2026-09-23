@@ -1,10 +1,9 @@
-import io
 import json
 import tempfile
 import unittest
-import urllib.error
 from pathlib import Path
-from unittest import mock
+
+import httpx
 
 from outcomeci.cloud_runner.client import CoreClient, CoreError
 from outcomeci.cloud_runner.main import classify_failure, safe_env, safe_verification
@@ -83,94 +82,127 @@ class ContractTests(unittest.TestCase):
         with self.assertRaisesRegex(ContractError, "outcome binding"):
             ExecutionClaim.parse(raw)
 
+    def test_client_posts_json_and_returns_the_parsed_body(self):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured["url"] = str(request.url)
+            captured["authorization"] = request.headers["authorization"]
+            return httpx.Response(200, json={"lease_token": "lease-1"})
+
+        client = CoreClient(
+            "https://api.outcomeci.com",
+            "job",
+            "bootstrap",
+            "workflow",
+            transport=httpx.MockTransport(handler),
+        )
+        result = client.claim_workflow()
+        self.assertEqual(result, {"lease_token": "lease-1"})
+        self.assertEqual(captured["authorization"], "Bearer bootstrap")
+        self.assertTrue(captured["url"].endswith("/v1/internal/workflow-invocations/job/claim"))
+
+    def test_client_rejects_an_oversized_response(self):
+        oversized = json.dumps({"padding": "x" * (1024 * 1024)})
+        transport = httpx.MockTransport(lambda request: httpx.Response(200, text=oversized))
+        client = CoreClient(
+            "https://api.outcomeci.com", "job", "bootstrap", "outcome", transport=transport
+        )
+        with self.assertRaises(CoreError) as raised:
+            client.claim_workflow()
+        self.assertEqual(raised.exception.category, "invalid_core_response")
+
+    def test_client_treats_401_as_claim_rejected(self):
+        transport = httpx.MockTransport(lambda request: httpx.Response(401, text="unauthorized"))
+        client = CoreClient(
+            "https://api.outcomeci.com", "job", "bootstrap", "outcome", transport=transport
+        )
+        with self.assertRaises(CoreError) as raised:
+            client.claim_workflow()
+        self.assertEqual(raised.exception.category, "claim_rejected")
+
+    def test_client_treats_a_network_failure_as_retryable(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("refused", request=request)
+
+        client = CoreClient(
+            "https://api.outcomeci.com",
+            "job",
+            "bootstrap",
+            "outcome",
+            transport=httpx.MockTransport(handler),
+        )
+        with self.assertRaises(CoreError) as raised:
+            client.claim_workflow()
+        self.assertEqual(raised.exception.category, "core_unavailable")
+        self.assertTrue(raised.exception.retryable)
+
     def test_client_uses_outcome_job_endpoint_and_classifies_conflicts(self):
-        client = CoreClient("https://api.outcomeci.com", "job", "bootstrap", "outcome")
-        error = urllib.error.HTTPError("https://api.outcomeci.com", 409, "error", None, None)
-        with (
-            mock.patch("urllib.request.urlopen", side_effect=error),
-            self.assertRaises(CoreError) as raised,
-        ):
+        transport = httpx.MockTransport(lambda request: httpx.Response(409, text="error"))
+        client = CoreClient(
+            "https://api.outcomeci.com", "job", "bootstrap", "outcome", transport=transport
+        )
+        with self.assertRaises(CoreError) as raised:
             client.claim_execution()
         self.assertEqual(raised.exception.category, "core_conflict")
         self.assertTrue(raised.exception.retryable)
 
     def test_client_preserves_effect_evidence_conflicts(self):
-        client = CoreClient("https://api.outcomeci.com", "job", "bootstrap", "workflow")
-        error = urllib.error.HTTPError(
-            "https://api.outcomeci.com",
-            409,
-            "error",
-            None,
-            io.BytesIO(
-                json.dumps(
-                    {
-                        "detail": "required integration effect evidence is missing: "
-                        "notify:slack.request"
-                    }
-                ).encode()
-            ),
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                409,
+                json={
+                    "detail": "required integration effect evidence is missing: "
+                    "notify:slack.request"
+                },
+            )
         )
-        with (
-            mock.patch("urllib.request.urlopen", side_effect=error),
-            self.assertRaises(CoreError) as raised,
-        ):
+        client = CoreClient(
+            "https://api.outcomeci.com", "job", "bootstrap", "workflow", transport=transport
+        )
+        with self.assertRaises(CoreError) as raised:
             client.claim_workflow()
         self.assertEqual(raised.exception.category, "workflow_effect_evidence_missing")
         self.assertFalse(raised.exception.retryable)
 
     def test_client_treats_lease_and_connection_conflicts_as_retryable(self):
-        client = CoreClient("https://api.outcomeci.com", "job", "bootstrap", "workflow")
-        error = urllib.error.HTTPError(
-            "https://api.outcomeci.com",
-            409,
-            "error",
-            None,
-            io.BytesIO(
-                json.dumps(
-                    {"detail": "configured agent connection is already running another workflow"}
-                ).encode()
-            ),
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                409,
+                json={"detail": "configured agent connection is already running another workflow"},
+            )
         )
-        with (
-            mock.patch("urllib.request.urlopen", side_effect=error),
-            self.assertRaises(CoreError) as raised,
-        ):
+        client = CoreClient(
+            "https://api.outcomeci.com", "job", "bootstrap", "workflow", transport=transport
+        )
+        with self.assertRaises(CoreError) as raised:
             client.claim_workflow()
         self.assertEqual(raised.exception.category, "core_conflict")
         self.assertTrue(raised.exception.retryable)
 
-        lease_error = urllib.error.HTTPError(
-            "https://api.outcomeci.com",
-            409,
-            "error",
-            None,
-            io.BytesIO(json.dumps({"detail": "workflow is not awaiting start"}).encode()),
+        lease_transport = httpx.MockTransport(
+            lambda request: httpx.Response(409, json={"detail": "workflow is not awaiting start"})
         )
-        with (
-            mock.patch("urllib.request.urlopen", side_effect=lease_error),
-            self.assertRaises(CoreError) as raised,
-        ):
-            client.claim_workflow()
+        lease_client = CoreClient(
+            "https://api.outcomeci.com", "job", "bootstrap", "workflow", transport=lease_transport
+        )
+        with self.assertRaises(CoreError) as raised:
+            lease_client.claim_workflow()
         self.assertEqual(raised.exception.category, "lease_conflict")
         self.assertTrue(raised.exception.retryable)
 
     def test_client_treats_credential_and_policy_conflicts_as_non_retryable(self):
-        client = CoreClient("https://api.outcomeci.com", "job", "bootstrap", "workflow")
         for detail, category in (
             ("agent credential changed during workflow", "credential_conflict"),
             ("policy review digest mismatch", "policy_review_conflict"),
         ):
-            error = urllib.error.HTTPError(
-                "https://api.outcomeci.com",
-                409,
-                "error",
-                None,
-                io.BytesIO(json.dumps({"detail": detail}).encode()),
+            transport = httpx.MockTransport(
+                lambda request, detail=detail: httpx.Response(409, json={"detail": detail})
             )
-            with (
-                mock.patch("urllib.request.urlopen", side_effect=error),
-                self.assertRaises(CoreError) as raised,
-            ):
+            client = CoreClient(
+                "https://api.outcomeci.com", "job", "bootstrap", "workflow", transport=transport
+            )
+            with self.assertRaises(CoreError) as raised:
                 client.claim_workflow()
             self.assertEqual(raised.exception.category, category)
             self.assertFalse(raised.exception.retryable)

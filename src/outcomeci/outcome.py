@@ -8,12 +8,11 @@ import json
 import os
 import re
 import shutil
-import urllib.error
-import urllib.request
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+import httpx
 from jsonschema import ValidationError
 from jsonschema import validate as validate_json
 
@@ -46,28 +45,32 @@ def _open_pull_request(
     token = os.environ.get("GITHUB_TOKEN") or os.environ.get("GH_TOKEN")
     if not token:
         raise ExecutionError("GitHub token is unavailable")
-    request = urllib.request.Request(
-        f"https://api.github.com/repos/{repository}/pulls",
-        data=json.dumps(
-            {"title": title, "body": body, "head": branch, "base": base_branch}
-        ).encode(),
-        headers={
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
-        method="POST",
-    )
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    body_json = {"title": title, "body": body, "head": branch, "base": base_branch}
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            payload = json.loads(response.read(1_048_577))
-    except (
-        urllib.error.HTTPError,
-        urllib.error.URLError,
-        TimeoutError,
-        json.JSONDecodeError,
-    ) as exc:
+        with httpx.stream(
+            "POST",
+            f"https://api.github.com/repos/{repository}/pulls",
+            json=body_json,
+            headers=headers,
+            timeout=30,
+            follow_redirects=True,
+        ) as response:
+            if response.status_code >= 400:
+                raise ExecutionError(
+                    f"GitHub could not create a pull request for {repository}", True
+                )
+            raw = bytearray()
+            for chunk in response.iter_bytes():
+                raw.extend(chunk)
+                if len(raw) > 1_048_576:
+                    break
+            payload = json.loads(bytes(raw))
+    except (httpx.HTTPError, json.JSONDecodeError) as exc:
         raise ExecutionError(
             f"GitHub could not create a pull request for {repository}", True
         ) from exc

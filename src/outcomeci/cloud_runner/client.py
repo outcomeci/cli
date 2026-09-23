@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import json
-import urllib.error
-import urllib.request
 from contextlib import suppress
 from typing import Any
+
+import httpx
 
 from .models import AuthorizationClaim, ExecutionClaim
 
@@ -17,6 +17,19 @@ class CoreError(RuntimeError):
         self.category, self.retryable = category, retryable
 
 
+def _read_bounded(response: httpx.Response, limit: int) -> bytes:
+    """Read at most `limit` bytes of a response body, like file.read(limit)
+    -- never buffer more, regardless of what Content-Length claims. A
+    broken or malicious Core deployment must not be able to exhaust memory
+    here."""
+    raw = bytearray()
+    for chunk in response.iter_bytes():
+        raw.extend(chunk)
+        if len(raw) >= limit:
+            break
+    return bytes(raw[:limit])
+
+
 class CoreClient:
     def __init__(
         self,
@@ -25,6 +38,8 @@ class CoreClient:
         bootstrap_token: str,
         mode: str,
         timeout: int = 20,
+        *,
+        transport: httpx.BaseTransport | None = None,
     ):
         resource = (
             "agent-auth-attempts"
@@ -39,6 +54,7 @@ class CoreClient:
         self._base_url = base_url
         self._token = bootstrap_token
         self._timeout = timeout
+        self._transport = transport
         self._max_response = (
             24 * 1024 * 1024 if mode in {"workflow", "publication"} else 1024 * 1024
         )
@@ -46,51 +62,51 @@ class CoreClient:
     def _post(
         self, suffix: str, payload: dict[str, Any], token: str | None = None
     ) -> dict[str, Any]:
-        request = urllib.request.Request(
-            f"{self._url}/{suffix}",
-            data=json.dumps(payload, separators=(",", ":")).encode(),
-            headers={
-                "Authorization": f"Bearer {token or self._token}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
+        headers = {"Authorization": f"Bearer {token or self._token}"}
         try:
-            with urllib.request.urlopen(request, timeout=self._timeout) as response:
-                if response.status == 204:
+            with (
+                httpx.Client(transport=self._transport, timeout=self._timeout) as client,
+                client.stream(
+                    "POST", f"{self._url}/{suffix}", json=payload, headers=headers
+                ) as response,
+            ):
+                if response.status_code == 204:
                     return {}
-                raw = response.read(self._max_response + 1)
-                if len(raw) > self._max_response:
-                    raise CoreError("invalid_core_response")
-                result = json.loads(raw or b"{}")
-                if not isinstance(result, dict):
-                    raise CoreError("invalid_core_response")
-                return result
-        except urllib.error.HTTPError as error:
-            if error.code in (401, 403):
-                raise CoreError("claim_rejected") from error
-            if error.code == 409:
-                # lease_conflict/core_conflict are contention with another
-                # concurrently running invocation (e.g. an agent connection
-                # already in use) -- transient, and worth retrying. The other
-                # 409 categories are real data/state problems a bare retry
-                # won't fix, so they stay non-retryable.
-                category, retryable = "core_conflict", True
-                with suppress(Exception):
-                    body = json.loads(error.read(4097))
-                    detail = str(body.get("detail", "")).casefold()
-                    if "lease" in detail or "workflow is not" in detail:
-                        category = "lease_conflict"
-                    elif "effect evidence" in detail:
-                        category, retryable = "workflow_effect_evidence_missing", False
-                    elif "credential changed" in detail:
-                        category, retryable = "credential_conflict", False
-                    elif "policy review digest" in detail:
-                        category, retryable = "policy_review_conflict", False
-                raise CoreError(category, retryable) from error
-            raise CoreError("core_unavailable", error.code >= 500) from error
-        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as error:
+                if response.status_code in (401, 403):
+                    raise CoreError("claim_rejected")
+                if response.status_code == 409:
+                    # lease_conflict/core_conflict are contention with another
+                    # concurrently running invocation (e.g. an agent connection
+                    # already in use) -- transient, and worth retrying. The other
+                    # 409 categories are real data/state problems a bare retry
+                    # won't fix, so they stay non-retryable.
+                    category, retryable = "core_conflict", True
+                    with suppress(Exception):
+                        body = json.loads(_read_bounded(response, 4097))
+                        detail = str(body.get("detail", "")).casefold()
+                        if "lease" in detail or "workflow is not" in detail:
+                            category = "lease_conflict"
+                        elif "effect evidence" in detail:
+                            category, retryable = "workflow_effect_evidence_missing", False
+                        elif "credential changed" in detail:
+                            category, retryable = "credential_conflict", False
+                        elif "policy review digest" in detail:
+                            category, retryable = "policy_review_conflict", False
+                    raise CoreError(category, retryable)
+                if response.status_code >= 400:
+                    raise CoreError("core_unavailable", response.status_code >= 500)
+                raw = _read_bounded(response, self._max_response + 1)
+        except httpx.HTTPError as error:
             raise CoreError("core_unavailable", True) from error
+        if len(raw) > self._max_response:
+            raise CoreError("invalid_core_response")
+        try:
+            result = json.loads(raw or b"{}")
+        except json.JSONDecodeError as error:
+            raise CoreError("core_unavailable", True) from error
+        if not isinstance(result, dict):
+            raise CoreError("invalid_core_response")
+        return result
 
     def claim_authorization(self) -> AuthorizationClaim:
         return AuthorizationClaim.parse(self._post("claim", {}))

@@ -165,9 +165,12 @@ pipelines.
 
 ## Lower priority, worth a decision but not urgent
 
-- [ ] `twin.py`/`cloud.py` hand-roll `urllib.request` while the rest of the
-  repo (including everything built this session) uses `httpx`, already a
-  dependency — pick one.
+- [x] All urllib.request HTTP-client usage (twin.py, cloud.py, tunnels.py,
+  custom.py, outcome.py, cloud_runner/client.py — more files than the
+  original finding named) converted to httpx, matching the rest of the repo.
+  Added transport-injection seams (twin.py, cloud_runner/client.py) or
+  direct httpx-level test mocks (cloud.py, custom.py, outcome.py) for every
+  previously-untested network call this touched.
 - [ ] No cli-specific `.sp/memory/constitution.md`, unlike `api`/
   `shared-infra`/`homebrew-tap`. The workspace huddle log says one was
   ratified for this repo but it isn't in the checkout.
