@@ -129,7 +129,24 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
     from .. import local
     from ..config import compile_workflow
 
-    claim = client.claim_workflow()
+    try:
+        claim = client.claim_workflow()
+    except CoreError as error:
+        if not error.retryable:
+            raise
+        # Lost the race for this invocation (or the agent connection it
+        # needs is busy with another one) before ever claiming a lease --
+        # routine contention under concurrent/bursty trigger delivery, not a
+        # failure of this runner. No lease was ever issued, so there is
+        # nothing to report through workflow_complete()'s own retryable
+        # path (see #58); the delivery is either already progressing under
+        # whoever won the claim, or still queued for the next attempt.
+        # No-op: exit clean rather than reporting outcome_runner_failed.
+        print(
+            json.dumps({"event": "outcome_runner_claim_skipped", "category": error.category}),
+            file=sys.stderr,
+        )
+        return 0
     lease = str(claim["lease_token"])
     root = Path(
         tempfile.mkdtemp(

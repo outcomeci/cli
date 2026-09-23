@@ -168,6 +168,35 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(status, "failed")
         self.assertTrue(values["retryable"])
 
+    def test_a_retryable_claim_conflict_is_a_clean_no_op(self):
+        # Losing the race to claim an invocation (or its agent connection
+        # being busy) before a lease was ever issued -- there is nothing to
+        # thread a retryable flag through to workflow_complete() for, since
+        # no lease/completion token exists yet. This is the gap #58 didn't
+        # close: it only covers a conflict discovered *after* a successful
+        # claim, mid-execution.
+        class ClaimConflictClient:
+            def claim_workflow(self):
+                raise CoreError("lease_conflict", True)
+
+        result = execute_workflow(
+            Launch("workflow", "invocation-1", "boot", "https://api.outcomeci.com"),
+            ClaimConflictClient(),
+        )
+
+        self.assertEqual(result, 0)
+
+    def test_a_non_retryable_claim_failure_still_raises(self):
+        class ClaimRejectedClient:
+            def claim_workflow(self):
+                raise CoreError("claim_rejected", False)
+
+        with self.assertRaises(CoreError):
+            execute_workflow(
+                Launch("workflow", "invocation-1", "boot", "https://api.outcomeci.com"),
+                ClaimRejectedClient(),
+            )
+
     def test_generic_workflow_uses_scoped_vault_values_and_completes(self):
         claim = {
             "content": "apiVersion: outcomeci.dev/v1alpha1\nkind: OutcomeWorkflow\n",
