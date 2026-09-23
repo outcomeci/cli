@@ -187,6 +187,30 @@ def _materialize(root: Path, phase: str) -> dict[str, Any]:
     return {"status": "artifacts_written", "phase": phase, "run_id": run_id}
 
 
+def _evaluate(
+    root: Path,
+    context: dict[str, Any],
+    request: dict[str, Any],
+    checks: dict[str, bool],
+    final_state: dict[str, Any],
+    *,
+    error_prefix: str = "failed durability assertions",
+) -> dict[str, Any]:
+    """Shared tail for every proof's assertion function: raise if any
+    expected check failed, else persist final_state and report which
+    expected checks passed."""
+    expected = request.get("expected", [])
+    failed = [name for name in expected if not checks.get(name, False)]
+    if failed:
+        raise ExecutionError(f"{error_prefix}: {', '.join(failed)}")
+    context["final_state"] = final_state
+    _write(root, context)
+    return {
+        "status": "passed",
+        "assertions": [{"name": name, "passed": checks[name]} for name in expected],
+    }
+
+
 def _vault_credentials_assertions(
     root: Path, context: dict[str, Any], request: dict[str, Any]
 ) -> dict[str, Any]:
@@ -217,16 +241,7 @@ def _vault_credentials_assertions(
         "cloud_vault.grants_survive_rotation": context.get("cloud_grants_survive", False),
         "cloud_session.expired_token_auto_refreshes": context.get("cloud_session_refreshed", False),
     }
-    expected = request.get("expected", [])
-    failed = [name for name in expected if not checks.get(name, False)]
-    if failed:
-        raise ExecutionError(f"failed durability assertions: {', '.join(failed)}")
-    context["final_state"] = {"status": "passed", "checks": checks}
-    _write(root, context)
-    return {
-        "status": "passed",
-        "assertions": [{"name": name, "passed": checks[name]} for name in expected],
-    }
+    return _evaluate(root, context, request, checks, {"status": "passed", "checks": checks})
 
 
 def _docs_state(context: dict[str, Any]) -> dict[str, Any]:
@@ -331,19 +346,10 @@ def _docs_assertions(
         ),
         "docs.run_artifacts_recorded": outcomes_dir_exists,
     }
-    expected = request.get("expected", [])
-    failed = [name for name in expected if not checks.get(name, False)]
-    if failed:
-        raise ExecutionError(f"failed docs assertions: {', '.join(failed)}")
-    context["final_state"] = {
-        "status": "passed",
-        "commands": [item["id"] for item in state["commands"]],
-    }
-    _write(root, context)
-    return {
-        "status": "passed",
-        "assertions": [{"name": name, "passed": checks[name]} for name in expected],
-    }
+    final_state = {"status": "passed", "commands": [item["id"] for item in state["commands"]]}
+    return _evaluate(
+        root, context, request, checks, final_state, error_prefix="failed docs assertions"
+    )
 
 
 def _agent_driven_assertions(
@@ -355,16 +361,7 @@ def _agent_driven_assertions(
         agent_checks = checks_by_agent.get(agent, {})
         checks[f"agent.{agent}_completes_intake"] = agent_checks.get("intake_completed", False)
         checks[f"agent.{agent}_writes_valid_artifacts"] = agent_checks.get("artifacts_valid", False)
-    expected = request.get("expected", [])
-    failed = [name for name in expected if not checks.get(name, False)]
-    if failed:
-        raise ExecutionError(f"failed durability assertions: {', '.join(failed)}")
-    context["final_state"] = {"status": "passed", "checks": checks}
-    _write(root, context)
-    return {
-        "status": "passed",
-        "assertions": [{"name": name, "passed": checks[name]} for name in expected],
-    }
+    return _evaluate(root, context, request, checks, {"status": "passed", "checks": checks})
 
 
 def _webhook_trigger_assertions(
@@ -393,16 +390,7 @@ def _webhook_trigger_assertions(
         ).get("outcome")
         == "rejected",
     }
-    expected = request.get("expected", [])
-    failed = [name for name in expected if not checks.get(name, False)]
-    if failed:
-        raise ExecutionError(f"failed durability assertions: {', '.join(failed)}")
-    context["final_state"] = {"status": "passed", "checks": checks}
-    _write(root, context)
-    return {
-        "status": "passed",
-        "assertions": [{"name": name, "passed": checks[name]} for name in expected],
-    }
+    return _evaluate(root, context, request, checks, {"status": "passed", "checks": checks})
 
 
 def _assertions(root: Path, request: dict[str, Any]) -> dict[str, Any]:
@@ -438,20 +426,8 @@ def _assertions(root: Path, request: dict[str, Any]) -> dict[str, Any]:
             "workflow.receipt_logged": len(logs) == 1,
             "recovery.is_bounded": int(request.get("recoveries", 0)) == 0,
         }
-        expected = request.get("expected", [])
-        failed = [name for name in expected if not checks.get(name, False)]
-        if failed:
-            raise ExecutionError(f"failed durability assertions: {', '.join(failed)}")
-        context["final_state"] = {
-            "status": proof["status"],
-            "proof_id": proof["proof_id"],
-            "usage": usage,
-        }
-        _write(root, context)
-        return {
-            "status": "passed",
-            "assertions": [{"name": name, "passed": checks[name]} for name in expected],
-        }
+        final_state = {"status": proof["status"], "proof_id": proof["proof_id"], "usage": usage}
+        return _evaluate(root, context, request, checks, final_state)
     run_id = context["run_id"]
     run = json.loads((root / ".outcomeci/outcomes" / run_id / "run.json").read_text())
     token = str(resolve_vault(root, "vault:simulation/api_token"))
@@ -479,20 +455,12 @@ def _assertions(root: Path, request: dict[str, Any]) -> dict[str, Any]:
         "recovery.is_bounded": 0 < int(request.get("recoveries", 0)) <= 2,
         "final_status.ready_for_implementation": run.get("status") == "ready_for_implementation",
     }
-    expected = request.get("expected", [])
-    failed = [name for name in expected if not checks.get(name, False)]
-    if failed:
-        raise ExecutionError(f"failed durability assertions: {', '.join(failed)}")
-    context["final_state"] = {
+    final_state = {
         "status": run["status"],
         "phase": run["phase"],
         "completed_phases": run["completed_phases"],
     }
-    _write(root, context)
-    return {
-        "status": "passed",
-        "assertions": [{"name": name, "passed": checks[name]} for name in expected],
-    }
+    return _evaluate(root, context, request, checks, final_state)
 
 
 def execute(action: str, root: Path, request: dict[str, Any], fault: bool) -> dict[str, Any]:
