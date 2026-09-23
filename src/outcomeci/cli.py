@@ -687,31 +687,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_json({"created": update(args.dir)})
         elif args.command == "validate":
             result = validate(args.dir)
-            print(
-                json.dumps(
-                    {"valid": True, "workflow_revision": result["workflow_revision"]}, indent=2
-                )
-            )
+            _print_json({"valid": True, "workflow_revision": result["workflow_revision"]})
         elif args.command == "status":
             result = validate(args.dir)
-            print(
-                json.dumps(
-                    {
-                        "initialized": True,
-                        "workflow_revision": result["workflow_revision"],
-                        "path": str(args.dir.resolve()),
-                    },
-                    indent=2,
-                )
+            _print_json(
+                {
+                    "initialized": True,
+                    "workflow_revision": result["workflow_revision"],
+                    "path": str(args.dir.resolve()),
+                }
             )
         elif args.command == "outcome" and args.outcome_command == "validate":
             result = compile_workflow(args.config)
-            print(
-                json.dumps(
-                    {"valid": True, "workflow_revision": result["workflow_revision"]},
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                {"valid": True, "workflow_revision": result["workflow_revision"]}, sort_keys=True
             )
         elif args.command == "outcome" and args.outcome_command == "compile":
             if args.run:
@@ -745,18 +734,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_json(run_outcome(args.claim, args.workspace), compact=True)
         elif args.command == "outcome" and args.outcome_command == "start":
             config = _workflow_path(args)
-            print(
-                json.dumps(
-                    start_local_outcome(
-                        args.workspace.resolve(),
-                        config,
-                        args.intent,
-                        agent=args.agent,
-                        model=args.model,
-                    ),
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                start_local_outcome(
+                    args.workspace.resolve(),
+                    config,
+                    args.intent,
+                    agent=args.agent,
+                    model=args.model,
+                ),
+                sort_keys=True,
             )
         elif args.command == "outcome" and args.outcome_command == "trigger":
             try:
@@ -778,108 +764,78 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.command == "outcome" and args.outcome_command == "continue":
             config = _workflow_path(args)
-            print(
-                json.dumps(
-                    continue_local_outcome(
-                        args.workspace.resolve(),
-                        config,
-                        args.run_id,
-                        args.approve,
-                        agent=args.agent,
-                        model=args.model,
-                    ),
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                continue_local_outcome(
+                    args.workspace.resolve(),
+                    config,
+                    args.run_id,
+                    args.approve,
+                    agent=args.agent,
+                    model=args.model,
+                ),
+                sort_keys=True,
             )
         elif args.command == "outcome" and args.outcome_command == "retry":
             config = _workflow_path(args)
-            print(
-                json.dumps(
-                    retry_local_outcome(
-                        args.workspace.resolve(),
-                        config,
-                        args.run_id,
-                        agent=args.agent,
-                        model=args.model,
-                    ),
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                retry_local_outcome(
+                    args.workspace.resolve(),
+                    config,
+                    args.run_id,
+                    agent=args.agent,
+                    model=args.model,
+                ),
+                sort_keys=True,
             )
         elif args.command == "outcome" and args.outcome_command == "recover":
             config = _workflow_path(args)
-            print(
-                json.dumps(
-                    recover_local_outcome(args.workspace.resolve(), config, args.run_id),
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                recover_local_outcome(args.workspace.resolve(), config, args.run_id),
+                sort_keys=True,
             )
         elif args.command == "outcome" and args.outcome_command == "status":
-            print(
-                json.dumps(
-                    local_outcome_status(args.workspace.resolve(), args.run_id),
-                    indent=2,
-                    sort_keys=True,
-                )
-            )
+            _print_json(local_outcome_status(args.workspace.resolve(), args.run_id), sort_keys=True)
         elif args.command == "outcome" and args.outcome_command == "begin":
             config = _workflow_path(args)
-            print(
-                json.dumps(
-                    begin_local_outcome(args.workspace.resolve(), config, args.intent),
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                begin_local_outcome(args.workspace.resolve(), config, args.intent),
+                sort_keys=True,
             )
         elif args.command == "outcome" and args.outcome_command == "validate-artifacts":
             config = _workflow_path(args)
-            print(
-                json.dumps(
-                    validate_artifacts(args.workspace.resolve(), config, args.run),
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                validate_artifacts(args.workspace.resolve(), config, args.run),
+                sort_keys=True,
             )
         elif args.command == "outcome" and args.outcome_command == "advance":
             config = _workflow_path(args)
-            print(
-                json.dumps(
-                    advance_local_outcome(args.workspace.resolve(), config, args.run, args.approve),
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                advance_local_outcome(args.workspace.resolve(), config, args.run, args.approve),
+                sort_keys=True,
             )
         elif args.command == "outcome" and args.outcome_command == "request-input":
             config = _workflow_path(args)
-            print(
-                json.dumps(
-                    request_local_input(
-                        args.workspace.resolve(), config, args.run, args.interaction_id
-                    ),
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                request_local_input(
+                    args.workspace.resolve(), config, args.run, args.interaction_id
+                ),
+                sort_keys=True,
             )
         elif args.command == "outcome" and args.outcome_command == "respond":
             config = _workflow_path(args)
-            print(
-                json.dumps(
-                    respond_local_outcome(
-                        args.workspace.resolve(),
-                        config,
-                        args.run,
-                        args.interaction_id,
-                        args.message,
-                        approve=args.approve,
-                        reject=args.reject,
-                        agent=args.agent,
-                        model=args.model,
-                    ),
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                respond_local_outcome(
+                    args.workspace.resolve(),
+                    config,
+                    args.run,
+                    args.interaction_id,
+                    args.message,
+                    approve=args.approve,
+                    reject=args.reject,
+                    agent=args.agent,
+                    model=args.model,
+                ),
+                sort_keys=True,
             )
         elif args.command == "human":
             workspace = args.workspace.resolve()
@@ -891,7 +847,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             elif args.human_command == "assign":
                 if scoped:
                     raise ExecutionError("hook assignment is not allowed during outcome execution")
-                config = (args.config or workspace / "outcome.yml").resolve()
+                config = _workflow_path(args)
                 selected = (
                     [("user", value) for value in args.user]
                     + [("channel", value) for value in args.channel]
@@ -899,22 +855,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 if not selected:
                     raise ExecutionError("assign at least one --user, --channel, or --group")
-                print(
-                    json.dumps(
-                        assign_human_hook(
-                            workspace,
-                            config,
-                            args.phase,
-                            args.timing,
-                            args.interaction_id,
-                            selected,
-                            args.wait,
-                            args.timeout,
-                            args.connection,
-                        ),
-                        indent=2,
-                        sort_keys=True,
-                    )
+                _print_json(
+                    assign_human_hook(
+                        workspace,
+                        config,
+                        args.phase,
+                        args.timing,
+                        args.interaction_id,
+                        selected,
+                        args.wait,
+                        args.timeout,
+                        args.connection,
+                    ),
+                    sort_keys=True,
                 )
             elif args.human_command == "request":
                 result = (
@@ -927,7 +880,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if scoped
                     else request_human_input(
                         workspace,
-                        (args.config or workspace / "outcome.yml").resolve(),
+                        _workflow_path(args),
                         args.run,
                         args.interaction_id,
                         args.continue_while_waiting,
@@ -935,7 +888,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 _print_json(result, sort_keys=True)
             elif args.human_command == "poll":
-                config = (getattr(args, "config", None) or workspace / "outcome.yml").resolve()
+                config = _workflow_path(args)
                 result = (
                     invoke_capability(
                         "poll",
@@ -963,7 +916,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if scoped
                     else accept_human_input(
                         workspace,
-                        (args.config or workspace / "outcome.yml").resolve(),
+                        _workflow_path(args),
                         args.run,
                         args.interaction_id,
                         args.message,
@@ -973,12 +926,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 _print_json(result, sort_keys=True)
         elif args.command == "twin" and args.twin_command == "search":
-            print(
-                json.dumps(
-                    search(args.query, args.repository_id, args.limit, args.component_limit),
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                search(args.query, args.repository_id, args.limit, args.component_limit),
+                sort_keys=True,
             )
         elif args.command == "integration" and args.integration_command in {
             "list",
@@ -1068,18 +1018,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
         elif args.command == "integration" and args.integration_command == "slack":
             if args.slack_command == "setup":
-                print(
-                    json.dumps(
-                        setup_slack(
-                            args.workspace,
-                            name=args.name,
-                            team=args.team,
-                            channel=args.channel,
-                            force=args.force,
-                        ),
-                        indent=2,
-                        sort_keys=True,
-                    )
+                _print_json(
+                    setup_slack(
+                        args.workspace,
+                        name=args.name,
+                        team=args.team,
+                        channel=args.channel,
+                        force=args.force,
+                    ),
+                    sort_keys=True,
                 )
             elif args.slack_command == "sync-credentials":
                 from .slack_vault import sync_credentials

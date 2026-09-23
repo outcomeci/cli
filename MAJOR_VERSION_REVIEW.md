@@ -57,7 +57,7 @@ made — check one off once it's actually fixed and verified, not just filed.
 
 ## CLI surface (cli.py, process.py, policy.py, capability.py, custom.py, tunnels.py)
 
-- [ ] `process.py`'s `invoke()` and `invoke_conversation()` duplicate ~50
+- [x] `process.py`'s `invoke()` and `invoke_conversation()` duplicate ~50
   lines of per-agent (codex/claude/opencode) credential/env logic — root
   cause of both showing up as complexity outliers (39 and 16).
 - [ ] `cli.py`'s `--workspace` flag means three incompatible things across
