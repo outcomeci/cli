@@ -135,7 +135,7 @@ made — check one off once it's actually fixed and verified, not just filed.
 
 ## proof_runner (built this session)
 
-- [ ] `step.py`'s `execute()` (complexity 42) has 12+ branches sharing a
+- [x] `step.py`'s `execute()` (complexity 42 -> 33) has 12+ branches sharing a
   byte-identical 3-line dispatch body — a `{action: handler}` table would
   roughly halve its complexity.
 - [x] The "evaluate checks → raise → write final_state → return" tail is

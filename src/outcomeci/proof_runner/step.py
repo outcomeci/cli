@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -461,8 +462,33 @@ def _assertions(root: Path, request: dict[str, Any]) -> dict[str, Any]:
     return _evaluate(root, context, request, checks, final_state)
 
 
+# Actions whose entire behavior is "call (root, context, request) -> dict,
+# persist the (possibly mutated) context, return the result unchanged" --
+# roughly a third of execute()'s branches share exactly this shape and
+# nothing else. The ones with any other side effect (a different call
+# signature, an extra context mutation, fault injection, a raise) stay as
+# their own explicit branch below rather than being forced in here.
+_WRITE_AND_RETURN: dict[str, Callable[[Path, dict[str, Any], dict[str, Any]], dict[str, Any]]] = {
+    "cli.exec": _cli_exec,
+    "vault.put_credential": credentials.put_credential,
+    "vault.rotate_credential": credentials.rotate_credential,
+    "vault.resolve_credential": credentials.resolve_credential,
+    "vault.generate_jwt_credential": credentials.generate_jwt_credential,
+    "cloud.vault_rotate": cloud_vault.vault_rotate,
+    "agent.start_run": agents.start_run,
+    "agent.approve_intake": agents.approve_intake,
+    "agent.verify_run": agents.verify_run,
+    "webhook_trigger.fire": webhook_trigger.fire,
+}
+
+
 def execute(action: str, root: Path, request: dict[str, Any], fault: bool) -> dict[str, Any]:
     context = _read(root)
+    handler = _WRITE_AND_RETURN.get(action)
+    if handler is not None:
+        result = handler(root, context, request)
+        _write(root, context)
+        return result
     if action == "workspace.initialize":
         created = initialize(root, "filesystem")
         _write(root, {"created": created})
@@ -590,26 +616,6 @@ def execute(action: str, root: Path, request: dict[str, Any], fault: bool) -> di
         result = _docs_fetch(context, request)
         _write(root, context)
         return result
-    if action == "cli.exec":
-        result = _cli_exec(root, context, request)
-        _write(root, context)
-        return result
-    if action == "vault.put_credential":
-        result = credentials.put_credential(root, context, request)
-        _write(root, context)
-        return result
-    if action == "vault.rotate_credential":
-        result = credentials.rotate_credential(root, context, request)
-        _write(root, context)
-        return result
-    if action == "vault.resolve_credential":
-        result = credentials.resolve_credential(root, context, request)
-        _write(root, context)
-        return result
-    if action == "vault.generate_jwt_credential":
-        result = credentials.generate_jwt_credential(root, context, request)
-        _write(root, context)
-        return result
     if action == "connection.authenticate":
         result = credentials.authenticate_connection(root, request)
         checks = "rotation_checks" if request.get("after_rotation") else "auth_checks"
@@ -631,10 +637,6 @@ def execute(action: str, root: Path, request: dict[str, Any], fault: bool) -> di
         context["cloud_session_refreshed"] = True
         _write(root, context)
         return result
-    if action == "cloud.vault_rotate":
-        result = cloud_vault.vault_rotate(root, context, request)
-        _write(root, context)
-        return result
     if action == "cloud.vault_verify":
         result = cloud_vault.vault_verify(root, context, request)
         context["cloud_rotation_verified"] = result["current_value_matches"]
@@ -643,25 +645,9 @@ def execute(action: str, root: Path, request: dict[str, Any], fault: bool) -> di
         )
         _write(root, context)
         return result
-    if action == "agent.start_run":
-        result = agents.start_run(root, context, request)
-        _write(root, context)
-        return result
-    if action == "agent.approve_intake":
-        result = agents.approve_intake(root, context, request)
-        _write(root, context)
-        return result
-    if action == "agent.verify_run":
-        result = agents.verify_run(root, context, request)
-        _write(root, context)
-        return result
     if action == "webhook_trigger.configure":
         result = webhook_trigger.configure(root)
         context["webhook_definition_compiled"] = True
-        _write(root, context)
-        return result
-    if action == "webhook_trigger.fire":
-        result = webhook_trigger.fire(root, context, request)
         _write(root, context)
         return result
     if action == "simulation.assert":
