@@ -124,28 +124,38 @@ def _inject_agent_credential(root: Path, provider: str, credential: Any) -> dict
     raise ContractError("unsupported workflow agent")
 
 
+def _claim_or_skip(claim_fn):
+    """Call a claim_*() method, treating a retryable conflict as a no-op.
+
+    Lost the race for this invocation (or the agent connection/lease it
+    needs is busy with another one) before ever claiming a lease -- routine
+    contention under concurrent/bursty trigger delivery, not a failure of
+    this runner. No lease was ever issued, so there is nothing to report
+    through the retryable-failure path used once a lease exists (see #58);
+    the work is either already progressing under whoever won the claim, or
+    still queued for the next attempt. Returns None on this no-op path;
+    the caller should exit 0 rather than fall through to a reported
+    outcome_runner_failed.
+    """
+    try:
+        return claim_fn()
+    except CoreError as error:
+        if not error.retryable:
+            raise
+        print(
+            json.dumps({"event": "outcome_runner_claim_skipped", "category": error.category}),
+            file=sys.stderr,
+        )
+        return None
+
+
 def execute_workflow(launch: Launch, client: CoreClient) -> int:
     """Execute one immutable generic workflow claim with broker-private credentials."""
     from .. import local
     from ..config import compile_workflow
 
-    try:
-        claim = client.claim_workflow()
-    except CoreError as error:
-        if not error.retryable:
-            raise
-        # Lost the race for this invocation (or the agent connection it
-        # needs is busy with another one) before ever claiming a lease --
-        # routine contention under concurrent/bursty trigger delivery, not a
-        # failure of this runner. No lease was ever issued, so there is
-        # nothing to report through workflow_complete()'s own retryable
-        # path (see #58); the delivery is either already progressing under
-        # whoever won the claim, or still queued for the next attempt.
-        # No-op: exit clean rather than reporting outcome_runner_failed.
-        print(
-            json.dumps({"event": "outcome_runner_claim_skipped", "category": error.category}),
-            file=sys.stderr,
-        )
+    claim = _claim_or_skip(client.claim_workflow)
+    if claim is None:
         return 0
     lease = str(claim["lease_token"])
     root = Path(
@@ -496,7 +506,9 @@ def classify_failure(
 
 
 def authorize(launch: Launch, client: CoreClient) -> int:
-    claim = client.claim_authorization()
+    claim = _claim_or_skip(client.claim_authorization)
+    if claim is None:
+        return 0
     root = Path(
         tempfile.mkdtemp(
             prefix="oci-agent-auth-",
@@ -590,7 +602,9 @@ def authorize(launch: Launch, client: CoreClient) -> int:
 
 
 def execute(launch: Launch, client: CoreClient) -> int:
-    claim = client.claim_execution()
+    claim = _claim_or_skip(client.claim_execution)
+    if claim is None:
+        return 0
     adapter = ADAPTERS[claim.provider]
     workflow_phase = str(claim.outcome.get("phase") or "unknown")
     log_sequence = 0
@@ -763,7 +777,9 @@ def execute(launch: Launch, client: CoreClient) -> int:
 
 def execute_publication(launch: Launch, client: CoreClient) -> int:
     """Sanitize and compiler-attest one private workflow package."""
-    claim = client.claim_publication()
+    claim = _claim_or_skip(client.claim_publication)
+    if claim is None:
+        return 0
     job = claim.get("job")
     hydration = claim.get("hydration")
     if not isinstance(job, dict) or not isinstance(hydration, dict):

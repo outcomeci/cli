@@ -197,6 +197,78 @@ class FlowTests(unittest.TestCase):
                 ClaimRejectedClient(),
             )
 
+    def test_authorize_claim_conflict_is_also_a_clean_no_op(self):
+        # The same claim-time conflict #70 fixed for execute_workflow can
+        # happen on any of the other three claim_*() entry points, since
+        # they all go through the same broker mechanism.
+        class ClaimConflictClient:
+            def claim_authorization(self):
+                raise CoreError("lease_conflict", True)
+
+        result = authorize(
+            Launch("authorize", "invocation-1", "boot", "https://api.outcomeci.com"),
+            ClaimConflictClient(),
+        )
+
+        self.assertEqual(result, 0)
+
+    def test_authorize_non_retryable_claim_failure_still_raises(self):
+        class ClaimRejectedClient:
+            def claim_authorization(self):
+                raise CoreError("claim_rejected", False)
+
+        with self.assertRaises(CoreError):
+            authorize(
+                Launch("authorize", "invocation-1", "boot", "https://api.outcomeci.com"),
+                ClaimRejectedClient(),
+            )
+
+    def test_execute_claim_conflict_is_also_a_clean_no_op(self):
+        class ClaimConflictClient:
+            def claim_execution(self):
+                raise CoreError("lease_conflict", True)
+
+        result = execute(
+            Launch("execute", "invocation-1", "boot", "https://api.outcomeci.com"),
+            ClaimConflictClient(),
+        )
+
+        self.assertEqual(result, 0)
+
+    def test_execute_non_retryable_claim_failure_still_raises(self):
+        class ClaimRejectedClient:
+            def claim_execution(self):
+                raise CoreError("claim_rejected", False)
+
+        with self.assertRaises(CoreError):
+            execute(
+                Launch("execute", "invocation-1", "boot", "https://api.outcomeci.com"),
+                ClaimRejectedClient(),
+            )
+
+    def test_execute_publication_claim_conflict_is_also_a_clean_no_op(self):
+        class ClaimConflictClient:
+            def claim_publication(self):
+                raise CoreError("lease_conflict", True)
+
+        result = execute_publication(
+            Launch("publication", "invocation-1", "boot", "https://api.outcomeci.com"),
+            ClaimConflictClient(),
+        )
+
+        self.assertEqual(result, 0)
+
+    def test_execute_publication_non_retryable_claim_failure_still_raises(self):
+        class ClaimRejectedClient:
+            def claim_publication(self):
+                raise CoreError("claim_rejected", False)
+
+        with self.assertRaises(CoreError):
+            execute_publication(
+                Launch("publication", "invocation-1", "boot", "https://api.outcomeci.com"),
+                ClaimRejectedClient(),
+            )
+
     def test_generic_workflow_uses_scoped_vault_values_and_completes(self):
         claim = {
             "content": "apiVersion: outcomeci.dev/v1alpha1\nkind: OutcomeWorkflow\n",
