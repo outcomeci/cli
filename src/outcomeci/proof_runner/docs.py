@@ -22,7 +22,7 @@ import httpx
 
 from ..process import ExecutionError
 
-DEFAULT_DOCS_BASE_URL = "https://sparepartslabs.com/api/docs/raw/outcomeci/next"
+DEFAULT_DOCS_BASE_URL = "https://outcomeci.com/api/docs/raw/outcomeci/next"
 
 _MARKER = re.compile(
     r'<!--\s*proof:(?P<kind>cmd|yaml|path)\s+id="(?P<id>[a-z0-9][a-z0-9_-]*)"\s*-->'
