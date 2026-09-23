@@ -319,6 +319,59 @@ def test_ready_set_supports_parallel_phases_and_join(tmp_path: Path) -> None:
     assert local._ready(compiled, ["intake", "product_review", "technical_review"]) == ["plan"]
 
 
+def test_call_succeeded_requires_broker_ok_true() -> None:
+    assert local._call_succeeded({"result": {"ok": True}})
+    assert not local._call_succeeded({"result": {"ok": False}})
+    # A non-bool truthy "ok" (never emitted by the real broker, but the
+    # field is untyped JSON) must not count as success -- this check is
+    # shared by the must-confirm gate, which needs the strict reading.
+    assert not local._call_succeeded({"result": {"ok": 1}})
+    assert not local._call_succeeded({"result": {}})
+    assert not local._call_succeeded({})
+
+
+def test_call_succeeded_lets_the_providers_own_result_override_ok() -> None:
+    call = {"result": {"ok": True, "output": {"result": {"ok": False}}}}
+    assert not local._call_succeeded(call)
+
+
+def test_write_effect_receipts_reports_provider_override_as_not_ok(tmp_path: Path) -> None:
+    journal = tmp_path / ".outcomeci" / ".broker" / "run-1"
+    journal.mkdir(parents=True)
+    (journal / "journal.json").write_text(
+        json.dumps(
+            {
+                "calls": {
+                    "call-1": {
+                        "capability": "slack.post_message",
+                        "proposal_sha256": "abc",
+                        "status": "confirmed",
+                        "result": {
+                            "ok": True,
+                            "status": 200,
+                            "output": {"result": {"ok": False}},
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    outcome_root = tmp_path / "outcome"
+    outcome_root.mkdir()
+    target = local._write_effect_receipts(tmp_path, outcome_root, "run-1", "intake")
+    effects = json.loads(target.read_text(encoding="utf-8"))
+    assert effects["effects"] == [
+        {
+            "capability": "slack.post_message",
+            "proposal_sha256": "abc",
+            "status": "confirmed",
+            "ok": False,
+            "http_status": 200,
+        }
+    ]
+
+
 def test_declared_json_schema_is_enforced(tmp_path: Path) -> None:
     initialize(tmp_path, "filesystem")
     compiled = local.compile_workflow(tmp_path / "outcome.yml")

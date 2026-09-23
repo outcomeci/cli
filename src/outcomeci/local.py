@@ -153,6 +153,22 @@ def _validate_outputs(compiled: dict[str, Any], outcome_root: Path, phase: str) 
                 ) from exc
 
 
+def _call_succeeded(call: dict[str, Any]) -> bool:
+    """A broker journal call only truly succeeded if the broker itself
+    reported ok AND the provider's own nested result (when present) didn't
+    override that with an explicit ok: false. Shared by
+    _validate_required_effects (must-confirm gating) and
+    _write_effect_receipts (the reported artifact) so they can't drift on
+    what "confirmed" means."""
+    result = call.get("result")
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        return False
+    provider_result = (
+        result.get("output", {}).get("result", {}) if isinstance(result.get("output"), dict) else {}
+    )
+    return not (isinstance(provider_result, dict) and provider_result.get("ok") is False)
+
+
 def _validate_required_effects(
     root: Path, compiled: dict[str, Any], run_id: str, phase: str
 ) -> None:
@@ -172,15 +188,7 @@ def _validate_required_effects(
     for call in calls.values():
         if not isinstance(call, dict) or call.get("status") != "confirmed":
             continue
-        result = call.get("result")
-        if not isinstance(result, dict) or result.get("ok") is not True:
-            continue
-        provider_result = (
-            result.get("output", {}).get("result", {})
-            if isinstance(result.get("output"), dict)
-            else {}
-        )
-        if isinstance(provider_result, dict) and provider_result.get("ok") is False:
+        if not _call_succeeded(call):
             continue
         capability = call.get("capability")
         if isinstance(capability, str):
@@ -202,18 +210,12 @@ def _write_effect_receipts(root: Path, outcome_root: Path, run_id: str, phase: s
         if not isinstance(receipt, dict):
             continue
         result = receipt.get("result") if isinstance(receipt.get("result"), dict) else {}
-        provider = (
-            result.get("output", {}).get("result", {})
-            if isinstance(result.get("output"), dict)
-            else {}
-        )
         calls.append(
             {
                 "capability": receipt.get("capability"),
                 "proposal_sha256": receipt.get("proposal_sha256"),
                 "status": receipt.get("status"),
-                "ok": bool(result.get("ok"))
-                and not (isinstance(provider, dict) and provider.get("ok") is False),
+                "ok": _call_succeeded(receipt),
                 "http_status": (
                     result.get("status") if isinstance(result.get("status"), int) else None
                 ),

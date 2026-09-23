@@ -105,7 +105,7 @@ made — check one off once it's actually fixed and verified, not just filed.
 - [ ] `local.py:691`: the single largest, most behaviorally significant
   agent prompt is the only one of five not extracted to `templates.py`,
   breaking the file's own convention.
-- [ ] `local.py`: `_validate_required_effects` and `_write_effect_receipts`
+- [x] `local.py`: `_validate_required_effects` and `_write_effect_receipts`
   independently re-derive the same "did this broker call actually succeed"
   check — two copies to keep in sync.
 - [ ] `config.py`: a 16-times-repeated non-empty-string guard with
