@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -32,8 +33,10 @@ from ..local_vault import put as put_vault
 from ..local_vault import resolve as resolve_vault
 from ..process import ExecutionError
 from ..repository import initialize, validate
+from ..security import atomic_write_json
 from . import agents, cloud_vault, credentials, webhook_trigger
 from .docs import fetch_fixtures
+from .mock_http import send_json
 from .simulation import FAULT_EXIT
 
 CONTEXT = Path(".outcomeci/simulation-context.json")
@@ -47,11 +50,7 @@ def _read(root: Path) -> dict[str, Any]:
 
 
 def _write(root: Path, value: dict[str, Any]) -> None:
-    path = root / CONTEXT
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    atomic_write_json(root / CONTEXT, value)
 
 
 def _configure(root: Path) -> None:
@@ -122,12 +121,9 @@ def _integration(root: Path) -> dict[str, Any]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             observed["authorized"] = self.headers.get("Authorization") == f"Bearer {expected}"
-            body = json.dumps({"accepted": observed["authorized"]}).encode()
-            self.send_response(200 if observed["authorized"] else 401)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            send_json(
+                self, 200 if observed["authorized"] else 401, {"accepted": observed["authorized"]}
+            )
 
         def log_message(self, format: str, *args: object) -> None:
             return
@@ -190,6 +186,30 @@ def _materialize(root: Path, phase: str) -> dict[str, Any]:
     return {"status": "artifacts_written", "phase": phase, "run_id": run_id}
 
 
+def _evaluate(
+    root: Path,
+    context: dict[str, Any],
+    request: dict[str, Any],
+    checks: dict[str, bool],
+    final_state: dict[str, Any],
+    *,
+    error_prefix: str = "failed durability assertions",
+) -> dict[str, Any]:
+    """Shared tail for every proof's assertion function: raise if any
+    expected check failed, else persist final_state and report which
+    expected checks passed."""
+    expected = request.get("expected", [])
+    failed = [name for name in expected if not checks.get(name, False)]
+    if failed:
+        raise ExecutionError(f"{error_prefix}: {', '.join(failed)}")
+    context["final_state"] = final_state
+    _write(root, context)
+    return {
+        "status": "passed",
+        "assertions": [{"name": name, "passed": checks[name]} for name in expected],
+    }
+
+
 def _vault_credentials_assertions(
     root: Path, context: dict[str, Any], request: dict[str, Any]
 ) -> dict[str, Any]:
@@ -214,21 +234,13 @@ def _vault_credentials_assertions(
         "credential.env_reference_resolves": context.get("env_credential_matches", False),
         "vault.rotation_takes_effect": rotation_checks.get("bearer", False)
         and rotation_checks.get("oauth2_client_credentials", False),
-        "credentials.never_exposed": "oci_vault_proof_" not in visible,
+        "credentials.never_exposed": "oci_vault_proof_" not in visible
+        and not any(secret in visible for secret in context.get("generated_secrets", [])),
         "cloud_vault.rotation_takes_effect": context.get("cloud_rotation_verified", False),
         "cloud_vault.grants_survive_rotation": context.get("cloud_grants_survive", False),
         "cloud_session.expired_token_auto_refreshes": context.get("cloud_session_refreshed", False),
     }
-    expected = request.get("expected", [])
-    failed = [name for name in expected if not checks.get(name, False)]
-    if failed:
-        raise ExecutionError(f"failed durability assertions: {', '.join(failed)}")
-    context["final_state"] = {"status": "passed", "checks": checks}
-    _write(root, context)
-    return {
-        "status": "passed",
-        "assertions": [{"name": name, "passed": checks[name]} for name in expected],
-    }
+    return _evaluate(root, context, request, checks, {"status": "passed", "checks": checks})
 
 
 def _docs_state(context: dict[str, Any]) -> dict[str, Any]:
@@ -333,19 +345,10 @@ def _docs_assertions(
         ),
         "docs.run_artifacts_recorded": outcomes_dir_exists,
     }
-    expected = request.get("expected", [])
-    failed = [name for name in expected if not checks.get(name, False)]
-    if failed:
-        raise ExecutionError(f"failed docs assertions: {', '.join(failed)}")
-    context["final_state"] = {
-        "status": "passed",
-        "commands": [item["id"] for item in state["commands"]],
-    }
-    _write(root, context)
-    return {
-        "status": "passed",
-        "assertions": [{"name": name, "passed": checks[name]} for name in expected],
-    }
+    final_state = {"status": "passed", "commands": [item["id"] for item in state["commands"]]}
+    return _evaluate(
+        root, context, request, checks, final_state, error_prefix="failed docs assertions"
+    )
 
 
 def _agent_driven_assertions(
@@ -357,16 +360,7 @@ def _agent_driven_assertions(
         agent_checks = checks_by_agent.get(agent, {})
         checks[f"agent.{agent}_completes_intake"] = agent_checks.get("intake_completed", False)
         checks[f"agent.{agent}_writes_valid_artifacts"] = agent_checks.get("artifacts_valid", False)
-    expected = request.get("expected", [])
-    failed = [name for name in expected if not checks.get(name, False)]
-    if failed:
-        raise ExecutionError(f"failed durability assertions: {', '.join(failed)}")
-    context["final_state"] = {"status": "passed", "checks": checks}
-    _write(root, context)
-    return {
-        "status": "passed",
-        "assertions": [{"name": name, "passed": checks[name]} for name in expected],
-    }
+    return _evaluate(root, context, request, checks, {"status": "passed", "checks": checks})
 
 
 def _webhook_trigger_assertions(
@@ -395,16 +389,7 @@ def _webhook_trigger_assertions(
         ).get("outcome")
         == "rejected",
     }
-    expected = request.get("expected", [])
-    failed = [name for name in expected if not checks.get(name, False)]
-    if failed:
-        raise ExecutionError(f"failed durability assertions: {', '.join(failed)}")
-    context["final_state"] = {"status": "passed", "checks": checks}
-    _write(root, context)
-    return {
-        "status": "passed",
-        "assertions": [{"name": name, "passed": checks[name]} for name in expected],
-    }
+    return _evaluate(root, context, request, checks, {"status": "passed", "checks": checks})
 
 
 def _assertions(root: Path, request: dict[str, Any]) -> dict[str, Any]:
@@ -440,20 +425,8 @@ def _assertions(root: Path, request: dict[str, Any]) -> dict[str, Any]:
             "workflow.receipt_logged": len(logs) == 1,
             "recovery.is_bounded": int(request.get("recoveries", 0)) == 0,
         }
-        expected = request.get("expected", [])
-        failed = [name for name in expected if not checks.get(name, False)]
-        if failed:
-            raise ExecutionError(f"failed durability assertions: {', '.join(failed)}")
-        context["final_state"] = {
-            "status": proof["status"],
-            "proof_id": proof["proof_id"],
-            "usage": usage,
-        }
-        _write(root, context)
-        return {
-            "status": "passed",
-            "assertions": [{"name": name, "passed": checks[name]} for name in expected],
-        }
+        final_state = {"status": proof["status"], "proof_id": proof["proof_id"], "usage": usage}
+        return _evaluate(root, context, request, checks, final_state)
     run_id = context["run_id"]
     run = json.loads((root / ".outcomeci/outcomes" / run_id / "run.json").read_text())
     token = str(resolve_vault(root, "vault:simulation/api_token"))
@@ -481,24 +454,41 @@ def _assertions(root: Path, request: dict[str, Any]) -> dict[str, Any]:
         "recovery.is_bounded": 0 < int(request.get("recoveries", 0)) <= 2,
         "final_status.ready_for_implementation": run.get("status") == "ready_for_implementation",
     }
-    expected = request.get("expected", [])
-    failed = [name for name in expected if not checks.get(name, False)]
-    if failed:
-        raise ExecutionError(f"failed durability assertions: {', '.join(failed)}")
-    context["final_state"] = {
+    final_state = {
         "status": run["status"],
         "phase": run["phase"],
         "completed_phases": run["completed_phases"],
     }
-    _write(root, context)
-    return {
-        "status": "passed",
-        "assertions": [{"name": name, "passed": checks[name]} for name in expected],
-    }
+    return _evaluate(root, context, request, checks, final_state)
+
+
+# Actions whose entire behavior is "call (root, context, request) -> dict,
+# persist the (possibly mutated) context, return the result unchanged" --
+# roughly a third of execute()'s branches share exactly this shape and
+# nothing else. The ones with any other side effect (a different call
+# signature, an extra context mutation, fault injection, a raise) stay as
+# their own explicit branch below rather than being forced in here.
+_WRITE_AND_RETURN: dict[str, Callable[[Path, dict[str, Any], dict[str, Any]], dict[str, Any]]] = {
+    "cli.exec": _cli_exec,
+    "vault.put_credential": credentials.put_credential,
+    "vault.rotate_credential": credentials.rotate_credential,
+    "vault.resolve_credential": credentials.resolve_credential,
+    "vault.generate_jwt_credential": credentials.generate_jwt_credential,
+    "cloud.vault_rotate": cloud_vault.vault_rotate,
+    "agent.start_run": agents.start_run,
+    "agent.approve_intake": agents.approve_intake,
+    "agent.verify_run": agents.verify_run,
+    "webhook_trigger.fire": webhook_trigger.fire,
+}
 
 
 def execute(action: str, root: Path, request: dict[str, Any], fault: bool) -> dict[str, Any]:
     context = _read(root)
+    handler = _WRITE_AND_RETURN.get(action)
+    if handler is not None:
+        result = handler(root, context, request)
+        _write(root, context)
+        return result
     if action == "workspace.initialize":
         created = initialize(root, "filesystem")
         _write(root, {"created": created})
@@ -626,26 +616,6 @@ def execute(action: str, root: Path, request: dict[str, Any], fault: bool) -> di
         result = _docs_fetch(context, request)
         _write(root, context)
         return result
-    if action == "cli.exec":
-        result = _cli_exec(root, context, request)
-        _write(root, context)
-        return result
-    if action == "vault.put_credential":
-        result = credentials.put_credential(root, context, request)
-        _write(root, context)
-        return result
-    if action == "vault.rotate_credential":
-        result = credentials.rotate_credential(root, context, request)
-        _write(root, context)
-        return result
-    if action == "vault.resolve_credential":
-        result = credentials.resolve_credential(root, context, request)
-        _write(root, context)
-        return result
-    if action == "vault.generate_jwt_credential":
-        result = credentials.generate_jwt_credential(root, context, request)
-        _write(root, context)
-        return result
     if action == "connection.authenticate":
         result = credentials.authenticate_connection(root, request)
         checks = "rotation_checks" if request.get("after_rotation") else "auth_checks"
@@ -667,10 +637,6 @@ def execute(action: str, root: Path, request: dict[str, Any], fault: bool) -> di
         context["cloud_session_refreshed"] = True
         _write(root, context)
         return result
-    if action == "cloud.vault_rotate":
-        result = cloud_vault.vault_rotate(root, context, request)
-        _write(root, context)
-        return result
     if action == "cloud.vault_verify":
         result = cloud_vault.vault_verify(root, context, request)
         context["cloud_rotation_verified"] = result["current_value_matches"]
@@ -679,25 +645,9 @@ def execute(action: str, root: Path, request: dict[str, Any], fault: bool) -> di
         )
         _write(root, context)
         return result
-    if action == "agent.start_run":
-        result = agents.start_run(root, context, request)
-        _write(root, context)
-        return result
-    if action == "agent.approve_intake":
-        result = agents.approve_intake(root, context, request)
-        _write(root, context)
-        return result
-    if action == "agent.verify_run":
-        result = agents.verify_run(root, context, request)
-        _write(root, context)
-        return result
     if action == "webhook_trigger.configure":
         result = webhook_trigger.configure(root)
         context["webhook_definition_compiled"] = True
-        _write(root, context)
-        return result
-    if action == "webhook_trigger.fire":
-        result = webhook_trigger.fire(root, context, request)
         _write(root, context)
         return result
     if action == "simulation.assert":

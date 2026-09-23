@@ -28,6 +28,7 @@ from .models import ContractError, Launch
 from .monitoring import capture_exception, init_exception_monitoring
 from .process import PTY_COLUMNS, PTY_ROWS, run
 from .providers import ADAPTERS
+from .providers.codex import FILE_AUTH_CONFIG as CODEX_FILE_AUTH_CONFIG
 from .redaction import redact_diagnostic
 
 URL = re.compile(r"https://[^\s<>'\"\x00-\x1f\x7f]+")
@@ -107,15 +108,24 @@ def _is_usage_limit_error(error: Exception) -> bool:
     return any(pattern in message for pattern in USAGE_LIMIT_PATTERNS)
 
 
+def _write_private_file(path: Path, content: str) -> None:
+    """Write `content` to `path` with 0600 permissions from creation -- no
+    window at default permissions the way write_text() + a later chmod()
+    has. Overwrites in place (not O_EXCL): unlike CodexAdapter.hydrate,
+    which always gets a fresh root, this can run twice in one root when a
+    workflow falls back to a different agent after this one already wrote
+    its credential here."""
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write(content)
+
+
 def _inject_agent_credential(root: Path, provider: str, credential: Any) -> dict[str, str]:
     if provider == "codex":
         home = root / ".codex"
         home.mkdir(mode=0o700, exist_ok=True)
-        (home / "auth.json").write_text(
-            json.dumps(credential, separators=(",", ":")), encoding="utf-8"
-        )
-        os.chmod(home / "auth.json", 0o600)
-        (home / "config.toml").write_text('cli_auth_credentials_store = "file"\n', encoding="utf-8")
+        _write_private_file(home / "auth.json", json.dumps(credential, separators=(",", ":")))
+        _write_private_file(home / "config.toml", CODEX_FILE_AUTH_CONFIG)
         return {"CODEX_HOME": str(home)}
     if provider == "claude":
         return {"CLAUDE_CODE_OAUTH_TOKEN": str(credential)}
@@ -124,28 +134,38 @@ def _inject_agent_credential(root: Path, provider: str, credential: Any) -> dict
     raise ContractError("unsupported workflow agent")
 
 
+def _claim_or_skip(claim_fn):
+    """Call a claim_*() method, treating a retryable conflict as a no-op.
+
+    Lost the race for this invocation (or the agent connection/lease it
+    needs is busy with another one) before ever claiming a lease -- routine
+    contention under concurrent/bursty trigger delivery, not a failure of
+    this runner. No lease was ever issued, so there is nothing to report
+    through the retryable-failure path used once a lease exists (see #58);
+    the work is either already progressing under whoever won the claim, or
+    still queued for the next attempt. Returns None on this no-op path;
+    the caller should exit 0 rather than fall through to a reported
+    outcome_runner_failed.
+    """
+    try:
+        return claim_fn()
+    except CoreError as error:
+        if not error.retryable:
+            raise
+        print(
+            json.dumps({"event": "outcome_runner_claim_skipped", "category": error.category}),
+            file=sys.stderr,
+        )
+        return None
+
+
 def execute_workflow(launch: Launch, client: CoreClient) -> int:
     """Execute one immutable generic workflow claim with broker-private credentials."""
     from .. import local
     from ..config import compile_workflow
 
-    try:
-        claim = client.claim_workflow()
-    except CoreError as error:
-        if not error.retryable:
-            raise
-        # Lost the race for this invocation (or the agent connection it
-        # needs is busy with another one) before ever claiming a lease --
-        # routine contention under concurrent/bursty trigger delivery, not a
-        # failure of this runner. No lease was ever issued, so there is
-        # nothing to report through workflow_complete()'s own retryable
-        # path (see #58); the delivery is either already progressing under
-        # whoever won the claim, or still queued for the next attempt.
-        # No-op: exit clean rather than reporting outcome_runner_failed.
-        print(
-            json.dumps({"event": "outcome_runner_claim_skipped", "category": error.category}),
-            file=sys.stderr,
-        )
+    claim = _claim_or_skip(client.claim_workflow)
+    if claim is None:
         return 0
     lease = str(claim["lease_token"])
     root = Path(
@@ -229,20 +249,27 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
         heartbeat = threading.Thread(target=pulse, daemon=True)
         heartbeat.start()
 
+        def execution_options(
+            agent_override: str | None, model_override: str | None
+        ) -> local.ExecutionOptions:
+            return local.ExecutionOptions(
+                agent=agent_override,
+                model=model_override,
+                credential_resolver=resolver,
+                event_sink=policy_event,
+                policy_reviewer=policy_review,
+                execution_backend="outcomeci",
+                _container_isolated=True,
+            )
+
         def call_trigger(agent_override: str | None, model_override: str | None):
             return local.trigger(
                 root,
                 config,
                 str(claim["trigger_name"]),
                 dict(claim["input"]),
-                agent=agent_override,
-                model=model_override,
                 on_created=created,
-                credential_resolver=resolver,
-                event_sink=policy_event,
-                policy_reviewer=policy_review,
-                execution_backend="outcomeci",
-                _container_isolated=True,
+                options=execution_options(agent_override, model_override),
             )
 
         def call_continue(agent_override: str | None, model_override: str | None):
@@ -251,13 +278,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 config,
                 run_id,
                 approve=True,
-                agent=agent_override,
-                model=model_override,
-                credential_resolver=resolver,
-                event_sink=policy_event,
-                policy_reviewer=policy_review,
-                execution_backend="outcomeci",
-                _container_isolated=True,
+                options=execution_options(agent_override, model_override),
             )
 
         def call_respond(agent_override: str | None, model_override: str | None):
@@ -270,13 +291,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 str(resume.get("message") or ""),
                 approve=bool(resume.get("approve")),
                 reject=bool(resume.get("reject")),
-                agent=agent_override,
-                model=model_override,
-                credential_resolver=resolver,
-                event_sink=policy_event,
-                policy_reviewer=policy_review,
-                execution_backend="outcomeci",
-                _container_isolated=True,
+                options=execution_options(agent_override, model_override),
             )
 
         def execute_call(factory):
@@ -302,13 +317,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                     root,
                     config,
                     run_id,
-                    agent=active_agent,
-                    model=active_model,
-                    credential_resolver=resolver,
-                    event_sink=policy_event,
-                    policy_reviewer=policy_review,
-                    execution_backend="outcomeci",
-                    _container_isolated=True,
+                    options=execution_options(active_agent, active_model),
                 )
 
         resume = claim.get("resume")
@@ -496,7 +505,9 @@ def classify_failure(
 
 
 def authorize(launch: Launch, client: CoreClient) -> int:
-    claim = client.claim_authorization()
+    claim = _claim_or_skip(client.claim_authorization)
+    if claim is None:
+        return 0
     root = Path(
         tempfile.mkdtemp(
             prefix="oci-agent-auth-",
@@ -510,10 +521,7 @@ def authorize(launch: Launch, client: CoreClient) -> int:
         if claim.provider == "codex":
             codex_home = root / "codex"
             codex_home.mkdir(mode=0o700)
-            (codex_home / "config.toml").write_text(
-                'cli_auth_credentials_store = "file"\n', encoding="utf-8"
-            )
-            os.chmod(codex_home / "config.toml", 0o600)
+            _write_private_file(codex_home / "config.toml", CODEX_FILE_AUTH_CONFIG)
             env["CODEX_HOME"] = str(codex_home)
         published = False
         pending = ""
@@ -590,7 +598,9 @@ def authorize(launch: Launch, client: CoreClient) -> int:
 
 
 def execute(launch: Launch, client: CoreClient) -> int:
-    claim = client.claim_execution()
+    claim = _claim_or_skip(client.claim_execution)
+    if claim is None:
+        return 0
     adapter = ADAPTERS[claim.provider]
     workflow_phase = str(claim.outcome.get("phase") or "unknown")
     log_sequence = 0
@@ -763,7 +773,9 @@ def execute(launch: Launch, client: CoreClient) -> int:
 
 def execute_publication(launch: Launch, client: CoreClient) -> int:
     """Sanitize and compiler-attest one private workflow package."""
-    claim = client.claim_publication()
+    claim = _claim_or_skip(client.claim_publication)
+    if claim is None:
+        return 0
     job = claim.get("job")
     hydration = claim.get("hydration")
     if not isinstance(job, dict) or not isinstance(hydration, dict):

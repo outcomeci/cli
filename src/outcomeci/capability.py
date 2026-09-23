@@ -186,6 +186,18 @@ def serve(
         temporary.cleanup()
 
 
+def _call_broker(
+    socket_path: str, payload: dict[str, Any], *, error_fallback: str
+) -> dict[str, Any]:
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
+        client.connect(socket_path)
+        client.sendall((json.dumps(payload, separators=(",", ":")) + "\n").encode())
+        response = json.loads(client.makefile("r", encoding="utf-8").readline())
+    if not response.get("ok"):
+        raise ExecutionError(str(response.get("error", error_fallback)))
+    return response["result"]
+
+
 def invoke(operation: str, run_id: str, interaction_id: str, **arguments: Any) -> dict[str, Any]:
     socket_path = os.environ.get("OUTCOMECI_CAPABILITY_SOCKET")
     token = os.environ.get("OUTCOMECI_CAPABILITY_TOKEN")
@@ -198,13 +210,7 @@ def invoke(operation: str, run_id: str, interaction_id: str, **arguments: Any) -
         "interaction_id": interaction_id,
         **arguments,
     }
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-        client.connect(socket_path)
-        client.sendall((json.dumps(payload, separators=(",", ":")) + "\n").encode())
-        response = json.loads(client.makefile("r", encoding="utf-8").readline())
-    if not response.get("ok"):
-        raise ExecutionError(str(response.get("error", "capability request failed")))
-    return response["result"]
+    return _call_broker(socket_path, payload, error_fallback="capability request failed")
 
 
 def invoke_integration(capability: str, inputs: dict[str, Any]) -> dict[str, Any]:
@@ -220,10 +226,4 @@ def invoke_integration(capability: str, inputs: dict[str, Any]) -> dict[str, Any
         "capability": capability,
         "inputs": inputs,
     }
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as client:
-        client.connect(socket_path)
-        client.sendall((json.dumps(payload, separators=(",", ":")) + "\n").encode())
-        response = json.loads(client.makefile("r", encoding="utf-8").readline())
-    if not response.get("ok"):
-        raise ExecutionError(str(response.get("error", "integration request failed")))
-    return response["result"]
+    return _call_broker(socket_path, payload, error_fallback="integration request failed")

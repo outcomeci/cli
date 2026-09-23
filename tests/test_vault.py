@@ -16,7 +16,7 @@ def test_vault_put_does_not_print_secret(monkeypatch, capsys) -> None:
     )
     assert (
         cli.main(
-            ["vault", "put", "providers/openai", "--workspace", "workspace_1", "--value-stdin"]
+            ["vault", "put", "providers/openai", "--workspace-id", "workspace_1", "--value-stdin"]
         )
         == 0
     )
@@ -30,7 +30,7 @@ def test_vault_list_is_provider_neutral(monkeypatch, capsys) -> None:
         "vault_request",
         lambda workspace, operation, **values: {"entries": [], "workflows": []},
     )
-    assert cli.main(["vault", "list", "--workspace", "workspace_1"]) == 0
+    assert cli.main(["vault", "list", "--workspace-id", "workspace_1"]) == 0
     assert '"entries": []' in capsys.readouterr().out
 
 
@@ -51,7 +51,7 @@ def test_vault_put_typed_credential_keeps_value_private(monkeypatch, capsys) -> 
                 "vault",
                 "put",
                 "slack/bot-token",
-                "--workspace",
+                "--workspace-id",
                 "workspace_1",
                 "--provider",
                 "slack",
@@ -79,7 +79,7 @@ def test_vault_put_rejects_incomplete_typed_contract(monkeypatch, capsys) -> Non
                 "vault",
                 "put",
                 "slack/bot-token",
-                "--workspace",
+                "--workspace-id",
                 "workspace_1",
                 "--provider",
                 "slack",
@@ -125,7 +125,7 @@ def test_typed_credential_rejects_secret_in_process_arguments(capsys) -> None:
                 "vault",
                 "put",
                 "slack/bot-token",
-                "--workspace",
+                "--workspace-id",
                 "workspace_1",
                 "--provider",
                 "slack",
@@ -158,7 +158,7 @@ def test_oauth_secret_object_is_read_from_stdin(monkeypatch) -> None:
                 "vault",
                 "put",
                 "linear/oauth",
-                "--workspace",
+                "--workspace-id",
                 "workspace_1",
                 "--provider",
                 "linear",

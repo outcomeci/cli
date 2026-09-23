@@ -13,6 +13,7 @@ import sys
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,7 @@ from typing import Any
 from jsonschema import ValidationError
 from jsonschema import validate as validate_json
 
+from . import templates
 from .capability import serve as serve_capability
 from .config import compile_workflow
 from .contracts import FORMAT_CHECKER, ContractError, validate_trigger_payload
@@ -33,6 +35,27 @@ from .outcome import (
     _validate_trajectory,
 )
 from .process import ExecutionError, invoke
+from .security import atomic_write_json
+
+
+@dataclass
+class ExecutionOptions:
+    """The agent/execution-context bundle every entry point that can reach
+    _execute() needs. _execute(), trigger(), continue_run(), retry(), and
+    respond() previously each redeclared and forwarded these same 7
+    keywords by hand; a new option added to _execute() only had to be
+    forgotten in one of the four public callers to silently not apply."""
+
+    agent: str | None = None
+    model: str | None = None
+    credential_resolver: CredentialResolver | None = None
+    event_sink: Callable[[dict[str, Any]], None] | None = None
+    policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    execution_backend: str = "filesystem"
+    _container_isolated: bool = False
+
+
+_DEFAULT_EXECUTION_OPTIONS = ExecutionOptions()
 
 
 def _id(intent: str) -> str:
@@ -152,6 +175,22 @@ def _validate_outputs(compiled: dict[str, Any], outcome_root: Path, phase: str) 
                 ) from exc
 
 
+def _call_succeeded(call: dict[str, Any]) -> bool:
+    """A broker journal call only truly succeeded if the broker itself
+    reported ok AND the provider's own nested result (when present) didn't
+    override that with an explicit ok: false. Shared by
+    _validate_required_effects (must-confirm gating) and
+    _write_effect_receipts (the reported artifact) so they can't drift on
+    what "confirmed" means."""
+    result = call.get("result")
+    if not isinstance(result, dict) or result.get("ok") is not True:
+        return False
+    provider_result = (
+        result.get("output", {}).get("result", {}) if isinstance(result.get("output"), dict) else {}
+    )
+    return not (isinstance(provider_result, dict) and provider_result.get("ok") is False)
+
+
 def _validate_required_effects(
     root: Path, compiled: dict[str, Any], run_id: str, phase: str
 ) -> None:
@@ -171,15 +210,7 @@ def _validate_required_effects(
     for call in calls.values():
         if not isinstance(call, dict) or call.get("status") != "confirmed":
             continue
-        result = call.get("result")
-        if not isinstance(result, dict) or result.get("ok") is not True:
-            continue
-        provider_result = (
-            result.get("output", {}).get("result", {})
-            if isinstance(result.get("output"), dict)
-            else {}
-        )
-        if isinstance(provider_result, dict) and provider_result.get("ok") is False:
+        if not _call_succeeded(call):
             continue
         capability = call.get("capability")
         if isinstance(capability, str):
@@ -201,18 +232,12 @@ def _write_effect_receipts(root: Path, outcome_root: Path, run_id: str, phase: s
         if not isinstance(receipt, dict):
             continue
         result = receipt.get("result") if isinstance(receipt.get("result"), dict) else {}
-        provider = (
-            result.get("output", {}).get("result", {})
-            if isinstance(result.get("output"), dict)
-            else {}
-        )
         calls.append(
             {
                 "capability": receipt.get("capability"),
                 "proposal_sha256": receipt.get("proposal_sha256"),
                 "status": receipt.get("status"),
-                "ok": bool(result.get("ok"))
-                and not (isinstance(provider, dict) and provider.get("ok") is False),
+                "ok": _call_succeeded(receipt),
                 "http_status": (
                     result.get("status") if isinstance(result.get("status"), int) else None
                 ),
@@ -568,11 +593,8 @@ def _read(root: Path, run_id: str) -> dict[str, Any]:
 
 def _write(root: Path, state: dict[str, Any]) -> None:
     path = _record(root, state["run_id"])
-    path.parent.mkdir(parents=True, exist_ok=True)
     state["updated_at"] = datetime.now(UTC).isoformat()
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    atomic_write_json(path, state)
 
 
 def _local_revision(root: Path) -> str | None:
@@ -613,14 +635,15 @@ def _execute(
     config: Path,
     state: dict[str, Any],
     *,
-    agent: str | None = None,
-    model: str | None = None,
-    credential_resolver: CredentialResolver | None = None,
-    event_sink: Callable[[dict[str, Any]], None] | None = None,
-    policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
-    execution_backend: str = "filesystem",
-    _container_isolated: bool = False,
+    options: ExecutionOptions = _DEFAULT_EXECUTION_OPTIONS,
 ) -> dict[str, Any]:
+    agent = options.agent
+    model = options.model
+    credential_resolver = options.credential_resolver
+    event_sink = options.event_sink
+    policy_reviewer = options.policy_reviewer
+    execution_backend = options.execution_backend
+    _container_isolated = options._container_isolated
     compiled = compile_workflow(config)
     configured_backend = compiled["workflow"]["spec"]["backend"].get("provider")
     if execution_backend not in {"filesystem", "outcomeci"}:
@@ -688,9 +711,19 @@ contract above. Use paths relative to this repository.
         else f"This is a filesystem-backed local Standup. Work in {root}. "
         "There is no OutcomeCI Cloud or Digital Twin; inspect the local repository directly."
     )
-    prompt = f"{shared}\n\n{instructions}\n\n{environment} Write durable artifacts beneath {outcome_root}. During intake, plan, and tasks, do not modify product source files. Only execute API capabilities listed for this phase, using `oci integration execute <capability> --phase {phase} --input-stdin`; the capability broker owns credentials and authorization. Only use human tools for a hook declared on this current phase with Slack or custom delivery and configured targets. Never discover targets or change hook assignments during execution. Use only readable names; never request or expose provider IDs. Before a wired hook with wait strategy `ask`, ask the requester how long to wait or whether to continue. Deliver it with `oci human request <interaction-id> --run {state['run_id']} --workspace {root}`; add `--continue` only when the requester chose to keep working. Otherwise poll for exactly their bounded duration using `oci human poll <interaction-id> --run {state['run_id']} --wait <seconds> --workspace {root}`. Apply a received response with `oci human accept` and preserve it as outcome context.\n{intake_contract}\n{json.dumps(context, separators=(',', ':'))}"
+    prompt = templates.EXECUTION_TASK.format(
+        shared=shared,
+        instructions=instructions,
+        environment=environment,
+        outcome_root=outcome_root,
+        phase=phase,
+        run_id=state["run_id"],
+        root=root,
+        intake_contract=intake_contract,
+        context_json=json.dumps(context, separators=(",", ":")),
+    )
     runtime_cli = shlex.join([sys.executable, "-m", "outcomeci.cli"])
-    prompt += f"\nThe authoritative CLI for this run is `{runtime_cli}`. Use this absolute command instead of bare `oci` in every tool invocation; login shells may select an older globally installed CLI. For API requests use `{runtime_cli} integration execute <capability> --phase {phase} --input-stdin`. Do not fall back to a global CLI."
+    prompt += templates.EXECUTION_CLI_ADDENDUM.format(runtime_cli=runtime_cli, phase=phase)
     state.update(
         {
             "status": "running",
@@ -849,6 +882,51 @@ contract above. Use paths relative to this repository.
     return state
 
 
+def _new_run(
+    compiled: dict[str, Any], intent: str, *, trigger: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """The initial queued-run state start() (manual) and trigger() (every
+    other trigger type) both build before checking for a before-phase gate."""
+    state = {
+        "schema_version": 2,
+        "run_id": _id(intent),
+        "intent": intent,
+        "phase": _ready(compiled, [])[0],
+        "status": "queued",
+        "completed_phases": [],
+        "ready_phases": _ready(compiled, []),
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    if trigger is not None:
+        state["trigger"] = trigger
+    return state
+
+
+def _before_gate(
+    root: Path,
+    config: Path,
+    compiled: dict[str, Any],
+    state: dict[str, Any],
+    *,
+    credential_resolver: CredentialResolver | None = None,
+) -> dict[str, Any] | None:
+    """If the run's first phase has a required `before` interaction, open it
+    and return the paused state; None means the caller should proceed
+    straight to _execute()."""
+    before = _first_required_interaction(compiled, state["phase"], "before", state)
+    if not before:
+        return None
+    return _open_interaction(
+        root,
+        state,
+        state["phase"],
+        "before",
+        before,
+        config=config,
+        credential_resolver=credential_resolver,
+    )
+
+
 def start(
     root: Path,
     config: Path,
@@ -862,23 +940,11 @@ def start(
     compiled = compile_workflow(config)
     if not any(trigger["type"] == "manual" for trigger in compiled["triggers"].values()):
         raise ExecutionError("workflow does not declare a manual trigger")
-    first = _ready(compiled, [])[0]
-    state = {
-        "schema_version": 2,
-        "run_id": _id(intent),
-        "intent": intent.strip(),
-        "phase": first,
-        "status": "queued",
-        "completed_phases": [],
-        "ready_phases": _ready(compiled, []),
-        "created_at": datetime.now(UTC).isoformat(),
-    }
-    before = _first_required_interaction(compiled, first, "before", state)
-    if before:
-        opened = _open_interaction(root, state, first, "before", before, config=config)
-        if opened is not None:
-            return opened
-    return _execute(root, config, state, agent=agent, model=model)
+    state = _new_run(compiled, intent.strip())
+    opened = _before_gate(root, config, compiled, state)
+    if opened is not None:
+        return opened
+    return _execute(root, config, state, options=ExecutionOptions(agent=agent, model=model))
 
 
 def trigger(
@@ -887,14 +953,8 @@ def trigger(
     trigger_name: str,
     payload: dict[str, Any],
     *,
-    agent: str | None = None,
-    model: str | None = None,
     on_created: Callable[[str], None] | None = None,
-    credential_resolver: CredentialResolver | None = None,
-    event_sink: Callable[[dict[str, Any]], None] | None = None,
-    policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
-    execution_backend: str = "filesystem",
-    _container_isolated: bool = False,
+    options: ExecutionOptions = _DEFAULT_EXECUTION_OPTIONS,
 ) -> dict[str, Any]:
     """Validate and materialize a named trigger before any agent execution."""
     compiled = compile_workflow(config)
@@ -904,7 +964,9 @@ def trigger(
     encoded = json.dumps(payload, separators=(",", ":")).encode()
     limit = 2 * 1024 * 1024 if definition["type"] == "webhook.received" else 1024 * 1024
     if len(encoded) > limit:
-        raise ExecutionError("trigger payload exceeds the 1 MiB local limit")
+        raise ExecutionError(
+            f"trigger payload exceeds the {limit // (1024 * 1024)} MiB local limit"
+        )
     try:
         validate_trigger_payload(definition["type"], payload)
     except ContractError as exc:
@@ -916,46 +978,20 @@ def trigger(
         if isinstance(subject, str) and subject.strip()
         else f"{definition['type']} received"
     )
-    first = _ready(compiled, [])[0]
-    state = {
-        "schema_version": 2,
-        "run_id": _id(intent),
-        "intent": intent,
-        "trigger": {"name": trigger_name, "type": definition["type"], "value": payload},
-        "phase": first,
-        "status": "queued",
-        "completed_phases": [],
-        "ready_phases": _ready(compiled, []),
-        "created_at": datetime.now(UTC).isoformat(),
-    }
+    state = _new_run(
+        compiled,
+        intent,
+        trigger={"name": trigger_name, "type": definition["type"], "value": payload},
+    )
     if on_created is not None:
         _write(root, state)
         on_created(state["run_id"])
-    before = _first_required_interaction(compiled, first, "before", state)
-    if before:
-        opened = _open_interaction(
-            root,
-            state,
-            first,
-            "before",
-            before,
-            config=config,
-            credential_resolver=credential_resolver,
-        )
-        if opened is not None:
-            return opened
-    return _execute(
-        root,
-        config,
-        state,
-        agent=agent,
-        model=model,
-        credential_resolver=credential_resolver,
-        event_sink=event_sink,
-        policy_reviewer=policy_reviewer,
-        execution_backend=execution_backend,
-        _container_isolated=_container_isolated,
+    opened = _before_gate(
+        root, config, compiled, state, credential_resolver=options.credential_resolver
     )
+    if opened is not None:
+        return opened
+    return _execute(root, config, state, options=options)
 
 
 def begin(root: Path, config: Path, intent: str) -> dict[str, Any]:
@@ -1159,13 +1195,7 @@ def continue_run(
     run_id: str,
     approve: bool,
     *,
-    agent: str | None = None,
-    model: str | None = None,
-    credential_resolver: CredentialResolver | None = None,
-    event_sink: Callable[[dict[str, Any]], None] | None = None,
-    policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
-    execution_backend: str = "filesystem",
-    _container_isolated: bool = False,
+    options: ExecutionOptions = _DEFAULT_EXECUTION_OPTIONS,
 ) -> dict[str, Any]:
     state = _read(root, run_id)
     if state.get("status") == "awaiting_input" and approve:
@@ -1177,13 +1207,7 @@ def continue_run(
             pending.get("id", ""),
             "Approved",
             approve=True,
-            agent=agent,
-            model=model,
-            credential_resolver=credential_resolver,
-            event_sink=event_sink,
-            policy_reviewer=policy_reviewer,
-            execution_backend=execution_backend,
-            _container_isolated=_container_isolated,
+            options=options,
         )
     if state.get("status") != "awaiting_confirmation":
         raise ExecutionError(f"outcome cannot continue from {state.get('status')}")
@@ -1205,22 +1229,11 @@ def continue_run(
             "before",
             before,
             config=config,
-            credential_resolver=credential_resolver,
+            credential_resolver=options.credential_resolver,
         )
         if opened is not None:
             return opened
-    return _execute(
-        root,
-        config,
-        state,
-        agent=agent,
-        model=model,
-        credential_resolver=credential_resolver,
-        event_sink=event_sink,
-        policy_reviewer=policy_reviewer,
-        execution_backend=execution_backend,
-        _container_isolated=_container_isolated,
-    )
+    return _execute(root, config, state, options=options)
 
 
 def retry(
@@ -1228,13 +1241,7 @@ def retry(
     config: Path,
     run_id: str,
     *,
-    agent: str | None = None,
-    model: str | None = None,
-    credential_resolver: CredentialResolver | None = None,
-    event_sink: Callable[[dict[str, Any]], None] | None = None,
-    policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
-    execution_backend: str = "filesystem",
-    _container_isolated: bool = False,
+    options: ExecutionOptions = _DEFAULT_EXECUTION_OPTIONS,
 ) -> dict[str, Any]:
     """Retry agent execution after a failure without replaying resolved gates."""
     state = _read(root, run_id)
@@ -1243,18 +1250,7 @@ def retry(
     state["status"] = "queued"
     state.pop("error", None)
     _write(root, state)
-    return _execute(
-        root,
-        config,
-        state,
-        agent=agent,
-        model=model,
-        credential_resolver=credential_resolver,
-        event_sink=event_sink,
-        policy_reviewer=policy_reviewer,
-        execution_backend=execution_backend,
-        _container_isolated=_container_isolated,
-    )
+    return _execute(root, config, state, options=options)
 
 
 def _worker_live(outcome_root: Path) -> bool:
@@ -1413,14 +1409,8 @@ def respond(
     *,
     approve: bool = False,
     reject: bool = False,
-    agent: str | None = None,
-    model: str | None = None,
     execute: bool = True,
-    credential_resolver: CredentialResolver | None = None,
-    event_sink: Callable[[dict[str, Any]], None] | None = None,
-    policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
-    execution_backend: str = "filesystem",
-    _container_isolated: bool = False,
+    options: ExecutionOptions = _DEFAULT_EXECUTION_OPTIONS,
 ) -> dict[str, Any]:
     state = _read(root, run_id)
     if approve and reject:
@@ -1495,7 +1485,7 @@ def respond(
                 "before",
                 next_interaction,
                 config=config,
-                credential_resolver=credential_resolver,
+                credential_resolver=options.credential_resolver,
             )
             if opened is not None:
                 return opened
@@ -1505,15 +1495,4 @@ def respond(
         return state
     state["status"] = "queued"
     _write(root, state)
-    return _execute(
-        root,
-        config,
-        state,
-        agent=agent,
-        model=model,
-        credential_resolver=credential_resolver,
-        event_sink=event_sink,
-        policy_reviewer=policy_reviewer,
-        execution_backend=execution_backend,
-        _container_isolated=_container_isolated,
-    )
+    return _execute(root, config, state, options=options)

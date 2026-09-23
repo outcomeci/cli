@@ -4,6 +4,6 @@ docs-quickstart-v1 and vault-credentials-v1 for why — but lives in its own
 subpackage so it reads as self-testing infrastructure, not product code.
 """
 
-from .simulation import bundled_definition, load_definition, run, verify_ledger
+from .simulation import bundled_definition, bundled_proof_names, load_definition, run, verify_ledger
 
-__all__ = ["bundled_definition", "load_definition", "run", "verify_ledger"]
+__all__ = ["bundled_definition", "bundled_proof_names", "load_definition", "run", "verify_ledger"]

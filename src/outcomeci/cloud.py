@@ -7,17 +7,27 @@ import json
 import os
 import stat
 import time
-import urllib.error
-import urllib.request
 import webbrowser
 from pathlib import Path
 from typing import Any
 
+import httpx
 import yaml
 
 from .config import compile_workflow
 from .process import ExecutionError
 from .security import private_path
+
+
+def _raise_for_status(
+    status: int, value: Any, expected: int | set[int], fallback: str, *, require_dict: bool = False
+) -> None:
+    ok = status in expected if isinstance(expected, set) else status == expected
+    if require_dict:
+        ok = ok and isinstance(value, dict)
+    if not ok:
+        detail = value.get("detail") if isinstance(value, dict) else None
+        raise ExecutionError(str(detail or fallback))
 
 
 def credentials_path() -> Path:
@@ -34,28 +44,23 @@ def _request(
     token: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     headers = {"Accept": "application/json"}
-    data = None
-    if body is not None:
-        headers["Content-Type"] = "application/json"
-        data = json.dumps(body).encode()
     if token:
         headers["Authorization"] = f"Bearer {token}"
-    request = urllib.request.Request(
-        f"{api_url.rstrip('/')}/v1{path}", data=data, headers=headers, method=method
-    )
     try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            raw = response.read()
-            return response.status, json.loads(raw) if raw else {}
-    except urllib.error.HTTPError as exc:
-        raw = exc.read()
-        try:
-            value = json.loads(raw) if raw else {}
-        except json.JSONDecodeError:
-            value = {}
-        return exc.code, value
-    except OSError as exc:
+        response = httpx.request(
+            method,
+            f"{api_url.rstrip('/')}/v1{path}",
+            json=body,
+            headers=headers,
+            timeout=30,
+            follow_redirects=True,
+        )
+    except httpx.HTTPError as exc:
         raise ExecutionError(f"could not reach OutcomeCI Cloud: {exc}") from exc
+    try:
+        return response.status_code, json.loads(response.content) if response.content else {}
+    except json.JSONDecodeError:
+        return response.status_code, {}
 
 
 def _write_credentials(value: dict[str, Any]) -> None:
@@ -197,9 +202,7 @@ def start_email_trigger_proof(workspace_id: str) -> dict[str, Any]:
     status, value = _authorized_request(
         f"/workspaces/{workspace_id}/email-trigger-proofs", method="POST", body={}
     )
-    if status != 202 or not isinstance(value, dict):
-        detail = value.get("detail") if isinstance(value, dict) else None
-        raise ExecutionError(str(detail or "could not start email trigger proof"))
+    _raise_for_status(status, value, 202, "could not start email trigger proof", require_dict=True)
     return value
 
 
@@ -207,9 +210,7 @@ def get_email_trigger_proof(workspace_id: str, proof_id: str) -> dict[str, Any]:
     status, value = _authorized_request(
         f"/workspaces/{workspace_id}/email-trigger-proofs/{proof_id}"
     )
-    if status != 200 or not isinstance(value, dict):
-        detail = value.get("detail") if isinstance(value, dict) else None
-        raise ExecutionError(str(detail or "could not read email trigger proof"))
+    _raise_for_status(status, value, 200, "could not read email trigger proof", require_dict=True)
     return value
 
 
@@ -289,10 +290,8 @@ def sync_workflow(
             "lineage": lineage,
         },
     )
-    if status != 201:
-        detail = value.get("detail") if isinstance(value, dict) else None
-        raise ExecutionError(str(detail or "workflow synchronization failed"))
-    return value  # type: ignore[return-value]
+    _raise_for_status(status, value, 201, "workflow synchronization failed", require_dict=True)
+    return value
 
 
 def issue_debug_lease(
@@ -304,9 +303,7 @@ def issue_debug_lease(
         method="POST",
         body={"invocation_id": invocation_id, "ttl_seconds": ttl_seconds},
     )
-    if status != 200 or not isinstance(value, dict):
-        detail = value.get("detail") if isinstance(value, dict) else None
-        raise ExecutionError(str(detail or "could not issue a debug lease"))
+    _raise_for_status(status, value, 200, "could not issue a debug lease", require_dict=True)
     return value
 
 
@@ -318,9 +315,7 @@ def complete_debug_lease(
         method="POST",
         body={"status": status_value},
     )
-    if status != 200:
-        detail = value.get("detail") if isinstance(value, dict) else None
-        raise ExecutionError(str(detail or "could not resolve the debug-claimed invocation"))
+    _raise_for_status(status, value, 200, "could not resolve the debug-claimed invocation")
 
 
 def vault_request(workspace_id: str, operation: str, **values: Any) -> dict[str, Any] | list[Any]:
@@ -391,7 +386,5 @@ def vault_request(workspace_id: str, operation: str, **values: Any) -> dict[str,
     elif operation == "revoke":
         method, path, expected = "DELETE", f"{base}/entries/{values['entry_id']}", {204}
     status, result = _authorized_request(path, method=method, body=body)
-    if status not in expected:
-        detail = result.get("detail") if isinstance(result, dict) else None
-        raise ExecutionError(str(detail or f"Vault request failed ({status})"))
+    _raise_for_status(status, result, expected, f"Vault request failed ({status})")
     return result

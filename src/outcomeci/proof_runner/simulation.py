@@ -16,6 +16,7 @@ from typing import Any
 import yaml
 
 from ..process import ExecutionError
+from ..security import atomic_write_json
 
 REPORT_SCHEMA = "outcomeci.proof-report/v1alpha1"
 FAULT_EXIT = 86
@@ -107,6 +108,16 @@ def bundled_definition(name: str = "local-first-v1") -> Path:
     return Path(str(files("outcomeci.proof_runner").joinpath(f"proofs/{name}.proof.yml")))
 
 
+def bundled_proof_names() -> tuple[str, ...]:
+    """Every proof shipped in proofs/, derived from the directory instead of
+    kept in sync by hand wherever a proof name needs to be listed (e.g.
+    cli.py's `oci proof run --name` choices)."""
+    proofs = Path(str(files("outcomeci.proof_runner").joinpath("proofs")))
+    return tuple(
+        sorted(path.name.removesuffix(".proof.yml") for path in proofs.glob("*.proof.yml"))
+    )
+
+
 def load_definition(path: Path) -> dict[str, Any]:
     try:
         value = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -187,13 +198,6 @@ def verify_ledger(path: Path) -> str:
             raise ExecutionError("simulation ledger event was modified")
         previous = digest
     return previous
-
-
-def _atomic_json(path: Path, value: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
 
 
 def _step(
@@ -338,7 +342,7 @@ def run(
             "ledger": {"path": str(ledger_path), "sha256": final_digest},
             "steps": results,
         }
-        _atomic_json(report, value)
+        atomic_write_json(report, value)
         return value
     except Exception as exc:
         ledger.append(event="simulation_failed", status="failed", error_type=type(exc).__name__)
@@ -357,5 +361,5 @@ def run(
             "error": str(exc),
             "ledger": {"path": str(ledger_path), "sha256": verify_ledger(ledger_path)},
         }
-        _atomic_json(report, value)
+        atomic_write_json(report, value)
         raise

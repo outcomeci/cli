@@ -12,6 +12,8 @@ from pathlib import Path
 
 import yaml
 
+from .security import atomic_write_json
+
 
 class SlackError(RuntimeError):
     pass
@@ -310,47 +312,6 @@ def api(
     return value
 
 
-def targets(workspace: Path, *, runner: CommandRunner = subprocess.run) -> dict[str, list[str]]:
-    """Return readable selectors only; never expose provider IDs."""
-    users_value = api(workspace, "users.list", runner=runner)
-    channels_value = api(
-        workspace,
-        "conversations.list",
-        {"types": "public_channel,private_channel", "limit": 999},
-        runner=runner,
-    )
-    groups_value = api(workspace, "usergroups.list", {"include_users": True}, runner=runner)
-    users = []
-    for item in users_value.get("members", []):
-        if (
-            not isinstance(item, dict)
-            or item.get("deleted")
-            or item.get("is_bot")
-            or item.get("id") == "USLACKBOT"
-            or str(item.get("name", "")).casefold() == "slackbot"
-        ):
-            continue
-        profile = item.get("profile", {}) if isinstance(item.get("profile"), dict) else {}
-        name = profile.get("display_name") or item.get("name") or profile.get("real_name")
-        if isinstance(name, str) and name:
-            users.append(name)
-    channels = [
-        item["name"]
-        for item in channels_value.get("channels", [])
-        if isinstance(item, dict) and isinstance(item.get("name"), str)
-    ]
-    groups = [
-        item.get("handle") or item.get("name")
-        for item in groups_value.get("usergroups", [])
-        if isinstance(item, dict) and isinstance(item.get("handle") or item.get("name"), str)
-    ]
-    return {
-        "users": sorted(set(users), key=str.casefold),
-        "channels": sorted(set(channels), key=str.casefold),
-        "groups": sorted(set(groups), key=str.casefold),
-    }
-
-
 def _directory(
     workspace: Path, *, runner: CommandRunner = subprocess.run
 ) -> dict[str, dict[str, object]]:
@@ -392,13 +353,16 @@ def _directory(
         for name in names:
             if isinstance(name, str) and name:
                 users[name.casefold()] = item["id"]
-    channels = {
-        str(item["name"]).casefold(): item["id"]
-        for item in channels_value.get("channels", [])
-        if isinstance(item, dict)
-        and isinstance(item.get("name"), str)
-        and isinstance(item.get("id"), str)
-    }
+    channels: dict[str, object] = {}
+    channel_names: dict[str, str] = {}
+    for item in channels_value.get("channels", []):
+        if (
+            isinstance(item, dict)
+            and isinstance(item.get("name"), str)
+            and isinstance(item.get("id"), str)
+        ):
+            channels[item["name"].casefold()] = item["id"]
+            channel_names[item["id"]] = item["name"]
     groups = {
         str(item.get("handle") or item.get("name")).casefold(): item
         for item in groups_value.get("usergroups", [])
@@ -406,7 +370,24 @@ def _directory(
         and isinstance(item.get("id"), str)
         and isinstance(item.get("handle") or item.get("name"), str)
     }
-    return {"users": users, "user_names": user_names, "channels": channels, "groups": groups}
+    return {
+        "users": users,
+        "user_names": user_names,
+        "channels": channels,
+        "channel_names": channel_names,
+        "groups": groups,
+    }
+
+
+def targets(workspace: Path, *, runner: CommandRunner = subprocess.run) -> dict[str, list[str]]:
+    """Return readable selectors only; never expose provider IDs."""
+    directory = _directory(workspace, runner=runner)
+    groups = [str(item.get("handle") or item.get("name")) for item in directory["groups"].values()]
+    return {
+        "users": sorted(set(directory["user_names"].values()), key=str.casefold),
+        "channels": sorted(set(directory["channel_names"].values()), key=str.casefold),
+        "groups": sorted(set(groups), key=str.casefold),
+    }
 
 
 def _runtime_path(workspace: Path) -> Path:
@@ -422,11 +403,7 @@ def _runtime(workspace: Path) -> dict[str, object]:
 
 
 def _write_runtime(workspace: Path, value: dict[str, object]) -> None:
-    path = _runtime_path(workspace)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    atomic_write_json(_runtime_path(workspace), value)
 
 
 def deliver(

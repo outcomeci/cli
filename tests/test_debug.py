@@ -29,13 +29,13 @@ def test_synthesizes_a_cron_payload_and_runs_with_the_leased_resolver(monkeypatc
     monkeypatch.setattr(debug, "complete_debug_lease", complete)
     captured = {}
 
-    def trigger(root, config, name, payload, **options):
+    def trigger(root, config, name, payload, *, options):
         captured.update(name=name, payload=payload, options=options)
-        assert options["credential_resolver"]("vault:slack/bot-token")["secrets"]["value"] == (
+        assert options.credential_resolver("vault:slack/bot-token")["secrets"]["value"] == (
             "xoxb-secret"
         )
-        assert options["execution_backend"] == "outcomeci"
-        assert options["_container_isolated"] is False
+        assert options.execution_backend == "outcomeci"
+        assert options._container_isolated is False
         return {"run_id": "run-1"}
 
     with mock.patch("outcomeci.local.trigger", side_effect=trigger):
@@ -221,8 +221,8 @@ def test_auto_continue_drives_through_ready_phases(monkeypatch, tmp_path):
     assert result["completed_phases"] == ["resolve_analytics", "notify"]
     assert len(continue_calls) == 1
     assert continue_calls[0][0:2] == ("run-1", True)
-    assert continue_calls[0][2]["execution_backend"] == "outcomeci"
-    assert continue_calls[0][2]["_container_isolated"] is False
+    assert continue_calls[0][2]["options"].execution_backend == "outcomeci"
+    assert continue_calls[0][2]["options"]._container_isolated is False
 
 
 def test_without_auto_continue_stops_after_the_first_phase(monkeypatch, tmp_path):
@@ -261,9 +261,9 @@ def test_resolver_rejects_a_reference_missing_from_the_lease(monkeypatch, tmp_pa
     monkeypatch.setattr(debug, "issue_debug_lease", lambda *a, **k: _lease())
     monkeypatch.setattr(debug, "complete_debug_lease", mock.Mock())
 
-    def trigger(root, config, name, payload, **options):
+    def trigger(root, config, name, payload, *, options):
         with pytest.raises(ExecutionError, match="not granted"):
-            options["credential_resolver"]("vault:unknown/path")
+            options.credential_resolver("vault:unknown/path")
         return {"run_id": "run-1"}
 
     with mock.patch("outcomeci.local.trigger", side_effect=trigger):
@@ -278,9 +278,9 @@ def test_resolver_rejects_an_expired_lease(monkeypatch, tmp_path):
     monkeypatch.setattr(debug, "issue_debug_lease", lambda *a, **k: expired)
     monkeypatch.setattr(debug, "complete_debug_lease", mock.Mock())
 
-    def trigger(root, config, name, payload, **options):
+    def trigger(root, config, name, payload, *, options):
         with pytest.raises(ExecutionError, match="expired"):
-            options["credential_resolver"]("vault:slack/bot-token")
+            options.credential_resolver("vault:slack/bot-token")
         return {"run_id": "run-1"}
 
     with mock.patch("outcomeci.local.trigger", side_effect=trigger):

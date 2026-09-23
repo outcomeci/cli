@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 import yaml
 
@@ -44,22 +45,6 @@ def _configure(tmp_path: Path) -> Path:
     return path
 
 
-class _Response:
-    headers = {"Content-Type": "application/json"}
-
-    def __init__(self, value):
-        self.value = value
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *args):
-        return None
-
-    def read(self):
-        return json.dumps(self.value).encode()
-
-
 def test_http_custom_transport_validates_contract_and_uses_external_auth(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -70,11 +55,13 @@ def test_http_custom_transport_validates_contract_and_uses_external_auth(
     monkeypatch.setenv("PEOPLE_TOKEN", "secret")
     requests = []
 
-    def open_request(request, timeout):
-        requests.append(request)
-        return _Response({"correlation_id": "human-1"})
+    def fake_request(
+        method, url, *, content=None, headers=None, timeout=None, follow_redirects=None
+    ):
+        requests.append(httpx.Request(method, url, content=content, headers=headers))
+        return httpx.Response(200, json={"correlation_id": "human-1"})
 
-    monkeypatch.setattr(custom.urllib.request, "urlopen", open_request)
+    monkeypatch.setattr(custom.httpx, "request", fake_request)
     result = custom.call(
         config,
         "request",

@@ -27,6 +27,15 @@ class ProcessResult:
     stderr: str
 
 
+def _kill_group(child: subprocess.Popen) -> None:
+    os.killpg(child.pid, signal.SIGTERM)
+    try:
+        child.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        os.killpg(child.pid, signal.SIGKILL)
+        child.wait()
+
+
 def run(
     command: tuple[str, ...],
     *,
@@ -110,20 +119,10 @@ def run(
                     on_output(chunk.decode("utf-8", errors="replace"))
         returncode = child.wait(timeout=max(0.1, deadline - time.monotonic()))
     except (TimeoutError, subprocess.TimeoutExpired) as error:
-        os.killpg(child.pid, signal.SIGTERM)
-        try:
-            child.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            os.killpg(child.pid, signal.SIGKILL)
-            child.wait()
+        _kill_group(child)
         raise TimeoutError("agent process timed out") from error
     except BaseException:
-        os.killpg(child.pid, signal.SIGTERM)
-        try:
-            child.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            os.killpg(child.pid, signal.SIGKILL)
-            child.wait()
+        _kill_group(child)
         raise
     finally:
         selector.close()

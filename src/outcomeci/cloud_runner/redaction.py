@@ -15,6 +15,11 @@ PEM_BLOCK = re.compile(r"-----BEGIN [A-Z ]+-----.*?-----END [A-Z ]+-----", re.DO
 
 
 def redact(value: Any) -> Any:
+    # Structured (dict/list) redaction has no production caller today --
+    # redact_diagnostic() below is the only one, and it always passes a
+    # string. Kept generic and tested on purpose for the next caller that
+    # needs to scrub a structured payload before logging it, rather than
+    # narrowed to str-only and rebuilt later.
     if isinstance(value, dict):
         return {
             key: "[REDACTED]" if SENSITIVE_KEY.search(str(key)) else redact(item)

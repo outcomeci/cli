@@ -11,6 +11,7 @@ import yaml
 
 from .custom import call as call_custom
 from .process import ExecutionError
+from .security import atomic_write_json, atomic_write_text
 from .slack import deliver as deliver_slack
 from .slack import poll_replies
 
@@ -57,9 +58,7 @@ def assign(
     hook["wait"] = {"strategy": strategy}
     if timeout_seconds is not None:
         hook["wait"]["timeout_seconds"] = timeout_seconds
-    temporary = config.with_suffix(".tmp")
-    temporary.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
-    temporary.replace(config)
+    atomic_write_text(config, yaml.safe_dump(document, sort_keys=False))
     return {
         "phase": phase,
         "timing": timing,
@@ -131,11 +130,7 @@ def poll(
                 value.setdefault("observed_responses", []).append(reply)
                 known.add(marker)
         if replies:
-            temporary = matches[0].with_suffix(".tmp")
-            temporary.write_text(
-                json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-            )
-            temporary.replace(matches[0])
+            atomic_write_json(matches[0], value)
         status = value.get("status", "unknown")
         result = {
             "run_id": run_id,
@@ -212,9 +207,7 @@ def request(
             interaction["delivery_status"] = {"delivered": True, "correlation_id": correlation_id}
     else:
         raise ExecutionError(f"interaction {interaction_id} has no supported human delivery")
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(interaction, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    atomic_write_json(path, interaction)
     strategy = interaction.get("wait", {}).get("strategy", "ask")
     if continue_while_waiting or strategy == "continue":
         state = _read(root, run_id)

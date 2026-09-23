@@ -5,8 +5,63 @@ import json
 import stat
 from pathlib import Path
 
+import httpx
+
 from outcomeci import cloud
 from outcomeci.repository import initialize
+
+
+def test_request_builds_the_httpx_call_and_parses_a_json_response(monkeypatch) -> None:
+    captured = {}
+
+    def fake_request(method, url, *, json=None, headers=None, timeout=None, follow_redirects=None):
+        captured.update(
+            method=method, url=url, json=json, headers=headers, follow_redirects=follow_redirects
+        )
+        return httpx.Response(201, json={"id": "entry-1"})
+
+    monkeypatch.setattr(cloud.httpx, "request", fake_request)
+
+    status, value = cloud._request(
+        "https://api.outcomeci.test/",
+        "/workspaces/w1/vault/secrets",
+        method="POST",
+        body={"path": "x"},
+        token="tok",
+    )
+
+    assert status == 201
+    assert value == {"id": "entry-1"}
+    assert captured["method"] == "POST"
+    assert captured["url"] == "https://api.outcomeci.test/v1/workspaces/w1/vault/secrets"
+    assert captured["json"] == {"path": "x"}
+    assert captured["headers"]["Authorization"] == "Bearer tok"
+    assert captured["follow_redirects"] is True
+
+
+def test_request_tolerates_a_non_json_error_body(monkeypatch) -> None:
+    def fake_request(method, url, **kwargs):
+        return httpx.Response(500, text="upstream exploded")
+
+    monkeypatch.setattr(cloud.httpx, "request", fake_request)
+
+    status, value = cloud._request("https://api.outcomeci.test", "/x")
+
+    assert status == 500
+    assert value == {}
+
+
+def test_request_wraps_a_network_failure(monkeypatch) -> None:
+    def fake_request(method, url, **kwargs):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(cloud.httpx, "request", fake_request)
+
+    try:
+        cloud._request("https://api.outcomeci.test", "/x")
+        raise AssertionError("expected ExecutionError")
+    except cloud.ExecutionError as exc:
+        assert "could not reach OutcomeCI Cloud" in str(exc)
 
 
 def test_device_login_persists_owner_only_credentials(tmp_path: Path, monkeypatch) -> None:

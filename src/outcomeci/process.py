@@ -24,6 +24,16 @@ class Result:
     stderr: str
 
 
+def terminate_gracefully(process: subprocess.Popen, *, timeout: float = 2) -> None:
+    """Ask a subprocess to exit, then force it after `timeout` seconds."""
+    process.terminate()
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait()
+
+
 def command(
     argv: list[str],
     *,
@@ -85,6 +95,43 @@ class GitHub:
             raise ExecutionError(f"git clone failed: {result.stderr[-1000:]}", True)
 
 
+def _authorize_agent(
+    agent: str, model: str | None, env: dict[str, str], *, allow_local_auth: bool
+) -> None:
+    """Propagate this agent's credential env vars into `env` in place.
+
+    Raises if the agent can't authenticate, or (opencode only) its model
+    selection is invalid. Shared by invoke() and invoke_conversation(),
+    which otherwise diverge on everything else about how they run an agent.
+    """
+    if agent == "codex":
+        if os.environ.get("OPENAI_API_KEY"):
+            env["OPENAI_API_KEY"] = os.environ["OPENAI_API_KEY"]
+        if (
+            not allow_local_auth
+            and not os.environ.get("OPENAI_API_KEY")
+            and not os.environ.get("CODEX_HOME")
+        ):
+            raise ExecutionError("Codex needs OPENAI_API_KEY or an ephemeral CODEX_HOME")
+    elif agent == "claude":
+        for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
+            if os.environ.get(key):
+                env[key] = os.environ[key]
+        if not allow_local_auth and not any(
+            key in env for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
+        ):
+            raise ExecutionError("Claude needs ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN")
+    elif agent == "opencode":
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            raise ExecutionError("OpenCode needs an injected OPENROUTER_API_KEY")
+        if not model or not model.startswith("openrouter/"):
+            raise ExecutionError("OpenCode needs an explicit openrouter/<model> selection")
+        env["OPENROUTER_API_KEY"] = api_key
+    else:
+        raise ExecutionError(f"unsupported agent: {agent}")
+
+
 def invoke(
     agent: str,
     model: str | None,
@@ -113,15 +160,8 @@ def invoke(
     env.update(extra_env or {})
     if read_only:
         env = {key: value for key, value in env.items() if not key.startswith("OUTCOMECI_")}
+    _authorize_agent(agent, model, env, allow_local_auth=allow_local_auth)
     if agent == "codex":
-        if (
-            not allow_local_auth
-            and not os.environ.get("OPENAI_API_KEY")
-            and not os.environ.get("CODEX_HOME")
-        ):
-            raise ExecutionError("Codex needs OPENAI_API_KEY or an ephemeral CODEX_HOME")
-        if os.environ.get("OPENAI_API_KEY"):
-            env["OPENAI_API_KEY"] = os.environ["OPENAI_API_KEY"]
         argv = ["codex", "exec", "--approve-for-me", "--skip-git-repo-check"]
         if container_isolated:
             # OutcomeCI Cloud runs inside a dedicated, least-privilege Fargate
@@ -140,13 +180,6 @@ def invoke(
         argv += ["-"]
         input_text = prompt
     elif agent == "claude":
-        for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
-            if os.environ.get(key):
-                env[key] = os.environ[key]
-        if not allow_local_auth and not any(
-            key in env for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
-        ):
-            raise ExecutionError("Claude needs ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN")
         argv = ["claude", "--print", "--permission-mode", "acceptEdits"]
         if container_isolated:
             # Same reasoning as Codex above: OutcomeCI Cloud's Fargate task is
@@ -162,17 +195,9 @@ def invoke(
             argv += ["--model", model]
         argv += [prompt]
         input_text = None
-    elif agent == "opencode":
-        api_key = os.environ.get("OPENROUTER_API_KEY")
-        if not api_key:
-            raise ExecutionError("OpenCode needs an injected OPENROUTER_API_KEY")
-        if not model or not model.startswith("openrouter/"):
-            raise ExecutionError("OpenCode needs an explicit openrouter/<model> selection")
-        env["OPENROUTER_API_KEY"] = api_key
+    else:  # opencode, already validated above
         argv = ["opencode", "run", "--pure", "--auto", "--format", "json", "--model", model, prompt]
         input_text = None
-    else:
-        raise ExecutionError(f"unsupported agent: {agent}")
     if writable_paths is not None and not container_isolated:
         bwrap = shutil.which("bwrap")
         if not bwrap:
@@ -309,28 +334,14 @@ def invoke_conversation(
         "OPENROUTER_API_KEY",
     }
     env = {key: value for key, value in os.environ.items() if key not in secrets}
+    _authorize_agent(agent, model, env, allow_local_auth=allow_local_auth)
     if agent == "codex":
-        if os.environ.get("OPENAI_API_KEY"):
-            env["OPENAI_API_KEY"] = os.environ["OPENAI_API_KEY"]
-        if (
-            not allow_local_auth
-            and not os.environ.get("OPENAI_API_KEY")
-            and not os.environ.get("CODEX_HOME")
-        ):
-            raise ExecutionError("Codex needs OPENAI_API_KEY or an ephemeral CODEX_HOME")
         base = ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check"]
         if model:
             base += ["--model", model]
         argv = [*base, "resume", session_id, "-"] if session_id else [*base, "-"]
         input_text = prompt
     elif agent == "claude":
-        for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
-            if os.environ.get(key):
-                env[key] = os.environ[key]
-        if not allow_local_auth and not any(
-            key in env for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
-        ):
-            raise ExecutionError("Claude needs ANTHROPIC_API_KEY or CLAUDE_CODE_OAUTH_TOKEN")
         argv = [
             "claude",
             "--print",
@@ -345,17 +356,9 @@ def invoke_conversation(
             argv += ["--model", model]
         argv += [prompt]
         input_text = None
-    elif agent == "opencode":
-        api_key = os.environ.get("OPENROUTER_API_KEY")
-        if not api_key:
-            raise ExecutionError("OpenCode needs an injected OPENROUTER_API_KEY")
-        if not model or not model.startswith("openrouter/"):
-            raise ExecutionError("OpenCode needs an explicit openrouter/<model> selection")
-        env["OPENROUTER_API_KEY"] = api_key
+    else:  # opencode, already validated above
         argv = ["opencode", "run", "--pure", "--format", "json", "--model", model, prompt]
         input_text = None
-    else:
-        raise ExecutionError(f"unsupported agent: {agent}")
     result = command(argv, cwd=workspace, timeout=timeout, input_text=input_text, env=env)
     if (
         agent == "codex"

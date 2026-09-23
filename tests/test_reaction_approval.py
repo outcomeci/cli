@@ -448,7 +448,11 @@ def test_continue_run_resolves_the_before_hook_of_a_later_phase(tmp_path: Path, 
         ),
     )
     local.continue_run(
-        tmp_path, config, "run-1", approve=True, credential_resolver=lambda ref: "token"
+        tmp_path,
+        config,
+        "run-1",
+        approve=True,
+        options=local.ExecutionOptions(credential_resolver=lambda ref: "token"),
     )
     assert executed == [["approved"]]
 
@@ -466,7 +470,11 @@ def test_continue_run_does_not_execute_a_gated_phase_without_approval(tmp_path: 
     )
     with pytest.raises(ExecutionError, match="approval window expired"):
         local.continue_run(
-            tmp_path, config, "run-1", approve=True, credential_resolver=lambda ref: "token"
+            tmp_path,
+            config,
+            "run-1",
+            approve=True,
+            options=local.ExecutionOptions(credential_resolver=lambda ref: "token"),
         )
 
 

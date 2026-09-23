@@ -51,15 +51,15 @@ def test_continue_run_forwards_the_cloud_execution_context(tmp_path: Path, monke
         tmp_path / "outcome.yml",
         "run-1",
         approve=True,
-        credential_resolver=resolver,
-        execution_backend="outcomeci",
-        _container_isolated=True,
+        options=local.ExecutionOptions(
+            credential_resolver=resolver, execution_backend="outcomeci", _container_isolated=True
+        ),
     )
 
     assert result["status"] == "completed"
-    assert captured["credential_resolver"] is resolver
-    assert captured["execution_backend"] == "outcomeci"
-    assert captured["_container_isolated"] is True
+    assert captured["options"].credential_resolver is resolver
+    assert captured["options"].execution_backend == "outcomeci"
+    assert captured["options"]._container_isolated is True
 
 
 def test_respond_forwards_the_cloud_execution_context(tmp_path: Path, monkeypatch) -> None:
@@ -102,15 +102,15 @@ def test_respond_forwards_the_cloud_execution_context(tmp_path: Path, monkeypatc
         "approval-1",
         "Looks good.",
         approve=True,
-        credential_resolver=resolver,
-        execution_backend="outcomeci",
-        _container_isolated=True,
+        options=local.ExecutionOptions(
+            credential_resolver=resolver, execution_backend="outcomeci", _container_isolated=True
+        ),
     )
 
     assert result["status"] == "completed"
-    assert captured["credential_resolver"] is resolver
-    assert captured["execution_backend"] == "outcomeci"
-    assert captured["_container_isolated"] is True
+    assert captured["options"].credential_resolver is resolver
+    assert captured["options"].execution_backend == "outcomeci"
+    assert captured["options"]._container_isolated is True
 
 
 def test_continue_run_forwards_the_cloud_execution_context_through_respond(
@@ -159,15 +159,15 @@ def test_continue_run_forwards_the_cloud_execution_context_through_respond(
         tmp_path / "outcome.yml",
         "run-1",
         approve=True,
-        credential_resolver=resolver,
-        execution_backend="outcomeci",
-        _container_isolated=True,
+        options=local.ExecutionOptions(
+            credential_resolver=resolver, execution_backend="outcomeci", _container_isolated=True
+        ),
     )
 
     assert result["status"] == "completed"
-    assert respond_options["credential_resolver"] is resolver
-    assert respond_options["execution_backend"] == "outcomeci"
-    assert respond_options["_container_isolated"] is True
+    assert respond_options["options"].credential_resolver is resolver
+    assert respond_options["options"].execution_backend == "outcomeci"
+    assert respond_options["options"]._container_isolated is True
 
 
 def _fake_invoke(
@@ -285,6 +285,28 @@ def test_manual_execution_requires_manual_trigger(tmp_path: Path) -> None:
         local.begin(tmp_path, path, "This must arrive by email")
 
 
+def test_webhook_trigger_rejects_oversized_payload_with_the_actual_limit(tmp_path: Path) -> None:
+    initialize(tmp_path, "filesystem")
+    path = tmp_path / "outcome.yml"
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["triggers"] = {"inbound": {"type": "webhook.received"}}
+    path.write_text(yaml.safe_dump(value, sort_keys=False))
+    oversized = {"data": "x" * (2 * 1024 * 1024 + 1)}
+    with pytest.raises(ExecutionError, match=re.escape("exceeds the 2 MiB local limit")):
+        local.trigger(tmp_path, path, "inbound", oversized)
+
+
+def test_email_trigger_rejects_oversized_payload_with_the_actual_limit(tmp_path: Path) -> None:
+    initialize(tmp_path, "filesystem")
+    path = tmp_path / "outcome.yml"
+    value = yaml.safe_load(path.read_text())
+    value["spec"]["triggers"] = {"mail": {"type": "email.received"}}
+    path.write_text(yaml.safe_dump(value, sort_keys=False))
+    oversized = {"subject": "x" * (1024 * 1024 + 1)}
+    with pytest.raises(ExecutionError, match=re.escape("exceeds the 1 MiB local limit")):
+        local.trigger(tmp_path, path, "mail", oversized)
+
+
 def test_ready_set_supports_parallel_phases_and_join(tmp_path: Path) -> None:
     initialize(tmp_path, "filesystem")
     compiled = local.compile_workflow(tmp_path / "outcome.yml")
@@ -295,6 +317,59 @@ def test_ready_set_supports_parallel_phases_and_join(tmp_path: Path) -> None:
     assert local._ready(compiled, ["intake"]) == ["product_review", "technical_review"]
     assert local._ready(compiled, ["intake", "product_review"]) == ["technical_review"]
     assert local._ready(compiled, ["intake", "product_review", "technical_review"]) == ["plan"]
+
+
+def test_call_succeeded_requires_broker_ok_true() -> None:
+    assert local._call_succeeded({"result": {"ok": True}})
+    assert not local._call_succeeded({"result": {"ok": False}})
+    # A non-bool truthy "ok" (never emitted by the real broker, but the
+    # field is untyped JSON) must not count as success -- this check is
+    # shared by the must-confirm gate, which needs the strict reading.
+    assert not local._call_succeeded({"result": {"ok": 1}})
+    assert not local._call_succeeded({"result": {}})
+    assert not local._call_succeeded({})
+
+
+def test_call_succeeded_lets_the_providers_own_result_override_ok() -> None:
+    call = {"result": {"ok": True, "output": {"result": {"ok": False}}}}
+    assert not local._call_succeeded(call)
+
+
+def test_write_effect_receipts_reports_provider_override_as_not_ok(tmp_path: Path) -> None:
+    journal = tmp_path / ".outcomeci" / ".broker" / "run-1"
+    journal.mkdir(parents=True)
+    (journal / "journal.json").write_text(
+        json.dumps(
+            {
+                "calls": {
+                    "call-1": {
+                        "capability": "slack.post_message",
+                        "proposal_sha256": "abc",
+                        "status": "confirmed",
+                        "result": {
+                            "ok": True,
+                            "status": 200,
+                            "output": {"result": {"ok": False}},
+                        },
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    outcome_root = tmp_path / "outcome"
+    outcome_root.mkdir()
+    target = local._write_effect_receipts(tmp_path, outcome_root, "run-1", "intake")
+    effects = json.loads(target.read_text(encoding="utf-8"))
+    assert effects["effects"] == [
+        {
+            "capability": "slack.post_message",
+            "proposal_sha256": "abc",
+            "status": "confirmed",
+            "ok": False,
+            "http_status": 200,
+        }
+    ]
 
 
 def test_declared_json_schema_is_enforced(tmp_path: Path) -> None:

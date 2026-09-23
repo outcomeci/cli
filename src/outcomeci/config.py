@@ -38,9 +38,19 @@ def _mapping(value: Any, path: str) -> dict[str, Any]:
     return value
 
 
+def _non_empty_str(value: Any, message: str) -> str:
+    """Validate value is a non-blank string, raising `message` verbatim if
+    not -- callers keep their own field-specific wording (a workflow author
+    reading "outcome.yml.trigger.timezone is required" needs that to stay
+    distinct from ".subject_prefix must be non-empty"), only the identical
+    isinstance+strip check they all repeated collapses to one place."""
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(message)
+    return value
+
+
 def _relative_path(root: Path, relative: Any, field: str) -> Path:
-    if not isinstance(relative, str) or not relative.strip():
-        raise ConfigError(f"{field} must be a non-empty path")
+    relative = _non_empty_str(relative, f"{field} must be a non-empty path")
     path = (root / relative).resolve()
     if private_path(relative):
         raise ConfigError(f"{field} references a credential-bearing or broker-private path")
@@ -87,8 +97,8 @@ def _agent_policy(value: Any, field: str) -> dict[str, Any]:
     runner, model = item.get("runner"), item.get("model")
     if runner is not None and runner not in RUNNERS:
         raise ConfigError(f"{field}.runner must be codex, claude, or opencode")
-    if model is not None and (not isinstance(model, str) or not model.strip()):
-        raise ConfigError(f"{field}.model must be non-empty")
+    if model is not None:
+        model = _non_empty_str(model, f"{field}.model must be non-empty")
     if runner == "opencode" and (not isinstance(model, str) or not model.startswith("openrouter/")):
         raise ConfigError(f"{field}.model must use openrouter/provider/model for OpenCode")
     return {key: item[key] for key in ("runner", "model") if item.get(key) is not None}
@@ -119,10 +129,7 @@ def _contract(value: Any, field: str, *, output: bool) -> dict[str, Any]:
             raise ConfigError(f"{field}.path must remain within the run directory")
         result["path"] = Path(path).as_posix()
     else:
-        source = item.get("from")
-        if not isinstance(source, str) or not source.strip():
-            raise ConfigError(f"{field}.from is required")
-        result["from"] = source
+        result["from"] = _non_empty_str(item.get("from"), f"{field}.from is required")
     if item.get("schema") is not None:
         schema = item["schema"]
         if isinstance(schema, (dict, bool)):
@@ -165,17 +172,18 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
             if isinstance(participant, str):
                 participant = {"role": participant}
             participant = _mapping(participant, f"{field}.{timing}[{index}].participant")
-            if not isinstance(participant.get("role"), str) or not participant["role"].strip():
-                raise ConfigError(f"{field}.{timing}[{index}].participant.role is required")
+            _non_empty_str(
+                participant.get("role"), f"{field}.{timing}[{index}].participant.role is required"
+            )
             interaction = item.get("interaction")
             if interaction not in INTERACTIONS:
                 raise ConfigError(f"{field}.{timing}[{index}].interaction is unsupported")
             required = item.get("required", interaction != "notification")
             if not isinstance(required, bool):
                 raise ConfigError(f"{field}.{timing}[{index}].required must be true or false")
-            purpose = item.get("purpose")
-            if not isinstance(purpose, str) or not purpose.strip():
-                raise ConfigError(f"{field}.{timing}[{index}].purpose is required")
+            purpose = _non_empty_str(
+                item.get("purpose"), f"{field}.{timing}[{index}].purpose is required"
+            )
             delivery = _mapping(
                 item.get("delivery", {"type": "local"}),
                 f"{field}.{timing}[{index}].delivery",
@@ -213,9 +221,10 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
                     raise ConfigError(
                         f"{field}.{timing}[{index}].delivery.source must reference <phase>.outputs.<name>"
                     )
-                emoji = delivery.get("emoji", "+1")
-                if not isinstance(emoji, str) or not emoji.strip():
-                    raise ConfigError(f"{field}.{timing}[{index}].delivery.emoji must be non-empty")
+                emoji = _non_empty_str(
+                    delivery.get("emoji", "+1"),
+                    f"{field}.{timing}[{index}].delivery.emoji must be non-empty",
+                )
                 delivery["emoji"] = emoji.strip()
                 poll_interval = delivery.get("poll_interval_seconds", 20)
                 if not isinstance(poll_interval, int) or not 5 <= poll_interval <= 60:
@@ -240,10 +249,10 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
                     raise ConfigError(
                         f"{field}.{timing}[{index}].delivery.targets[{target_index}].kind is unsupported"
                     )
-                if not isinstance(target.get("name"), str) or not target["name"].strip():
-                    raise ConfigError(
-                        f"{field}.{timing}[{index}].delivery.targets[{target_index}].name is required"
-                    )
+                _non_empty_str(
+                    target.get("name"),
+                    f"{field}.{timing}[{index}].delivery.targets[{target_index}].name is required",
+                )
                 normalized_targets.append(
                     {
                         "kind": target["kind"],
@@ -328,10 +337,9 @@ def _phase_integrations(
         entry = _mapping(raw_entry, entry_field)
         integration_type = entry.get("type")
         if integration_type == "api":
-            capability = entry.get("capability")
-            if not isinstance(capability, str) or not capability.strip():
-                raise ConfigError(f"{entry_field}.capability is required")
-            capability = capability.strip()
+            capability = _non_empty_str(
+                entry.get("capability"), f"{entry_field}.capability is required"
+            ).strip()
             capability_names.append(capability)
             required = entry.get("required", False)
             if not isinstance(required, bool):
@@ -372,8 +380,7 @@ def _named_items(value: Any, field: str) -> list[dict[str, Any]]:
 
 
 def _cron_expression(value: Any, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ConfigError(f"{field} must be a five-field cron expression")
+    value = _non_empty_str(value, f"{field} must be a five-field cron expression")
     fields = value.split()
     if len(fields) != 5:
         raise ConfigError(f"{field} must have five space-separated fields")
@@ -416,10 +423,9 @@ def _triggers(value: Any) -> dict[str, dict[str, Any]]:
             if unknown_cron:
                 raise ConfigError(f"{field} has unknown fields: {', '.join(sorted(unknown_cron))}")
             expression = _cron_expression(trigger.get("expression"), f"{field}.expression")
-            timezone = trigger.get("timezone")
-            if not isinstance(timezone, str) or not timezone.strip():
-                raise ConfigError(f"{field}.timezone is required")
-            timezone = timezone.strip()
+            timezone = _non_empty_str(
+                trigger.get("timezone"), f"{field}.timezone is required"
+            ).strip()
             if timezone not in available_timezones():
                 raise ConfigError(f"{field}.timezone is not a recognized IANA time zone")
             normalized[name] = {
@@ -446,10 +452,8 @@ def _triggers(value: Any) -> dict[str, dict[str, Any]]:
         ):
             raise ConfigError(f"{field}.filters.senders must be a list of email addresses")
         subject_prefix = filters.get("subject_prefix")
-        if subject_prefix is not None and (
-            not isinstance(subject_prefix, str) or not subject_prefix.strip()
-        ):
-            raise ConfigError(f"{field}.filters.subject_prefix must be non-empty")
+        if subject_prefix is not None:
+            _non_empty_str(subject_prefix, f"{field}.filters.subject_prefix must be non-empty")
         normalized[name] = {
             "type": trigger_type,
             **(
@@ -490,10 +494,9 @@ def _http_auth(value: Any, field: str) -> dict[str, Any]:
         raise ConfigError(f"{field}.type is unsupported")
     result = {"type": kind}
     if kind != "none":
-        credential = auth.get("credential")
-        if not isinstance(credential, str) or not credential.strip():
-            raise ConfigError(f"{field}.credential is required")
-        result["credential"] = credential.strip()
+        result["credential"] = _non_empty_str(
+            auth.get("credential"), f"{field}.credential is required"
+        ).strip()
     for key in (
         "header",
         "query",
@@ -506,9 +509,7 @@ def _http_auth(value: Any, field: str) -> dict[str, Any]:
         "account_id",
     ):
         if auth.get(key) is not None:
-            if not isinstance(auth[key], str) or not auth[key].strip():
-                raise ConfigError(f"{field}.{key} must be non-empty")
-            result[key] = auth[key].strip()
+            result[key] = _non_empty_str(auth[key], f"{field}.{key} must be non-empty").strip()
     if kind == "api_key" and not (result.get("header") or result.get("query")):
         result["header"] = "Authorization"
         result["scheme"] = "Bearer"
@@ -698,8 +699,7 @@ def _load_integration_packages(path: Path, spec: dict[str, Any]) -> None:
         name, version = metadata.get("name"), metadata.get("version")
         if not isinstance(name, str) or not IDENTIFIER.fullmatch(name):
             raise ConfigError(f"{field}.metadata.name is invalid")
-        if not isinstance(version, str) or not version.strip():
-            raise ConfigError(f"{field}.metadata.version is required")
+        _non_empty_str(version, f"{field}.metadata.version is required")
         package_spec = _mapping(package.get("spec"), f"{field}.spec")
         for connection in _named_items(package_spec.get("connections", {}), f"{field}.connections"):
             ref = connection.pop("ref")
@@ -725,6 +725,138 @@ def _load_integration_packages(path: Path, spec: dict[str, Any]) -> None:
     spec["integration_packages"] = sorted(normalized, key=lambda item: item["name"])
 
 
+def _validate_custom_connection(item: dict[str, Any], index: int) -> None:
+    """Validate a `provider: custom` connection's transport, operations,
+    auth, and optional request/response contract schemas. Read-only: unlike
+    the `http` provider branch beside this call site, nothing here writes
+    back into `item`."""
+    transport = _mapping(item.get("transport"), f"spec.connections[{index}].transport")
+    transport_type = transport.get("type")
+    if transport_type == "http":
+        if not isinstance(transport.get("endpoint"), str) or not transport["endpoint"].startswith(
+            ("http://", "https://")
+        ):
+            raise ConfigError(f"spec.connections[{index}].transport.endpoint must be an HTTP URL")
+    elif transport_type == "mcp":
+        protocol = transport.get("protocol")
+        if protocol == "streamable_http" and (
+            not isinstance(transport.get("endpoint"), str)
+            or not transport["endpoint"].startswith(("http://", "https://"))
+        ):
+            raise ConfigError(f"spec.connections[{index}].transport.endpoint must be an HTTP URL")
+        if protocol == "stdio" and (
+            not isinstance(transport.get("command"), list)
+            or not transport["command"]
+            or not all(isinstance(part, str) for part in transport["command"])
+        ):
+            raise ConfigError(
+                f"spec.connections[{index}].transport.command must be a non-empty string list"
+            )
+        if protocol not in {"streamable_http", "stdio"}:
+            raise ConfigError(f"spec.connections[{index}].transport.protocol is unsupported")
+    else:
+        raise ConfigError(f"spec.connections[{index}].transport.type is unsupported")
+    operations = _mapping(item.get("operations"), f"spec.connections[{index}].operations")
+    for operation in ("request", "poll"):
+        operation_value = _mapping(
+            operations.get(operation),
+            f"spec.connections[{index}].operations.{operation}",
+        )
+        if transport_type == "http" and not isinstance(operation_value.get("path"), str):
+            raise ConfigError(f"spec.connections[{index}].operations.{operation}.path is required")
+        if transport_type == "mcp" and not isinstance(operation_value.get("tool"), str):
+            raise ConfigError(f"spec.connections[{index}].operations.{operation}.tool is required")
+    auth = item.get("auth", {})
+    if auth:
+        auth = _mapping(auth, f"spec.connections[{index}].auth")
+        if set(auth) - {"env", "header", "scheme"} or not isinstance(auth.get("env"), str):
+            raise ConfigError(
+                f"spec.connections[{index}].auth must reference an environment variable"
+            )
+    contract = item.get("contract", {})
+    if contract:
+        contract = _mapping(contract, f"spec.connections[{index}].contract")
+        if set(contract) - {"request", "poll"}:
+            raise ConfigError(f"spec.connections[{index}].contract supports only request and poll")
+        for operation, operation_contract in contract.items():
+            operation_contract = _mapping(
+                operation_contract,
+                f"spec.connections[{index}].contract.{operation}",
+            )
+            if set(operation_contract) - {"input", "output"}:
+                raise ConfigError(
+                    f"spec.connections[{index}].contract.{operation} supports only input and output"
+                )
+            for direction, schema in operation_contract.items():
+                if not isinstance(schema, dict):
+                    raise ConfigError(
+                        f"spec.connections[{index}].contract.{operation}.{direction} must be an inline JSON Schema"
+                    )
+                try:
+                    jsonschema.validators.validator_for(schema).check_schema(schema)
+                except jsonschema.SchemaError as exc:
+                    raise ConfigError(
+                        f"spec.connections[{index}].contract.{operation}.{direction} is not a valid JSON Schema: {exc.message}"
+                    ) from exc
+
+
+def _validate_phase_graph(
+    normalized_phases: dict[str, Any],
+    phases: dict[str, Any],
+    triggers: dict[str, Any],
+    outputs: dict[tuple[str, str], dict[str, Any]],
+) -> None:
+    """Cross-phase validation once every phase's own contract is already
+    normalized: dependency edges point at real, non-self phases; every
+    input's `from` resolves to a declared producer that's a direct
+    dependency (or a known trigger/runtime/context source); the same for
+    reaction hooks' output sources."""
+    for phase_name, phase in normalized_phases.items():
+        for dependency in phase["needs"]:
+            if dependency == phase_name:
+                raise ConfigError(f"phase {phase_name} cannot depend on itself")
+            if dependency not in phases:
+                raise ConfigError(f"phase {phase_name} needs unknown phase {dependency}")
+        for item in phase["inputs"]:
+            source = item["from"]
+            if source.startswith(("runtime.", "context.")):
+                continue
+            if source.startswith("trigger."):
+                trigger_name = source.removeprefix("trigger.")
+                if trigger_name not in triggers:
+                    raise ConfigError(
+                        f"input {phase_name}.{item['name']} references unknown trigger {trigger_name}"
+                    )
+                continue
+            match = re.fullmatch(
+                r"([a-z][a-z0-9_-]{0,62})\.outputs\.([a-z][a-z0-9_-]{0,62})", source
+            )
+            if not match or (match.group(1), match.group(2)) not in outputs:
+                raise ConfigError(
+                    f"input {phase_name}.{item['name']} has no declared producer: {source}"
+                )
+            if match.group(1) not in phase["needs"]:
+                raise ConfigError(
+                    f"input {phase_name}.{item['name']} must come from a direct dependency"
+                )
+        for timing_group in phase["humans"].values():
+            for hook in timing_group:
+                if hook["delivery"].get("type") != "reaction":
+                    continue
+                source = hook["delivery"]["source"]
+                match = re.fullmatch(
+                    r"([a-z][a-z0-9_-]{0,62})\.outputs\.([a-z][a-z0-9_-]{0,62})", source
+                )
+                if not match or (match.group(1), match.group(2)) not in outputs:
+                    raise ConfigError(
+                        f"phase {phase_name} human hook {hook['id']} references unknown output: {source}"
+                    )
+                if match.group(1) not in phase["needs"]:
+                    raise ConfigError(
+                        f"phase {phase_name} human hook {hook['id']} must reference a direct dependency's output"
+                    )
+
+
 def _load_v1alpha1(path: Path) -> dict[str, Any]:
     try:
         root = _mapping(yaml.safe_load(path.read_text(encoding="utf-8")), "document")
@@ -735,8 +867,7 @@ def _load_v1alpha1(path: Path) -> dict[str, Any]:
     if root.get("kind") != "OutcomeWorkflow":
         raise ConfigError("kind must be OutcomeWorkflow")
     metadata = _mapping(root.get("metadata"), "metadata")
-    if not isinstance(metadata.get("name"), str) or not metadata["name"].strip():
-        raise ConfigError("metadata.name is required")
+    _non_empty_str(metadata.get("name"), "metadata.name is required")
     spec = _mapping(root.get("spec"), "spec")
     _load_integration_packages(path.resolve(), spec)
     triggers = _triggers(spec.get("triggers"))
@@ -868,50 +999,7 @@ def _load_v1alpha1(path: Path) -> dict[str, Any]:
             "required_capabilities": required_capabilities,
         }
 
-    for phase_name, phase in normalized_phases.items():
-        for dependency in phase["needs"]:
-            if dependency == phase_name:
-                raise ConfigError(f"phase {phase_name} cannot depend on itself")
-            if dependency not in phases:
-                raise ConfigError(f"phase {phase_name} needs unknown phase {dependency}")
-        for item in phase["inputs"]:
-            source = item["from"]
-            if source.startswith(("runtime.", "context.")):
-                continue
-            if source.startswith("trigger."):
-                trigger_name = source.removeprefix("trigger.")
-                if trigger_name not in triggers:
-                    raise ConfigError(
-                        f"input {phase_name}.{item['name']} references unknown trigger {trigger_name}"
-                    )
-                continue
-            match = re.fullmatch(
-                r"([a-z][a-z0-9_-]{0,62})\.outputs\.([a-z][a-z0-9_-]{0,62})", source
-            )
-            if not match or (match.group(1), match.group(2)) not in outputs:
-                raise ConfigError(
-                    f"input {phase_name}.{item['name']} has no declared producer: {source}"
-                )
-            if match.group(1) not in phase["needs"]:
-                raise ConfigError(
-                    f"input {phase_name}.{item['name']} must come from a direct dependency"
-                )
-        for timing_group in phase["humans"].values():
-            for hook in timing_group:
-                if hook["delivery"].get("type") != "reaction":
-                    continue
-                source = hook["delivery"]["source"]
-                match = re.fullmatch(
-                    r"([a-z][a-z0-9_-]{0,62})\.outputs\.([a-z][a-z0-9_-]{0,62})", source
-                )
-                if not match or (match.group(1), match.group(2)) not in outputs:
-                    raise ConfigError(
-                        f"phase {phase_name} human hook {hook['id']} references unknown output: {source}"
-                    )
-                if match.group(1) not in phase["needs"]:
-                    raise ConfigError(
-                        f"phase {phase_name} human hook {hook['id']} must reference a direct dependency's output"
-                    )
+    _validate_phase_graph(normalized_phases, phases, triggers, outputs)
 
     indegree = {name: len(value["needs"]) for name, value in normalized_phases.items()}
     remaining = set(normalized_phases)
@@ -953,86 +1041,7 @@ def _load_v1alpha1(path: Path) -> dict[str, Any]:
                 )
             item["allow_private_network"] = allow_private
         if provider == "custom":
-            transport = _mapping(item.get("transport"), f"spec.connections[{index}].transport")
-            transport_type = transport.get("type")
-            if transport_type == "http":
-                if not isinstance(transport.get("endpoint"), str) or not transport[
-                    "endpoint"
-                ].startswith(("http://", "https://")):
-                    raise ConfigError(
-                        f"spec.connections[{index}].transport.endpoint must be an HTTP URL"
-                    )
-            elif transport_type == "mcp":
-                protocol = transport.get("protocol")
-                if protocol == "streamable_http" and (
-                    not isinstance(transport.get("endpoint"), str)
-                    or not transport["endpoint"].startswith(("http://", "https://"))
-                ):
-                    raise ConfigError(
-                        f"spec.connections[{index}].transport.endpoint must be an HTTP URL"
-                    )
-                if protocol == "stdio" and (
-                    not isinstance(transport.get("command"), list)
-                    or not transport["command"]
-                    or not all(isinstance(part, str) for part in transport["command"])
-                ):
-                    raise ConfigError(
-                        f"spec.connections[{index}].transport.command must be a non-empty string list"
-                    )
-                if protocol not in {"streamable_http", "stdio"}:
-                    raise ConfigError(
-                        f"spec.connections[{index}].transport.protocol is unsupported"
-                    )
-            else:
-                raise ConfigError(f"spec.connections[{index}].transport.type is unsupported")
-            operations = _mapping(item.get("operations"), f"spec.connections[{index}].operations")
-            for operation in ("request", "poll"):
-                operation_value = _mapping(
-                    operations.get(operation),
-                    f"spec.connections[{index}].operations.{operation}",
-                )
-                if transport_type == "http" and not isinstance(operation_value.get("path"), str):
-                    raise ConfigError(
-                        f"spec.connections[{index}].operations.{operation}.path is required"
-                    )
-                if transport_type == "mcp" and not isinstance(operation_value.get("tool"), str):
-                    raise ConfigError(
-                        f"spec.connections[{index}].operations.{operation}.tool is required"
-                    )
-            auth = item.get("auth", {})
-            if auth:
-                auth = _mapping(auth, f"spec.connections[{index}].auth")
-                if set(auth) - {"env", "header", "scheme"} or not isinstance(auth.get("env"), str):
-                    raise ConfigError(
-                        f"spec.connections[{index}].auth must reference an environment variable"
-                    )
-            contract = item.get("contract", {})
-            if contract:
-                contract = _mapping(contract, f"spec.connections[{index}].contract")
-                if set(contract) - {"request", "poll"}:
-                    raise ConfigError(
-                        f"spec.connections[{index}].contract supports only request and poll"
-                    )
-                for operation, operation_contract in contract.items():
-                    operation_contract = _mapping(
-                        operation_contract,
-                        f"spec.connections[{index}].contract.{operation}",
-                    )
-                    if set(operation_contract) - {"input", "output"}:
-                        raise ConfigError(
-                            f"spec.connections[{index}].contract.{operation} supports only input and output"
-                        )
-                    for direction, schema in operation_contract.items():
-                        if not isinstance(schema, dict):
-                            raise ConfigError(
-                                f"spec.connections[{index}].contract.{operation}.{direction} must be an inline JSON Schema"
-                            )
-                        try:
-                            jsonschema.validators.validator_for(schema).check_schema(schema)
-                        except jsonschema.SchemaError as exc:
-                            raise ConfigError(
-                                f"spec.connections[{index}].contract.{operation}.{direction} is not a valid JSON Schema: {exc.message}"
-                            ) from exc
+            _validate_custom_connection(item, index)
     normalized_integrations = _integrations(spec, {item["ref"]: item for item in connections})
     spec["integrations"] = normalized_integrations
     available_capabilities = (
@@ -1205,7 +1214,6 @@ def compile_workflow(path: Path) -> dict[str, Any]:
     context_files = (
         _filesystem_context(root, context) if context.get("provider") == "filesystem" else []
     )
-    # to the role-neutral orchestrator key.
     reviewers = {}
     for name, integration in spec.get("integrations", {}).items():
         if integration.get("policy"):

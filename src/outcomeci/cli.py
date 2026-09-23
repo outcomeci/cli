@@ -12,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-from . import __version__
+from . import __version__, debug, slack_vault, tunnels, webhooks
 from .capability import invoke as invoke_capability
 from .capability import invoke_integration
 from .cloud import auth_status as cloud_auth_status
@@ -36,9 +36,9 @@ from .integrations import (
 )
 from .integrations import apply_patch as apply_integration_patch
 from .integrations import propose_patch as propose_integration_patch
+from .local import ExecutionOptions, compile_context, validate_artifacts
 from .local import advance as advance_local_outcome
 from .local import begin as begin_local_outcome
-from .local import compile_context, validate_artifacts
 from .local import continue_run as continue_local_outcome
 from .local import recover as recover_local_outcome
 from .local import request_input as request_local_input
@@ -54,7 +54,7 @@ from .locking import verify_lock, write_lock
 from .mcp_server import serve as serve_mcp
 from .outcome import run as run_outcome
 from .process import ExecutionError
-from .proof_runner import bundled_definition
+from .proof_runner import bundled_definition, bundled_proof_names
 from .proof_runner import run as run_simulation
 from .publication import prepare_publication
 from .repository import RepositoryError, initialize, update, validate
@@ -102,7 +102,7 @@ def parser() -> argparse.ArgumentParser:
     tunnel_commands = tunnel.add_subparsers(dest="tunnel_command", required=True)
     for name in ("start", "status", "stop"):
         action = tunnel_commands.add_parser(name)
-        action.add_argument("--workspace", required=True)
+        action.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
         if name == "start":
             action.add_argument("--target", required=True)
             action.add_argument("--ttl-seconds", type=int, default=900)
@@ -164,7 +164,7 @@ def parser() -> argparse.ArgumentParser:
     workflow_listen = workflow_commands.add_parser(
         "listen", help="Execute queued workflow triggers locally"
     )
-    workflow_listen.add_argument("--workspace", required=True, help="Cloud workspace identifier")
+    workflow_listen.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     workflow_listen.add_argument("--workflow", required=True, help="Cloud workflow identifier")
     workflow_listen.add_argument("--dir", type=Path, default=Path.cwd())
     workflow_listen.add_argument("--config", type=Path, default=Path("outcome.yml"))
@@ -178,7 +178,7 @@ def parser() -> argparse.ArgumentParser:
         "debug",
         help="Run a backend: outcomeci workflow locally against real cloud vault credentials",
     )
-    workflow_debug.add_argument("--workspace", required=True, help="Cloud workspace identifier")
+    workflow_debug.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     workflow_debug.add_argument("--workflow", required=True, help="Cloud workflow identifier")
     workflow_debug.add_argument("--dir", type=Path, default=Path.cwd())
     workflow_debug.add_argument("--config", type=Path, default=Path("outcome.yml"))
@@ -200,7 +200,7 @@ def parser() -> argparse.ArgumentParser:
         "effects (e.g. sending Slack messages) later phases perform",
     )
     workflow_sync.add_argument("file", type=Path)
-    workflow_sync.add_argument("--workspace", required=True)
+    workflow_sync.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     workflow_sync.add_argument("--name")
     workflow_sync.add_argument(
         "--patch", type=Path, help="OutcomeWorkflowPatch that produced this version"
@@ -213,10 +213,10 @@ def parser() -> argparse.ArgumentParser:
     )
     vault_commands = vault.add_subparsers(dest="vault_command", required=True)
     vault_list = vault_commands.add_parser("list")
-    vault_list.add_argument("--workspace", required=True)
+    vault_list.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     vault_put = vault_commands.add_parser("put")
     vault_put.add_argument("path")
-    vault_put.add_argument("--workspace", required=True)
+    vault_put.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     vault_put.add_argument("--name")
     vault_put.add_argument("--value")
     vault_put.add_argument("--value-stdin", action="store_true")
@@ -248,16 +248,16 @@ def parser() -> argparse.ArgumentParser:
     )
     vault_rotate = vault_commands.add_parser("rotate")
     vault_rotate.add_argument("entry_id")
-    vault_rotate.add_argument("--workspace", required=True)
+    vault_rotate.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     vault_rotate.add_argument("--value")
     vault_rotate.add_argument("--value-stdin", action="store_true")
     vault_grant = vault_commands.add_parser("grant")
     vault_grant.add_argument("entry_id")
-    vault_grant.add_argument("--workspace", required=True)
+    vault_grant.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     vault_grant.add_argument("--workflow", action="append", default=[])
     vault_revoke = vault_commands.add_parser("revoke")
     vault_revoke.add_argument("entry_id")
-    vault_revoke.add_argument("--workspace", required=True)
+    vault_revoke.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     local_vault = vault_commands.add_parser("local", help="Manage an encrypted offline Vault")
     local_vault_commands = local_vault.add_subparsers(dest="local_vault_command", required=True)
     local_vault_init = local_vault_commands.add_parser("init")
@@ -279,17 +279,7 @@ def parser() -> argparse.ArgumentParser:
     proof_run = proof_commands.add_parser("run")
     proof_source = proof_run.add_mutually_exclusive_group()
     proof_source.add_argument("--definition", type=Path)
-    proof_source.add_argument(
-        "--name",
-        choices=(
-            "local-first-v1",
-            "email-trigger-v1",
-            "docs-quickstart-v1",
-            "vault-credentials-v1",
-            "agent-driven-v1",
-            "webhook-trigger-v1",
-        ),
-    )
+    proof_source.add_argument("--name", choices=bundled_proof_names())
     proof_run.add_argument("--workspace", type=Path, default=Path("/proof"))
     proof_run.add_argument("--report", type=Path)
     outcome = commands.add_parser("outcome")
@@ -496,17 +486,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
         if args.command == "tunnel":
-            from . import tunnels
-
             if args.tunnel_command == "start":
                 tunnels.start(
-                    args.workspace, args.target, ttl_seconds=args.ttl_seconds, public=args.public
+                    args.workspace_id,
+                    args.target,
+                    ttl_seconds=args.ttl_seconds,
+                    public=args.public,
                 )
             else:
                 _print_json(
-                    tunnels.status(args.workspace)
+                    tunnels.status(args.workspace_id)
                     if args.tunnel_command == "status"
-                    else tunnels.stop(args.workspace)
+                    else tunnels.stop(args.workspace_id)
                 )
             return 0
         if args.command == "proof":
@@ -562,12 +553,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _print_json(result, sort_keys=True)
                 return 0
             if args.workflow_command == "listen":
-                from .webhooks import listen
-
                 root = args.dir.resolve()
                 config = (root / args.config).resolve()
-                listen(
-                    args.workspace,
+                webhooks.listen(
+                    args.workspace_id,
                     args.workflow,
                     root,
                     config,
@@ -576,14 +565,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 return 0
             if args.workflow_command == "debug":
-                from .debug import run as run_debug
-
                 root = args.dir.resolve()
                 config = (root / args.config).resolve()
-                result = run_debug(
+                result = debug.run(
                     root,
                     config,
-                    args.workspace,
+                    args.workspace_id,
                     args.workflow,
                     trigger_name=args.trigger,
                     invocation_id=args.invocation_id,
@@ -596,7 +583,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
             result = sync_workflow(
                 args.file,
-                args.workspace,
+                args.workspace_id,
                 args.name,
                 "create" if args.create else "version",
                 patch_path=args.patch,
@@ -621,7 +608,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     _print_json(put_local_vault_entry(workspace, args.path, value))
                 return 0
             if args.vault_command == "list":
-                result = vault_request(args.workspace, "list")
+                result = vault_request(args.workspace_id, "list")
             elif args.vault_command in {"put", "rotate"}:
                 reads_stdin = args.value_stdin or getattr(args, "secrets_json_stdin", False)
                 value = sys.stdin.read().rstrip("\n") if reads_stdin else args.value
@@ -649,7 +636,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         ):
                             raise ExecutionError("--secrets-json-stdin requires string fields")
                     result = vault_request(
-                        args.workspace,
+                        args.workspace_id,
                         "put_credential" if typed else "put",
                         path=args.path,
                         display_name=args.name or args.path,
@@ -671,14 +658,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                 else:
                     result = vault_request(
-                        args.workspace, "rotate", entry_id=args.entry_id, value=value
+                        args.workspace_id, "rotate", entry_id=args.entry_id, value=value
                     )
             elif args.vault_command == "grant":
                 result = vault_request(
-                    args.workspace, "grant", entry_id=args.entry_id, workflow_ids=args.workflow
+                    args.workspace_id, "grant", entry_id=args.entry_id, workflow_ids=args.workflow
                 )
             else:
-                result = vault_request(args.workspace, "revoke", entry_id=args.entry_id)
+                result = vault_request(args.workspace_id, "revoke", entry_id=args.entry_id)
             _print_json(result or {"ok": True})
             return 0
         if args.command == "init":
@@ -687,31 +674,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_json({"created": update(args.dir)})
         elif args.command == "validate":
             result = validate(args.dir)
-            print(
-                json.dumps(
-                    {"valid": True, "workflow_revision": result["workflow_revision"]}, indent=2
-                )
-            )
+            _print_json({"valid": True, "workflow_revision": result["workflow_revision"]})
         elif args.command == "status":
             result = validate(args.dir)
-            print(
-                json.dumps(
-                    {
-                        "initialized": True,
-                        "workflow_revision": result["workflow_revision"],
-                        "path": str(args.dir.resolve()),
-                    },
-                    indent=2,
-                )
+            _print_json(
+                {
+                    "initialized": True,
+                    "workflow_revision": result["workflow_revision"],
+                    "path": str(args.dir.resolve()),
+                }
             )
         elif args.command == "outcome" and args.outcome_command == "validate":
             result = compile_workflow(args.config)
-            print(
-                json.dumps(
-                    {"valid": True, "workflow_revision": result["workflow_revision"]},
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                {"valid": True, "workflow_revision": result["workflow_revision"]}, sort_keys=True
             )
         elif args.command == "outcome" and args.outcome_command == "compile":
             if args.run:
@@ -745,18 +721,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_json(run_outcome(args.claim, args.workspace), compact=True)
         elif args.command == "outcome" and args.outcome_command == "start":
             config = _workflow_path(args)
-            print(
-                json.dumps(
-                    start_local_outcome(
-                        args.workspace.resolve(),
-                        config,
-                        args.intent,
-                        agent=args.agent,
-                        model=args.model,
-                    ),
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                start_local_outcome(
+                    args.workspace.resolve(),
+                    config,
+                    args.intent,
+                    agent=args.agent,
+                    model=args.model,
+                ),
+                sort_keys=True,
             )
         elif args.command == "outcome" and args.outcome_command == "trigger":
             try:
@@ -771,115 +744,81 @@ def main(argv: Sequence[str] | None = None) -> int:
                     _workflow_path(args),
                     args.trigger_name,
                     payload,
-                    agent=args.agent,
-                    model=args.model,
+                    options=ExecutionOptions(agent=args.agent, model=args.model),
                 ),
                 sort_keys=True,
             )
         elif args.command == "outcome" and args.outcome_command == "continue":
             config = _workflow_path(args)
-            print(
-                json.dumps(
-                    continue_local_outcome(
-                        args.workspace.resolve(),
-                        config,
-                        args.run_id,
-                        args.approve,
-                        agent=args.agent,
-                        model=args.model,
-                    ),
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                continue_local_outcome(
+                    args.workspace.resolve(),
+                    config,
+                    args.run_id,
+                    args.approve,
+                    options=ExecutionOptions(agent=args.agent, model=args.model),
+                ),
+                sort_keys=True,
             )
         elif args.command == "outcome" and args.outcome_command == "retry":
             config = _workflow_path(args)
-            print(
-                json.dumps(
-                    retry_local_outcome(
-                        args.workspace.resolve(),
-                        config,
-                        args.run_id,
-                        agent=args.agent,
-                        model=args.model,
-                    ),
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                retry_local_outcome(
+                    args.workspace.resolve(),
+                    config,
+                    args.run_id,
+                    options=ExecutionOptions(agent=args.agent, model=args.model),
+                ),
+                sort_keys=True,
             )
         elif args.command == "outcome" and args.outcome_command == "recover":
             config = _workflow_path(args)
-            print(
-                json.dumps(
-                    recover_local_outcome(args.workspace.resolve(), config, args.run_id),
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                recover_local_outcome(args.workspace.resolve(), config, args.run_id),
+                sort_keys=True,
             )
         elif args.command == "outcome" and args.outcome_command == "status":
-            print(
-                json.dumps(
-                    local_outcome_status(args.workspace.resolve(), args.run_id),
-                    indent=2,
-                    sort_keys=True,
-                )
-            )
+            _print_json(local_outcome_status(args.workspace.resolve(), args.run_id), sort_keys=True)
         elif args.command == "outcome" and args.outcome_command == "begin":
             config = _workflow_path(args)
-            print(
-                json.dumps(
-                    begin_local_outcome(args.workspace.resolve(), config, args.intent),
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                begin_local_outcome(args.workspace.resolve(), config, args.intent),
+                sort_keys=True,
             )
         elif args.command == "outcome" and args.outcome_command == "validate-artifacts":
             config = _workflow_path(args)
-            print(
-                json.dumps(
-                    validate_artifacts(args.workspace.resolve(), config, args.run),
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                validate_artifacts(args.workspace.resolve(), config, args.run),
+                sort_keys=True,
             )
         elif args.command == "outcome" and args.outcome_command == "advance":
             config = _workflow_path(args)
-            print(
-                json.dumps(
-                    advance_local_outcome(args.workspace.resolve(), config, args.run, args.approve),
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                advance_local_outcome(args.workspace.resolve(), config, args.run, args.approve),
+                sort_keys=True,
             )
         elif args.command == "outcome" and args.outcome_command == "request-input":
             config = _workflow_path(args)
-            print(
-                json.dumps(
-                    request_local_input(
-                        args.workspace.resolve(), config, args.run, args.interaction_id
-                    ),
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                request_local_input(
+                    args.workspace.resolve(), config, args.run, args.interaction_id
+                ),
+                sort_keys=True,
             )
         elif args.command == "outcome" and args.outcome_command == "respond":
             config = _workflow_path(args)
-            print(
-                json.dumps(
-                    respond_local_outcome(
-                        args.workspace.resolve(),
-                        config,
-                        args.run,
-                        args.interaction_id,
-                        args.message,
-                        approve=args.approve,
-                        reject=args.reject,
-                        agent=args.agent,
-                        model=args.model,
-                    ),
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                respond_local_outcome(
+                    args.workspace.resolve(),
+                    config,
+                    args.run,
+                    args.interaction_id,
+                    args.message,
+                    approve=args.approve,
+                    reject=args.reject,
+                    options=ExecutionOptions(agent=args.agent, model=args.model),
+                ),
+                sort_keys=True,
             )
         elif args.command == "human":
             workspace = args.workspace.resolve()
@@ -891,7 +830,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             elif args.human_command == "assign":
                 if scoped:
                     raise ExecutionError("hook assignment is not allowed during outcome execution")
-                config = (args.config or workspace / "outcome.yml").resolve()
+                config = _workflow_path(args)
                 selected = (
                     [("user", value) for value in args.user]
                     + [("channel", value) for value in args.channel]
@@ -899,22 +838,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 if not selected:
                     raise ExecutionError("assign at least one --user, --channel, or --group")
-                print(
-                    json.dumps(
-                        assign_human_hook(
-                            workspace,
-                            config,
-                            args.phase,
-                            args.timing,
-                            args.interaction_id,
-                            selected,
-                            args.wait,
-                            args.timeout,
-                            args.connection,
-                        ),
-                        indent=2,
-                        sort_keys=True,
-                    )
+                _print_json(
+                    assign_human_hook(
+                        workspace,
+                        config,
+                        args.phase,
+                        args.timing,
+                        args.interaction_id,
+                        selected,
+                        args.wait,
+                        args.timeout,
+                        args.connection,
+                    ),
+                    sort_keys=True,
                 )
             elif args.human_command == "request":
                 result = (
@@ -927,7 +863,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if scoped
                     else request_human_input(
                         workspace,
-                        (args.config or workspace / "outcome.yml").resolve(),
+                        _workflow_path(args),
                         args.run,
                         args.interaction_id,
                         args.continue_while_waiting,
@@ -935,7 +871,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 _print_json(result, sort_keys=True)
             elif args.human_command == "poll":
-                config = (getattr(args, "config", None) or workspace / "outcome.yml").resolve()
+                config = _workflow_path(args)
                 result = (
                     invoke_capability(
                         "poll",
@@ -963,7 +899,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if scoped
                     else accept_human_input(
                         workspace,
-                        (args.config or workspace / "outcome.yml").resolve(),
+                        _workflow_path(args),
                         args.run,
                         args.interaction_id,
                         args.message,
@@ -973,12 +909,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 _print_json(result, sort_keys=True)
         elif args.command == "twin" and args.twin_command == "search":
-            print(
-                json.dumps(
-                    search(args.query, args.repository_id, args.limit, args.component_limit),
-                    indent=2,
-                    sort_keys=True,
-                )
+            _print_json(
+                search(args.query, args.repository_id, args.limit, args.component_limit),
+                sort_keys=True,
             )
         elif args.command == "integration" and args.integration_command in {
             "list",
@@ -1068,24 +1001,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
         elif args.command == "integration" and args.integration_command == "slack":
             if args.slack_command == "setup":
-                print(
-                    json.dumps(
-                        setup_slack(
-                            args.workspace,
-                            name=args.name,
-                            team=args.team,
-                            channel=args.channel,
-                            force=args.force,
-                        ),
-                        indent=2,
-                        sort_keys=True,
-                    )
+                _print_json(
+                    setup_slack(
+                        args.workspace,
+                        name=args.name,
+                        team=args.team,
+                        channel=args.channel,
+                        force=args.force,
+                    ),
+                    sort_keys=True,
                 )
             elif args.slack_command == "sync-credentials":
-                from .slack_vault import sync_credentials
-
                 _print_json(
-                    sync_credentials(
+                    slack_vault.sync_credentials(
                         args.workspace,
                         local=args.local,
                         cloud_workspace=args.cloud,

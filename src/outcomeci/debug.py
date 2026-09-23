@@ -106,18 +106,15 @@ def run(
         f"workflow {workflow_id}, using real cloud vault credentials.",
         file=sys.stderr,
     )
+    options = local.ExecutionOptions(
+        agent=agent,
+        model=model,
+        credential_resolver=resolver,
+        execution_backend="outcomeci",
+        _container_isolated=False,
+    )
     try:
-        result = local.trigger(
-            root,
-            config,
-            name,
-            payload,
-            agent=agent,
-            model=model,
-            credential_resolver=resolver,
-            execution_backend="outcomeci",
-            _container_isolated=False,
-        )
+        result = local.trigger(root, config, name, payload, options=options)
         phase_count = len(compiled["instructions"]["phases"]) if auto_continue else 0
         while auto_continue and len(result.get("completed_phases", [])) != phase_count:
             if not result.get("ready_phases") or result.get("status") == "awaiting_input":
@@ -125,15 +122,7 @@ def run(
             next_phase = result["ready_phases"][0]
             print(f"Continuing into phase {next_phase!r}...", file=sys.stderr)
             result = local.continue_run(
-                root,
-                config,
-                result["run_id"],
-                approve=True,
-                agent=agent,
-                model=model,
-                credential_resolver=resolver,
-                execution_backend="outcomeci",
-                _container_isolated=False,
+                root, config, result["run_id"], approve=True, options=options
             )
     except Exception:
         if invocation_id is not None:

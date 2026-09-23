@@ -19,9 +19,9 @@ The development tunnel service exposes explicitly approved loopback HTTP ports.
 Authenticate to the local API, then keep the client running in the foreground:
 
 ```console
-oci tunnel start --workspace WORKSPACE_ID --target http://127.0.0.1:3000 --public
-oci tunnel status --workspace WORKSPACE_ID
-oci tunnel stop --workspace WORKSPACE_ID
+oci tunnel start --workspace-id WORKSPACE_ID --target http://127.0.0.1:3000 --public
+oci tunnel status --workspace-id WORKSPACE_ID
+oci tunnel stop --workspace-id WORKSPACE_ID
 ```
 
 The client downloads frpc 0.71.0 from its official release and verifies its pinned
@@ -357,7 +357,7 @@ CLI supplies safe Authorization/Bearer defaults for `auth_header`:
 
 ```console
 printf '%s' "$SLACK_BOT_TOKEN" | oci vault put slack/bot-token \
-  --workspace workspace_abc123 \
+  --workspace-id workspace_abc123 \
   --name "Slack bot token" \
   --provider slack \
   --credential-type auth_header \
@@ -547,7 +547,7 @@ Then create the first immutable workflow revision for a workspace:
 
 ```bash
 oci workflow sync outcome.yml \
-  --workspace workspace_abc123 \
+  --workspace-id workspace_abc123 \
   --create
 ```
 
@@ -555,7 +555,7 @@ When that workflow already exists, make the versioning intent explicit:
 
 ```bash
 oci workflow sync outcome.yml \
-  --workspace workspace_abc123 \
+  --workspace-id workspace_abc123 \
   --version
 ```
 

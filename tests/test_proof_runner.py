@@ -156,6 +156,36 @@ def test_vault_credentials_proof_passes_end_to_end(tmp_path: Path) -> None:
     assert verify_ledger(Path(result["ledger"]["path"])) == result["ledger"]["sha256"]
 
 
+def test_vault_credentials_never_exposed_catches_a_leaked_jwt_key(tmp_path: Path) -> None:
+    # Every other credential in this proof carries the oci_vault_proof_
+    # marker credentials.never_exposed greps for, but a JWT private key is
+    # code-generated, not operator-supplied, so it never contains that
+    # marker. This proves the assertion still catches a leak of this one
+    # credential type instead of being silently exempt from it.
+    from outcomeci.proof_runner.credentials import generate_jwt_credential
+    from outcomeci.proof_runner.step import _vault_credentials_assertions
+
+    execute("workspace.initialize", tmp_path, {}, False)
+    execute("vault.initialize", tmp_path, {}, False)
+    context: dict = {}
+    generate_jwt_credential(tmp_path, context, {"path": "credentials/jwt", "issuer": "proof"})
+    fingerprint = context["generated_secrets"][0]
+
+    # Simulate the realistic leak path: the key ends up nested inside a
+    # JSON-serialized ledger event, not printed raw.
+    ledger = tmp_path / "leaked-ledger.jsonl"
+    ledger.write_text(
+        json.dumps({"note": f"leaked key body {fingerprint}"}) + "\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ExecutionError, match="failed durability assertions"):
+        _vault_credentials_assertions(
+            tmp_path,
+            context,
+            {"ledger": str(ledger), "expected": ["credentials.never_exposed"]},
+        )
+
+
 def test_mock_authorization_server_rejects_the_wrong_bearer_token(tmp_path: Path) -> None:
     # Every credential.*_authenticates assertion is only meaningful if the
     # mock authorization server it runs against can actually say no. This

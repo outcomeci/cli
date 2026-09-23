@@ -167,6 +167,16 @@ class PolicyExecutor:
             event(event_type, phase, capability, message, **fields)
         )
 
+    def _deny(self, state: dict[str, Any], phase: str, capability: str, message: str) -> None:
+        """Record and persist a permission.denied event. The caller still
+        raises afterward -- what it raises varies (a fresh IntegrationError
+        with its own code, or a bare re-raise of a caught one), so that part
+        stays at each call site."""
+        self._event(
+            state, "permission.denied", phase, capability, message, decision="deny", level="warning"
+        )
+        self._save(state)
+
     def execute(self, capability: str, inputs: Mapping[str, Any], *, phase: str) -> dict[str, Any]:
         integration = self.executor.compiled["workflow"]["spec"]["integrations"][
             capability.split(".")[0]
@@ -183,16 +193,7 @@ class PolicyExecutor:
                 json.loads(file.read_text()) if file.exists() else {"calls": {}, "references": {}}
             )
             if capability not in self.executor.capabilities(phase):
-                self._event(
-                    state,
-                    "permission.denied",
-                    phase,
-                    capability,
-                    "Integration capability is not authorized",
-                    decision="deny",
-                    level="warning",
-                )
-                self._save(state)
+                self._deny(state, phase, capability, "Integration capability is not authorized")
                 raise IntegrationError(
                     "integration.capability_denied",
                     "capability is not authorized",
@@ -221,16 +222,7 @@ class PolicyExecutor:
                 for call in state["calls"].values()
             )
             if count >= integration["access"].get("max_requests", 1000):
-                self._event(
-                    state,
-                    "permission.denied",
-                    phase,
-                    capability,
-                    "Integration request budget exhausted",
-                    decision="deny",
-                    level="warning",
-                )
-                self._save(state)
+                self._deny(state, phase, capability, "Integration request budget exhausted")
                 raise IntegrationError(
                     "integration.budget_exhausted",
                     "integration request budget exhausted",
@@ -239,16 +231,12 @@ class PolicyExecutor:
             if integration["access"].get("opaque_identifiers") and re.search(
                 r'"[UCDTWB][A-Z0-9]{8,}"', json.dumps(request)
             ):
-                self._event(
+                self._deny(
                     state,
-                    "permission.denied",
                     phase,
                     capability,
                     "Use broker references instead of raw provider identifiers",
-                    decision="deny",
-                    level="warning",
                 )
-                self._save(state)
                 raise IntegrationError(
                     "integration.raw_identifier_denied",
                     "use broker references, not provider identifiers",
@@ -258,16 +246,7 @@ class PolicyExecutor:
             try:
                 actual = self._resolve(request, references)
             except IntegrationError:
-                self._event(
-                    state,
-                    "permission.denied",
-                    phase,
-                    capability,
-                    "Provider reference is unknown or ambiguous",
-                    decision="deny",
-                    level="warning",
-                )
-                self._save(state)
+                self._deny(state, phase, capability, "Provider reference is unknown or ambiguous")
                 raise
             call = {
                 "capability": capability,

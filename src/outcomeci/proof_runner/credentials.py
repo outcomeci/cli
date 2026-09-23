@@ -30,6 +30,7 @@ from ..integrations import IntegrationExecutor, environment_resolver, local_cred
 from ..local_vault import put as put_vault
 from ..local_vault import resolve as resolve_vault
 from ..process import ExecutionError
+from .mock_http import send_json
 
 CONNECTION_AUTH_TYPES = {
     "api_key",
@@ -117,6 +118,17 @@ def generate_jwt_credential(
         "subject": str(request.get("subject", request["issuer"])),
         "algorithm": "RS256",
     }
+    # Unlike every other credential type here, this secret is code-generated
+    # rather than operator-supplied, so it never carries the
+    # oci_vault_proof_ marker credentials.never_exposed otherwise greps for.
+    # Record one unbroken base64 line of the key body (workspace-local
+    # state, never written to the ledger/report) so that check can fall
+    # back to an exact-match scan for this credential too. A single line
+    # with no newlines survives JSON-encoding unchanged (unlike the full,
+    # multi-line PEM), so the scan still catches a leak that went through
+    # json.dumps on its way into the ledger.
+    key_body_line = private_pem.splitlines()[1]
+    context.setdefault("generated_secrets", []).append(key_body_line)
     return put_credential(root, context, {"path": path, "value": value})
 
 
@@ -247,12 +259,7 @@ def _mock_authorization_server(auth_type: str, expected: Any) -> ThreadingHTTPSe
 
     class Handler(BaseHTTPRequestHandler):
         def _send(self, status: int, body: dict[str, Any]) -> None:
-            encoded = json.dumps(body).encode()
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(encoded)))
-            self.end_headers()
-            self.wfile.write(encoded)
+            send_json(self, status, body)
 
         def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler naming)
             if self.path != "/verify":

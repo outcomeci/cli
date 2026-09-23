@@ -54,6 +54,6 @@ def test_public_exposure_requires_acknowledgment():
 
 def test_cli_surface():
     args = parser().parse_args(
-        ["tunnel", "start", "--workspace", "a", "--target", "http://127.0.0.1:3000", "--public"]
+        ["tunnel", "start", "--workspace-id", "a", "--target", "http://127.0.0.1:3000", "--public"]
     )
     assert args.public and args.ttl_seconds == 900
