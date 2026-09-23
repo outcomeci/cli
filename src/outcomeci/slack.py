@@ -12,6 +12,8 @@ from pathlib import Path
 
 import yaml
 
+from .security import atomic_write_json
+
 
 class SlackError(RuntimeError):
     pass
@@ -422,11 +424,7 @@ def _runtime(workspace: Path) -> dict[str, object]:
 
 
 def _write_runtime(workspace: Path, value: dict[str, object]) -> None:
-    path = _runtime_path(workspace)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    atomic_write_json(_runtime_path(workspace), value)
 
 
 def deliver(

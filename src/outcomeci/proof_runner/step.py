@@ -32,6 +32,7 @@ from ..local_vault import put as put_vault
 from ..local_vault import resolve as resolve_vault
 from ..process import ExecutionError
 from ..repository import initialize, validate
+from ..security import atomic_write_json
 from . import agents, cloud_vault, credentials, webhook_trigger
 from .docs import fetch_fixtures
 from .simulation import FAULT_EXIT
@@ -47,11 +48,7 @@ def _read(root: Path) -> dict[str, Any]:
 
 
 def _write(root: Path, value: dict[str, Any]) -> None:
-    path = root / CONTEXT
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    atomic_write_json(root / CONTEXT, value)
 
 
 def _configure(root: Path) -> None:

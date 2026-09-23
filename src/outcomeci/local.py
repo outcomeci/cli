@@ -33,6 +33,7 @@ from .outcome import (
     _validate_trajectory,
 )
 from .process import ExecutionError, invoke
+from .security import atomic_write_json
 
 
 def _id(intent: str) -> str:
@@ -568,11 +569,8 @@ def _read(root: Path, run_id: str) -> dict[str, Any]:
 
 def _write(root: Path, state: dict[str, Any]) -> None:
     path = _record(root, state["run_id"])
-    path.parent.mkdir(parents=True, exist_ok=True)
     state["updated_at"] = datetime.now(UTC).isoformat()
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(state, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    atomic_write_json(path, state)
 
 
 def _local_revision(root: Path) -> str | None:

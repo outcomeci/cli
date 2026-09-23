@@ -14,6 +14,7 @@ from typing import Any
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from .process import ExecutionError
+from .security import atomic_write_json
 
 VAULT_FILE = Path(".outcomeci/vault.enc")
 KEY_ENV = "OUTCOMECI_VAULT_KEY_FILE"
@@ -65,25 +66,18 @@ def _save(root: Path, vault_id: str, key: bytes, payload: dict[str, Any]) -> Non
     aad = f"outcomeci-local-vault/v1:{vault_id}".encode()
     plaintext = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
     ciphertext = AESGCM(key).encrypt(nonce, plaintext, aad)
-    path = root / VAULT_FILE
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "vault_id": vault_id,
-                "algorithm": "AES-256-GCM",
-                "nonce": base64.urlsafe_b64encode(nonce).decode(),
-                "ciphertext": base64.urlsafe_b64encode(ciphertext).decode(),
-            },
-            indent=2,
-        )
-        + "\n",
-        encoding="utf-8",
+    atomic_write_json(
+        root / VAULT_FILE,
+        {
+            "version": 1,
+            "vault_id": vault_id,
+            "algorithm": "AES-256-GCM",
+            "nonce": base64.urlsafe_b64encode(nonce).decode(),
+            "ciphertext": base64.urlsafe_b64encode(ciphertext).decode(),
+        },
+        sort_keys=False,
+        mode=stat.S_IRUSR | stat.S_IWUSR,
     )
-    temporary.chmod(stat.S_IRUSR | stat.S_IWUSR)
-    temporary.replace(path)
 
 
 def _load(root: Path) -> tuple[dict[str, Any], bytes, dict[str, Any]]:

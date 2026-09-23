@@ -10,12 +10,11 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from .local import continue_run, respond, retry
+from .security import atomic_write_json
 
 
 def _write(path: Path, value: dict) -> None:
-    temporary = path.with_suffix(".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    atomic_write_json(path, value)
 
 
 def main() -> int:
