@@ -80,7 +80,7 @@ made — check one off once it's actually fixed and verified, not just filed.
 
 ## Cloud runner (cloud.py, cloud_runner/)
 
-- [ ] Six near-identical "unwrap `detail`, raise `ExecutionError`" blocks in
+- [x] Six near-identical "unwrap `detail`, raise `ExecutionError`" blocks in
   `cloud.py` — one helper.
 - [ ] Codex credential-file writing is implemented three times with two
   different safety postures (one uses atomic `O_EXCL`, two use plain
@@ -89,7 +89,7 @@ made — check one off once it's actually fixed and verified, not just filed.
 - [x] The SIGTERM→wait→SIGKILL sequence and the temp-workdir-with-chmod-
   and-cleanup scaffold are each duplicated across `main.py`'s four entry
   points.
-- [ ] Minor: `redaction.py`'s dict/list branches are dead code in
+- [x] Minor: `redaction.py`'s dict/list branches are dead code in
   production (only ever called with strings); a second, differently-shaped
   redaction implementation lives in `integrations.py:306` and a third regex
   bank lives in `execution_events.py` — worth deciding if these three
