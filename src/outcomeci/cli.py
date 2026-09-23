@@ -280,7 +280,13 @@ def parser() -> argparse.ArgumentParser:
     proof_source = proof_run.add_mutually_exclusive_group()
     proof_source.add_argument("--definition", type=Path)
     proof_source.add_argument(
-        "--name", choices=("local-first-v1", "email-trigger-v1", "vault-credentials-v1")
+        "--name",
+        choices=(
+            "local-first-v1",
+            "email-trigger-v1",
+            "vault-credentials-v1",
+            "agent-driven-v1",
+        ),
     )
     proof_run.add_argument("--workspace", type=Path, default=Path("/proof"))
     proof_run.add_argument("--report", type=Path)

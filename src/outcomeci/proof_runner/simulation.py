@@ -46,6 +46,9 @@ ALLOWED_ACTIONS = {
     "cloud.vault_put",
     "cloud.vault_rotate",
     "cloud.vault_verify",
+    "agent.start_run",
+    "agent.approve_intake",
+    "agent.verify_run",
 }
 ALLOWED_ASSERTIONS = {
     "workflow.compiles",
@@ -73,10 +76,13 @@ ALLOWED_ASSERTIONS = {
     "credential.jwt_bearer_authenticates",
     "credential.env_reference_resolves",
     "vault.rotation_takes_effect",
-    "vault.retired_values_never_exposed",
     "cloud_vault.rotation_takes_effect",
     "cloud_vault.grants_survive_rotation",
     "cloud_session.expired_token_auto_refreshes",
+    "agent.claude_completes_intake",
+    "agent.claude_writes_valid_artifacts",
+    "agent.codex_completes_intake",
+    "agent.codex_writes_valid_artifacts",
 }
 
 

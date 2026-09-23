@@ -30,7 +30,7 @@ from ..local_vault import put as put_vault
 from ..local_vault import resolve as resolve_vault
 from ..process import ExecutionError
 from ..repository import initialize, validate
-from . import cloud_vault, credentials
+from . import agents, cloud_vault, credentials
 from .simulation import FAULT_EXIT
 
 CONTEXT = Path(".outcomeci/simulation-context.json")
@@ -228,8 +228,31 @@ def _vault_credentials_assertions(
     }
 
 
+def _agent_driven_assertions(
+    root: Path, context: dict[str, Any], request: dict[str, Any]
+) -> dict[str, Any]:
+    checks_by_agent = context.get("agent_checks", {})
+    checks = {}
+    for agent in ("claude", "codex"):
+        agent_checks = checks_by_agent.get(agent, {})
+        checks[f"agent.{agent}_completes_intake"] = agent_checks.get("intake_completed", False)
+        checks[f"agent.{agent}_writes_valid_artifacts"] = agent_checks.get("artifacts_valid", False)
+    expected = request.get("expected", [])
+    failed = [name for name in expected if not checks.get(name, False)]
+    if failed:
+        raise ExecutionError(f"failed durability assertions: {', '.join(failed)}")
+    context["final_state"] = {"status": "passed", "checks": checks}
+    _write(root, context)
+    return {
+        "status": "passed",
+        "assertions": [{"name": name, "passed": checks[name]} for name in expected],
+    }
+
+
 def _assertions(root: Path, request: dict[str, Any]) -> dict[str, Any]:
     context = _read(root)
+    if "agent_runs" in context:
+        return _agent_driven_assertions(root, context, request)
     if "vault_credentials" in context:
         return _vault_credentials_assertions(root, context, request)
     if context.get("email_proof") is not None:
@@ -484,6 +507,18 @@ def execute(action: str, root: Path, request: dict[str, Any], fault: bool) -> di
         context["cloud_grants_survive"] = result["workflow_ids"] == request.get(
             "expected_workflow_ids", result["workflow_ids"]
         )
+        _write(root, context)
+        return result
+    if action == "agent.start_run":
+        result = agents.start_run(root, context, request)
+        _write(root, context)
+        return result
+    if action == "agent.approve_intake":
+        result = agents.approve_intake(root, context, request)
+        _write(root, context)
+        return result
+    if action == "agent.verify_run":
+        result = agents.verify_run(root, context, request)
         _write(root, context)
         return result
     if action == "simulation.assert":
