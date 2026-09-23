@@ -32,7 +32,7 @@ def test_continue_run_forwards_the_cloud_execution_context(tmp_path: Path, monke
             "instructions": {
                 "phases": {
                     "resolve_analytics": {"needs": []},
-                    "notify": {"needs": ["resolve_analytics"]},
+                    "notify": {"needs": ["resolve_analytics"], "humans": {"before": []}},
                 }
             }
         },
@@ -130,7 +130,12 @@ def test_continue_run_forwards_the_cloud_execution_context_through_respond(
         local,
         "compile_workflow",
         lambda config: {
-            "instructions": {"phases": {"plan": {"needs": []}, "notify": {"needs": ["plan"]}}}
+            "instructions": {
+                "phases": {
+                    "plan": {"needs": []},
+                    "notify": {"needs": ["plan"], "humans": {"before": []}},
+                }
+            }
         },
     )
     respond_options = {}

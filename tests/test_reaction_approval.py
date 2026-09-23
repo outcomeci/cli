@@ -11,6 +11,7 @@ import yaml
 from outcomeci import local
 from outcomeci.config import ConfigError, _human_interactions, compile_workflow
 from outcomeci.integrations import IntegrationExecutor as RealExecutor
+from outcomeci.policy import PolicyExecutor
 from outcomeci.process import ExecutionError
 
 
@@ -404,3 +405,122 @@ def test_open_interaction_unaffected_for_local_delivery(tmp_path: Path):
     result = local._open_interaction(tmp_path, state, "approve", "before", definition)
     assert result is state
     assert result["status"] == "awaiting_input"
+
+
+def _mock_slack(monkeypatch, handler) -> None:
+    monkeypatch.setattr(
+        local,
+        "IntegrationExecutor",
+        lambda compiled, **kwargs: RealExecutor(
+            compiled,
+            resolver=kwargs["resolver"],
+            reviewed=kwargs["reviewed"],
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+
+
+def _awaiting_continuation(root: Path, run_id: str = "run-1") -> None:
+    local._write(
+        root,
+        {
+            "run_id": run_id,
+            "intent": "gate the second phase",
+            "phase": "notify",
+            "status": "awaiting_confirmation",
+            "completed_phases": ["notify"],
+        },
+    )
+
+
+def test_continue_run_resolves_the_before_hook_of_a_later_phase(tmp_path: Path, monkeypatch):
+    config = _workflow(tmp_path)
+    _write_delivery(tmp_path, "run-1")
+    _awaiting_continuation(tmp_path)
+    _mock_slack(monkeypatch, _reactions_response(["+1"]))
+    executed = []
+    monkeypatch.setattr(
+        local,
+        "_execute",
+        lambda root, config, state, **kwargs: (
+            executed.append([item["status"] for item in state.get("interaction_history", [])])
+            or state
+        ),
+    )
+    local.continue_run(
+        tmp_path, config, "run-1", approve=True, credential_resolver=lambda ref: "token"
+    )
+    assert executed == [["approved"]]
+
+
+def test_continue_run_does_not_execute_a_gated_phase_without_approval(tmp_path: Path, monkeypatch):
+    config = _workflow(tmp_path, on_timeout="fail")
+    _write_delivery(tmp_path, "run-1")
+    _awaiting_continuation(tmp_path)
+    _mock_slack(monkeypatch, _reactions_response([]))
+    monkeypatch.setattr(local.time, "sleep", lambda _seconds: None)
+    ticks = itertools.chain([0, 1], itertools.repeat(400))
+    monkeypatch.setattr(local.time, "monotonic", lambda: next(ticks))
+    monkeypatch.setattr(
+        local, "_execute", lambda *args, **kwargs: pytest.fail("gated phase must not execute")
+    )
+    with pytest.raises(ExecutionError, match="approval window expired"):
+        local.continue_run(
+            tmp_path, config, "run-1", approve=True, credential_resolver=lambda ref: "token"
+        )
+
+
+def test_resolve_reaction_resolves_opaque_references_from_the_broker_journal(
+    tmp_path: Path, monkeypatch
+):
+    config = _workflow(tmp_path)
+    value = yaml.safe_load(config.read_text())
+    value["spec"]["integrations"]["slack"]["access"]["opaque_identifiers"] = True
+    config.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
+    compiled = compile_workflow(config)
+    hook = compiled["instructions"]["phases"]["approve"]["humans"]["before"][0]
+
+    # Let the real broker write the journal, so this tracks its actual shape.
+    def provider(request: httpx.Request) -> httpx.Response:
+        body = {"ok": True, "message": {"reactions": [{"channel": "C0123456789", "ts": "17.01"}]}}
+        return httpx.Response(200, json=body)
+
+    broker = PolicyExecutor(
+        RealExecutor(
+            compiled,
+            resolver=lambda ref: "token",
+            reviewed=True,
+            transport=httpx.MockTransport(provider),
+        ),
+        tmp_path / ".outcomeci" / ".broker" / "run-1",
+        {},
+    )
+    shown = broker.execute(
+        "slack.get_reactions", {"channel": "C123", "timestamp": "1.0"}, phase="approve"
+    )["output"]["reactions"][0]
+    assert shown["channel"].startswith("ref:") and shown["ts"].startswith("ref:")
+    _write_delivery(tmp_path, "run-1", channel=shown["channel"], ts=shown["ts"])
+
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(dict(request.url.params))
+        return _reactions_response(["+1"])(request)
+
+    _mock_slack(monkeypatch, handler)
+    local._resolve_reaction(
+        tmp_path, config, _run_state(), "approve", "before", hook, lambda ref: "token"
+    )
+    assert seen == [{"channel": "C0123456789", "timestamp": "17.01"}]
+
+
+def test_resolve_reaction_rejects_an_unresolvable_reference(tmp_path: Path, monkeypatch):
+    config = _workflow(tmp_path)
+    compiled = compile_workflow(config)
+    hook = compiled["instructions"]["phases"]["approve"]["humans"]["before"][0]
+    _write_delivery(tmp_path, "run-1", channel="ref:sentry:id")
+    _mock_slack(monkeypatch, lambda request: pytest.fail("must not call Slack"))
+    with pytest.raises(ExecutionError, match="unresolvable reference"):
+        local._resolve_reaction(
+            tmp_path, config, _run_state(), "approve", "before", hook, lambda ref: "token"
+        )

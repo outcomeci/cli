@@ -391,6 +391,21 @@ def _finish_interaction(
     )
 
 
+def _provider_value(root: Path, run_id: str, integration: str, value: str) -> str:
+    if not value.startswith("ref:"):
+        return value
+    journal = root / ".outcomeci" / ".broker" / run_id / "journal.json"
+    try:
+        state = json.loads(journal.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        state = {}
+    # The broker keeps one reference table per integration.
+    resolved = state.get("references", {}).get(integration, {}).get(value)
+    if not isinstance(resolved, str) or not resolved:
+        raise ExecutionError(f"reaction delivery source holds an unresolvable reference: {value}")
+    return resolved
+
+
 def _resolve_reaction(
     root: Path,
     config: Path,
@@ -431,6 +446,10 @@ def _resolve_reaction(
     channel, ts = value.get("channel"), value.get("ts")
     if not isinstance(channel, str) or not isinstance(ts, str):
         raise ExecutionError(f"reaction delivery source is missing channel/ts: {output['path']}")
+    # With access.opaque_identifiers the producing agent only ever saw ref:
+    # tokens, so that is what it wrote. The broker journal holds the real values.
+    channel = _provider_value(root, state["run_id"], "slack", channel)
+    ts = _provider_value(root, state["run_id"], "slack", ts)
     executor = IntegrationExecutor(compiled, resolver=credential_resolver, reviewed=True)
     emoji = delivery["emoji"]
     deadline = time.monotonic() + definition["wait"]["timeout_seconds"]
@@ -1177,6 +1196,19 @@ def continue_run(
     state["phase"] = ready[0]
     state["status"] = "queued"
     _write(root, state)
+    before = _first_required_interaction(compiled, state["phase"], "before", state)
+    if before:
+        opened = _open_interaction(
+            root,
+            state,
+            state["phase"],
+            "before",
+            before,
+            config=config,
+            credential_resolver=credential_resolver,
+        )
+        if opened is not None:
+            return opened
     return _execute(
         root,
         config,
