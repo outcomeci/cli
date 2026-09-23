@@ -214,6 +214,14 @@ def get_email_trigger_proof(workspace_id: str, proof_id: str) -> dict[str, Any]:
     return value
 
 
+def get_workflow(workspace_id: str, workflow_id: str) -> dict[str, Any]:
+    status, value = _authorized_request(
+        f"/workspaces/{workspace_id}/workflow-revisions/{workflow_id}/latest"
+    )
+    _raise_for_status(status, value, 200, "could not read workflow", require_dict=True)
+    return value
+
+
 def sync_workflow(
     path: Path,
     workspace_id: str,

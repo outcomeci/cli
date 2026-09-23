@@ -154,6 +154,41 @@ def test_sync_validates_and_sends_explicit_create_mode(tmp_path: Path, monkeypat
     assert ".outcomeci/vault.enc" not in captured["body"]["files"]
 
 
+def test_get_workflow_reads_the_latest_revision(monkeypatch) -> None:
+    captured = {}
+
+    def request(path, *, method="GET", body=None):
+        captured.update(path=path, method=method, body=body)
+        return 200, {
+            "workflow_id": "00000000-0000-0000-0000-000000000001",
+            "name": "code-outcome",
+            "revision": 3,
+            "content": "apiVersion: outcomeci.dev/v1alpha1\n",
+            "content_sha256": "deadbeef",
+            "content_type": "yaml",
+            "source_filename": "outcome.yml",
+            "created_at": "2026-09-23T00:00:00Z",
+        }
+
+    monkeypatch.setattr(cloud, "_authorized_request", request)
+    result = cloud.get_workflow("workspace_1", "workflow_1")
+    assert result["revision"] == 3
+    assert captured["path"] == "/workspaces/workspace_1/workflow-revisions/workflow_1/latest"
+    assert captured["method"] == "GET"
+
+
+def test_get_workflow_raises_when_not_found(monkeypatch) -> None:
+    monkeypatch.setattr(
+        cloud, "_authorized_request", lambda *a, **k: (404, {"detail": "Workflow not found"})
+    )
+    try:
+        cloud.get_workflow("workspace_1", "workflow_1")
+    except Exception as exc:
+        assert "Workflow not found" in str(exc)
+    else:
+        raise AssertionError("expected an ExecutionError")
+
+
 def test_issue_debug_lease_posts_the_optional_invocation_id(monkeypatch) -> None:
     captured = {}
 

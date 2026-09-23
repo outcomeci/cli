@@ -543,6 +543,13 @@ Workspace keys inherit the member's current Workflow and Vault permissions.
 They are limited to one workspace, can be revoked from Access, and are never
 refreshed as user sessions.
 
+Fetch a workflow's current revision, including its `.outcomeci/` support
+files, to edit locally and push back:
+
+```bash
+oci workflow get WORKFLOW_ID --workspace-id workspace_abc123 --output outcome.yml
+```
+
 Then create the first immutable workflow revision for a workspace:
 
 ```bash

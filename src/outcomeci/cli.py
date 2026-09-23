@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import getpass
 import json
 import os
@@ -16,10 +17,10 @@ from . import __version__, debug, slack_vault, tunnels, webhooks
 from .capability import invoke as invoke_capability
 from .capability import invoke_integration
 from .cloud import auth_status as cloud_auth_status
+from .cloud import get_workflow, sync_workflow, vault_request
 from .cloud import login as cloud_login
 from .cloud import login_with_key as cloud_login_with_key
 from .cloud import logout as cloud_logout
-from .cloud import sync_workflow, vault_request
 from .config import ConfigError, compile_workflow
 from .conformance import run as run_conformance
 from .contracts import ContractError, render_reference, validate_contract
@@ -149,6 +150,14 @@ def parser() -> argparse.ArgumentParser:
     auth_commands.add_parser("logout")
     workflow = commands.add_parser("workflow", help="Manage OutcomeCI Cloud workflows")
     workflow_commands = workflow.add_subparsers(dest="workflow_command", required=True)
+    workflow_get = workflow_commands.add_parser(
+        "get", help="Fetch a workflow's latest cloud revision"
+    )
+    workflow_get.add_argument("workflow_id")
+    workflow_get.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
+    workflow_get.add_argument(
+        "--output", type=Path, help="Write the revision content to this file instead of stdout"
+    )
     workflow_sync = workflow_commands.add_parser("sync")
     workflow_publish = workflow_commands.add_parser(
         "prepare-publication",
@@ -542,6 +551,32 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _print_json(cloud_logout())
             return 0
         if args.command == "workflow":
+            if args.workflow_command == "get":
+                result = get_workflow(args.workspace_id, args.workflow_id)
+                if args.output:
+                    args.output.write_text(result["content"], encoding="utf-8")
+                    support_files = []
+                    for relative, encoded in sorted(result.get("files", {}).items()):
+                        if not relative.startswith(".outcomeci/") or ".." in Path(relative).parts:
+                            raise ExecutionError(
+                                f"workflow support file path is invalid: {relative}"
+                            )
+                        support_path = args.output.parent / relative
+                        support_path.parent.mkdir(parents=True, exist_ok=True)
+                        support_path.write_bytes(base64.b64decode(encoded))
+                        support_files.append(str(support_path))
+                    _print_json(
+                        {
+                            "workflow_id": result["workflow_id"],
+                            "revision": result["revision"],
+                            "content_sha256": result["content_sha256"],
+                            "written_to": str(args.output),
+                            "support_files_written": support_files,
+                        }
+                    )
+                else:
+                    _print_json(result)
+                return 0
             if args.workflow_command == "prepare-publication":
                 result = prepare_publication(
                     args.file,
