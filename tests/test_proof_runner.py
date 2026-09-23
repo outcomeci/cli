@@ -438,3 +438,118 @@ def test_agent_approve_intake_requires_a_started_run(tmp_path: Path) -> None:
 
     with pytest.raises(ExecutionError, match="no run was started for agent claude"):
         execute("agent.approve_intake", tmp_path, {"agent": "claude"}, False)
+
+
+def test_bundled_webhook_trigger_proof_declares_the_full_contract() -> None:
+    definition = bundled_definition("webhook-trigger-v1")
+    value = load_definition(definition)
+    labels = {
+        step["with"]["label"]
+        for step in value["spec"]["journey"]
+        if step["action"] == "webhook_trigger.fire"
+    }
+    assert labels == {"accepts_valid_payload", "oversized_payload", "schema_invalid_payload"}
+    assert set(value["spec"]["assertions"]) == {
+        "webhook_trigger.definition_compiles",
+        "webhook_trigger.accepts_valid_payload",
+        "webhook_trigger.state_shape_matches_payload",
+        "webhook_trigger.intent_falls_back_to_generic_text",
+        "webhook_trigger.rejects_oversized_payload",
+        "webhook_trigger.rejects_schema_invalid_payload",
+    }
+
+
+def test_webhook_trigger_proof_passes_end_to_end(tmp_path: Path) -> None:
+    # Safe to run via run() unlike agent-driven-v1: local.trigger() never
+    # reaches _execute()/invoke() on this path (a required `before`
+    # interaction stops it first), so there's no real agent to accidentally
+    # spawn across the subprocess boundary.
+    result = run(bundled_definition("webhook-trigger-v1"), tmp_path)
+
+    assert result["status"] == "passed"
+    assert all(item["passed"] for item in result["assertions"])
+    assert verify_ledger(Path(result["ledger"]["path"])) == result["ledger"]["sha256"]
+
+
+def test_webhook_trigger_fire_rejects_an_oversized_payload_for_real(tmp_path: Path) -> None:
+    execute("workspace.initialize", tmp_path, {}, False)
+    execute("webhook_trigger.configure", tmp_path, {}, False)
+
+    result = execute(
+        "webhook_trigger.fire",
+        tmp_path,
+        {"label": "oversized_payload", "synthetic_oversized": True, "expect_failure": True},
+        False,
+    )
+
+    assert result == {"status": "rejected", "label": "oversized_payload"}
+
+
+def test_webhook_trigger_fire_raises_when_an_expected_rejection_does_not_happen(
+    tmp_path: Path,
+) -> None:
+    execute("workspace.initialize", tmp_path, {}, False)
+    execute("webhook_trigger.configure", tmp_path, {}, False)
+
+    with pytest.raises(ExecutionError, match="expected accepts_valid_payload to be rejected"):
+        execute(
+            "webhook_trigger.fire",
+            tmp_path,
+            {
+                "label": "accepts_valid_payload",
+                "expect_failure": True,
+                "payload": {
+                    "schema_version": "outcomeci.trigger.webhook.received/v1",
+                    "type": "webhook.received",
+                    "event_id": "evt-should-succeed",
+                    "received_at": "2026-01-01T00:00:00Z",
+                    "method": "POST",
+                    "query": "",
+                    "headers": {},
+                    "body_base64": "",
+                },
+            },
+            False,
+        )
+
+
+def test_webhook_trigger_fire_raises_for_the_wrong_rejection_reason(tmp_path: Path) -> None:
+    execute("workspace.initialize", tmp_path, {}, False)
+    execute("webhook_trigger.configure", tmp_path, {}, False)
+
+    with pytest.raises(ExecutionError, match="rejected for the wrong reason"):
+        execute(
+            "webhook_trigger.fire",
+            tmp_path,
+            {
+                "label": "oversized_payload",
+                "synthetic_oversized": True,
+                "expect_failure": True,
+                "expect_error_contains": "this string never appears in the real error",
+            },
+            False,
+        )
+
+
+def test_webhook_trigger_fire_propagates_an_unexpected_rejection(tmp_path: Path) -> None:
+    execute("workspace.initialize", tmp_path, {}, False)
+    execute("webhook_trigger.configure", tmp_path, {}, False)
+
+    with pytest.raises(ExecutionError):
+        execute(
+            "webhook_trigger.fire",
+            tmp_path,
+            {
+                "label": "schema_invalid_payload",
+                "payload": {
+                    "schema_version": "outcomeci.trigger.webhook.received/v1",
+                    "type": "webhook.received",
+                    "received_at": "2026-01-01T00:00:00Z",
+                    "method": "POST",
+                    "query": "",
+                    "headers": {},
+                    "body_base64": "",
+                },
+            },
+            False,
+        )

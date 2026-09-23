@@ -32,7 +32,7 @@ from ..local_vault import put as put_vault
 from ..local_vault import resolve as resolve_vault
 from ..process import ExecutionError
 from ..repository import initialize, validate
-from . import agents, cloud_vault, credentials
+from . import agents, cloud_vault, credentials, webhook_trigger
 from .docs import fetch_fixtures
 from .simulation import FAULT_EXIT
 
@@ -369,8 +369,48 @@ def _agent_driven_assertions(
     }
 
 
+def _webhook_trigger_assertions(
+    root: Path, context: dict[str, Any], request: dict[str, Any]
+) -> dict[str, Any]:
+    attempts = context.get("webhook_attempts", {})
+    valid = attempts.get("accepts_valid_payload", {})
+    trigger = valid.get("trigger") or {}
+    checks = {
+        "webhook_trigger.definition_compiles": context.get("webhook_definition_compiled", False),
+        "webhook_trigger.accepts_valid_payload": valid.get("outcome") == "accepted",
+        "webhook_trigger.state_shape_matches_payload": (
+            valid.get("outcome") == "accepted"
+            and trigger.get("type") == "webhook.received"
+            and trigger.get("name") == webhook_trigger.TRIGGER_NAME
+            and valid.get("pending_interaction_id") == webhook_trigger.BEFORE_INTERACTION_ID
+        ),
+        "webhook_trigger.intent_falls_back_to_generic_text": valid.get("intent")
+        == webhook_trigger.GENERIC_INTENT,
+        "webhook_trigger.rejects_oversized_payload": attempts.get("oversized_payload", {}).get(
+            "outcome"
+        )
+        == "rejected",
+        "webhook_trigger.rejects_schema_invalid_payload": attempts.get(
+            "schema_invalid_payload", {}
+        ).get("outcome")
+        == "rejected",
+    }
+    expected = request.get("expected", [])
+    failed = [name for name in expected if not checks.get(name, False)]
+    if failed:
+        raise ExecutionError(f"failed durability assertions: {', '.join(failed)}")
+    context["final_state"] = {"status": "passed", "checks": checks}
+    _write(root, context)
+    return {
+        "status": "passed",
+        "assertions": [{"name": name, "passed": checks[name]} for name in expected],
+    }
+
+
 def _assertions(root: Path, request: dict[str, Any]) -> dict[str, Any]:
     context = _read(root)
+    if "webhook_attempts" in context:
+        return _webhook_trigger_assertions(root, context, request)
     if "agent_runs" in context:
         return _agent_driven_assertions(root, context, request)
     if "vault_credentials" in context:
@@ -649,6 +689,15 @@ def execute(action: str, root: Path, request: dict[str, Any], fault: bool) -> di
         return result
     if action == "agent.verify_run":
         result = agents.verify_run(root, context, request)
+        _write(root, context)
+        return result
+    if action == "webhook_trigger.configure":
+        result = webhook_trigger.configure(root)
+        context["webhook_definition_compiled"] = True
+        _write(root, context)
+        return result
+    if action == "webhook_trigger.fire":
+        result = webhook_trigger.fire(root, context, request)
         _write(root, context)
         return result
     if action == "simulation.assert":

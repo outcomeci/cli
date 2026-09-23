@@ -51,6 +51,8 @@ ALLOWED_ACTIONS = {
     "agent.start_run",
     "agent.approve_intake",
     "agent.verify_run",
+    "webhook_trigger.configure",
+    "webhook_trigger.fire",
 }
 ALLOWED_ASSERTIONS = {
     "workflow.compiles",
@@ -92,6 +94,12 @@ ALLOWED_ASSERTIONS = {
     "agent.claude_writes_valid_artifacts",
     "agent.codex_completes_intake",
     "agent.codex_writes_valid_artifacts",
+    "webhook_trigger.definition_compiles",
+    "webhook_trigger.accepts_valid_payload",
+    "webhook_trigger.state_shape_matches_payload",
+    "webhook_trigger.intent_falls_back_to_generic_text",
+    "webhook_trigger.rejects_oversized_payload",
+    "webhook_trigger.rejects_schema_invalid_payload",
 }
 
 
