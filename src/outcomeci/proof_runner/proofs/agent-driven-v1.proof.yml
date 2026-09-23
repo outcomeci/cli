@@ -1,0 +1,39 @@
+apiVersion: outcomeci.dev/v1alpha1
+kind: OutcomeProof
+metadata:
+  name: agent-driven-v1
+  version: 1.0.0
+spec:
+  persona:
+    name: agent_operator
+    version: 1.0.0
+    starting_state:
+      account: none
+      workspace: empty
+      network: online
+      credentials: live_agent_credentials
+  journey:
+    - {id: initialize, action: workspace.initialize}
+    - id: start_claude
+      action: agent.start_run
+      with:
+        agent: claude
+        intent: List every top-level directory in this repository and note what each one appears to contain.
+    - {id: approve_claude, action: agent.approve_intake, with: {agent: claude}}
+    - {id: verify_claude, action: agent.verify_run, with: {agent: claude}}
+    - id: start_codex
+      action: agent.start_run
+      with:
+        agent: codex
+        intent: List every top-level directory in this repository and note what each one appears to contain.
+    - {id: approve_codex, action: agent.approve_intake, with: {agent: codex}}
+    - {id: verify_codex, action: agent.verify_run, with: {agent: codex}}
+  faults: []
+  assertions:
+    - agent.claude_completes_intake
+    - agent.claude_writes_valid_artifacts
+    - agent.codex_completes_intake
+    - agent.codex_writes_valid_artifacts
+  output:
+    report: proof-report.json
+    ledger: proof-events.jsonl

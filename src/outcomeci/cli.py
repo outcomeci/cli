@@ -54,11 +54,11 @@ from .locking import verify_lock, write_lock
 from .mcp_server import serve as serve_mcp
 from .outcome import run as run_outcome
 from .process import ExecutionError
+from .proof_runner import bundled_definition
+from .proof_runner import run as run_simulation
 from .publication import prepare_publication
 from .repository import RepositoryError, initialize, update, validate
 from .schema import export_schema, load_schema, schema_path
-from .simulation import bundled_definition
-from .simulation import run as run_simulation
 from .slack import SlackError
 from .slack import manifest as slack_manifest
 from .slack import setup as setup_slack
@@ -279,7 +279,16 @@ def parser() -> argparse.ArgumentParser:
     proof_run = proof_commands.add_parser("run")
     proof_source = proof_run.add_mutually_exclusive_group()
     proof_source.add_argument("--definition", type=Path)
-    proof_source.add_argument("--name", choices=("local-first-v1", "email-trigger-v1"))
+    proof_source.add_argument(
+        "--name",
+        choices=(
+            "local-first-v1",
+            "email-trigger-v1",
+            "docs-quickstart-v1",
+            "vault-credentials-v1",
+            "agent-driven-v1",
+        ),
+    )
     proof_run.add_argument("--workspace", type=Path, default=Path("/proof"))
     proof_run.add_argument("--report", type=Path)
     outcome = commands.add_parser("outcome")

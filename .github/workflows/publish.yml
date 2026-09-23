@@ -28,6 +28,30 @@ jobs:
         with:
           role-to-assume: ${{ vars.RUNNER_IMAGE_AWS_ROLE_ARN }}
           aws-region: us-east-1
+      - name: Require a passing staging docs-proof for this version
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          VERSION="${TAG#v}"
+          LATEST=$(aws cloudwatch get-metric-statistics \
+            --namespace "OutcomeCI/DocsProof" \
+            --metric-name ProofPassedByVersion \
+            --dimensions Name=Environment,Value=staging Name=Version,Value="$VERSION" \
+            --start-time "$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%S)" \
+            --end-time "$(date -u +%Y-%m-%dT%H:%M:%S)" \
+            --period 3600 \
+            --statistics Minimum \
+            --query 'sort_by(Datapoints, &Timestamp)[-1].Minimum' \
+            --output text)
+          if [ -z "$LATEST" ] || [ "$LATEST" = "None" ]; then
+            echo "::error::No staging docs-proof run has tested outcomeci-cli==$VERSION yet. Staging checks hourly against CodeArtifact's latest release candidate — wait for it to pick up this tag and pass, then re-run this workflow."
+            exit 1
+          fi
+          if [ "$(printf '%.0f' "$LATEST")" -lt 1 ]; then
+            echo "::error::Staging's docs-proof failed against outcomeci-cli==$VERSION. Fix the regression before promoting."
+            exit 1
+          fi
+          echo "staging docs-proof passed for outcomeci-cli==$VERSION"
       - run: pip install hatchling hatch-vcs
       - name: Download the internally tested distributions
         env:

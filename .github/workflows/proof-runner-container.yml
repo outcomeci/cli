@@ -62,6 +62,22 @@ jobs:
           cache-to: type=gha,mode=max,scope=proof-runner
       - name: Run local-first proof without external networking
         run: docker run --rm --network none --tmpfs /proof:rw,noexec,nosuid,uid=10001,gid=10001,size=128m proof-runner:candidate
+      - name: Run docs-quickstart proof against published docs
+        # TODO: drop continue-on-error once outcomeci/www#161 (the
+        # /api/docs/raw route this proof fetches) is merged and deployed to
+        # sparepartslabs.com. Until then every run fails DNS resolution
+        # ("No address associated with hostname"), which would otherwise
+        # block CI on a dependency that isn't live yet. The step still runs
+        # and reports its real result -- watch it here to know when to flip
+        # this back to blocking.
+        continue-on-error: true
+        env:
+          OUTCOMECI_DOCS_BASE_URL: ${{ vars.OUTCOMECI_DOCS_BASE_URL }}
+        run: |
+          docker run --rm \
+            --tmpfs /proof:rw,noexec,nosuid,uid=10001,gid=10001,size=128m \
+            -e OUTCOMECI_DOCS_BASE_URL \
+            proof-runner:candidate --workspace /proof --name docs-quickstart-v1
       - name: Scan candidate
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
