@@ -171,8 +171,8 @@ pipelines.
   Added transport-injection seams (twin.py, cloud_runner/client.py) or
   direct httpx-level test mocks (cloud.py, custom.py, outcome.py) for every
   previously-untested network call this touched.
-- [ ] No cli-specific `.sp/memory/constitution.md`, unlike `api`/
-  `shared-infra`/`homebrew-tap`. The workspace huddle log says one was
-  ratified for this repo but it isn't in the checkout.
+- [x] `.sp/memory/constitution.md` added, matching sibling repos'
+  Spec Kit convention, with five Review Pillars written directly from
+  this review pass's own evidence (not imported from a template).
 - [ ] Stray local git worktrees under `.worktrees/` and
   `/tmp/outcomeci-cli-*` — not code, housekeeping only.
