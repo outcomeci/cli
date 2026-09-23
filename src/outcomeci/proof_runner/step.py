@@ -16,20 +16,21 @@ from typing import Any
 import httpx
 import yaml
 
-from .cloud import (
+from ..cloud import (
     get_email_trigger_proof,
     login_with_key,
     start_email_trigger_proof,
     sync_workflow,
 )
-from .config import compile_workflow
-from .integrations import IntegrationExecutor, local_credential_resolver
-from .local import advance, begin, compile_context, respond, validate_artifacts
-from .local_vault import initialize as initialize_vault
-from .local_vault import put as put_vault
-from .local_vault import resolve as resolve_vault
-from .process import ExecutionError
-from .repository import initialize, validate
+from ..config import compile_workflow
+from ..integrations import IntegrationExecutor, local_credential_resolver
+from ..local import advance, begin, compile_context, respond, validate_artifacts
+from ..local_vault import initialize as initialize_vault
+from ..local_vault import put as put_vault
+from ..local_vault import resolve as resolve_vault
+from ..process import ExecutionError
+from ..repository import initialize, validate
+from . import cloud_vault, credentials
 from .simulation import FAULT_EXIT
 
 CONTEXT = Path(".outcomeci/simulation-context.json")
@@ -186,8 +187,51 @@ def _materialize(root: Path, phase: str) -> dict[str, Any]:
     return {"status": "artifacts_written", "phase": phase, "run_id": run_id}
 
 
+def _vault_credentials_assertions(
+    root: Path, context: dict[str, Any], request: dict[str, Any]
+) -> dict[str, Any]:
+    auth_checks = context.get("auth_checks", {})
+    rotation_checks = context.get("rotation_checks", {})
+    visible = "\n".join(
+        Path(path).read_text(encoding="utf-8")
+        for path in (request["ledger"], request.get("report", ""))
+        if path and Path(path).exists()
+    )
+    checks = {
+        "credential.api_key_authenticates": auth_checks.get("api_key", False),
+        "credential.basic_authenticates": auth_checks.get("basic", False),
+        "credential.bearer_authenticates": auth_checks.get("bearer", False),
+        "credential.oauth2_client_credentials_authenticates": auth_checks.get(
+            "oauth2_client_credentials", False
+        ),
+        "credential.oauth2_refresh_token_authenticates": auth_checks.get(
+            "oauth2_refresh_token", False
+        ),
+        "credential.jwt_bearer_authenticates": auth_checks.get("jwt_bearer", False),
+        "credential.env_reference_resolves": context.get("env_credential_matches", False),
+        "vault.rotation_takes_effect": rotation_checks.get("bearer", False)
+        and rotation_checks.get("oauth2_client_credentials", False),
+        "credentials.never_exposed": "oci_vault_proof_" not in visible,
+        "cloud_vault.rotation_takes_effect": context.get("cloud_rotation_verified", False),
+        "cloud_vault.grants_survive_rotation": context.get("cloud_grants_survive", False),
+        "cloud_session.expired_token_auto_refreshes": context.get("cloud_session_refreshed", False),
+    }
+    expected = request.get("expected", [])
+    failed = [name for name in expected if not checks.get(name, False)]
+    if failed:
+        raise ExecutionError(f"failed durability assertions: {', '.join(failed)}")
+    context["final_state"] = {"status": "passed", "checks": checks}
+    _write(root, context)
+    return {
+        "status": "passed",
+        "assertions": [{"name": name, "passed": checks[name]} for name in expected],
+    }
+
+
 def _assertions(root: Path, request: dict[str, Any]) -> dict[str, Any]:
     context = _read(root)
+    if "vault_credentials" in context:
+        return _vault_credentials_assertions(root, context, request)
     if context.get("email_proof") is not None:
         proof = context["email_proof"]
         events = proof.get("events", [])
@@ -393,6 +437,55 @@ def execute(action: str, root: Path, request: dict[str, Any], fault: bool) -> di
         if result["phase"] != request["phase"]:
             raise ExecutionError(f"expected to advance to {request['phase']}")
         return {"status": result["status"], "phase": result["phase"]}
+    if action == "vault.put_credential":
+        result = credentials.put_credential(root, context, request)
+        _write(root, context)
+        return result
+    if action == "vault.rotate_credential":
+        result = credentials.rotate_credential(root, context, request)
+        _write(root, context)
+        return result
+    if action == "vault.resolve_credential":
+        result = credentials.resolve_credential(root, context, request)
+        _write(root, context)
+        return result
+    if action == "vault.generate_jwt_credential":
+        result = credentials.generate_jwt_credential(root, context, request)
+        _write(root, context)
+        return result
+    if action == "connection.authenticate":
+        result = credentials.authenticate_connection(root, request)
+        checks = "rotation_checks" if request.get("after_rotation") else "auth_checks"
+        context.setdefault(checks, {})[str(request["auth_type"])] = True
+        _write(root, context)
+        return result
+    if action == "credential.resolve_env":
+        result = credentials.resolve_env_credential(request)
+        context["env_credential_matches"] = result["matches"]
+        _write(root, context)
+        return result
+    if action == "cloud.mock_session":
+        result = cloud_vault.mock_session(root)
+        context.setdefault("vault_credentials", {})
+        _write(root, context)
+        return result
+    if action == "cloud.vault_put":
+        result = cloud_vault.vault_put(root, context, request)
+        context["cloud_session_refreshed"] = True
+        _write(root, context)
+        return result
+    if action == "cloud.vault_rotate":
+        result = cloud_vault.vault_rotate(root, context, request)
+        _write(root, context)
+        return result
+    if action == "cloud.vault_verify":
+        result = cloud_vault.vault_verify(root, context, request)
+        context["cloud_rotation_verified"] = result["current_value_matches"]
+        context["cloud_grants_survive"] = result["workflow_ids"] == request.get(
+            "expected_workflow_ids", result["workflow_ids"]
+        )
+        _write(root, context)
+        return result
     if action == "simulation.assert":
         return _assertions(root, request)
     raise ExecutionError(f"unsupported simulation action {action}")
