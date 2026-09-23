@@ -97,7 +97,7 @@ made — check one off once it's actually fixed and verified, not just filed.
 
 ## Core engine (local.py, config.py, repository.py)
 
-- [ ] `local.py`: `_execute`/`continue_run`/`retry`/`respond`/`trigger` all
+- [x] `local.py`: `_execute`/`continue_run`/`retry`/`respond`/`trigger` all
   redeclare and forward the same 7-keyword signature — a dataclass would
   remove ~40 lines and prevent a new option being forgotten in one caller.
 - [x] `local.py`: `start()` and `trigger()` duplicate the run-bootstrap

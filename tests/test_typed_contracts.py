@@ -397,7 +397,13 @@ def test_execution_repairs_invalid_output_once_without_capabilities(
         return "complete"
 
     monkeypatch.setattr(local, "invoke", invoke)
-    state = local.trigger(tmp_path, path, "inbound", email_payload(), event_sink=events.append)
+    state = local.trigger(
+        tmp_path,
+        path,
+        "inbound",
+        email_payload(),
+        options=local.ExecutionOptions(event_sink=events.append),
+    )
 
     assert state["status"] == "awaiting_confirmation"
     assert len(calls) == 2

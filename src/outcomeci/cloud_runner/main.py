@@ -249,20 +249,27 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
         heartbeat = threading.Thread(target=pulse, daemon=True)
         heartbeat.start()
 
+        def execution_options(
+            agent_override: str | None, model_override: str | None
+        ) -> local.ExecutionOptions:
+            return local.ExecutionOptions(
+                agent=agent_override,
+                model=model_override,
+                credential_resolver=resolver,
+                event_sink=policy_event,
+                policy_reviewer=policy_review,
+                execution_backend="outcomeci",
+                _container_isolated=True,
+            )
+
         def call_trigger(agent_override: str | None, model_override: str | None):
             return local.trigger(
                 root,
                 config,
                 str(claim["trigger_name"]),
                 dict(claim["input"]),
-                agent=agent_override,
-                model=model_override,
                 on_created=created,
-                credential_resolver=resolver,
-                event_sink=policy_event,
-                policy_reviewer=policy_review,
-                execution_backend="outcomeci",
-                _container_isolated=True,
+                options=execution_options(agent_override, model_override),
             )
 
         def call_continue(agent_override: str | None, model_override: str | None):
@@ -271,13 +278,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 config,
                 run_id,
                 approve=True,
-                agent=agent_override,
-                model=model_override,
-                credential_resolver=resolver,
-                event_sink=policy_event,
-                policy_reviewer=policy_review,
-                execution_backend="outcomeci",
-                _container_isolated=True,
+                options=execution_options(agent_override, model_override),
             )
 
         def call_respond(agent_override: str | None, model_override: str | None):
@@ -290,13 +291,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 str(resume.get("message") or ""),
                 approve=bool(resume.get("approve")),
                 reject=bool(resume.get("reject")),
-                agent=agent_override,
-                model=model_override,
-                credential_resolver=resolver,
-                event_sink=policy_event,
-                policy_reviewer=policy_review,
-                execution_backend="outcomeci",
-                _container_isolated=True,
+                options=execution_options(agent_override, model_override),
             )
 
         def execute_call(factory):
@@ -322,13 +317,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                     root,
                     config,
                     run_id,
-                    agent=active_agent,
-                    model=active_model,
-                    credential_resolver=resolver,
-                    event_sink=policy_event,
-                    policy_reviewer=policy_review,
-                    execution_backend="outcomeci",
-                    _container_isolated=True,
+                    options=execution_options(active_agent, active_model),
                 )
 
         resume = claim.get("resume")

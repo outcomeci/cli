@@ -13,6 +13,7 @@ import sys
 import time
 import uuid
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,26 @@ from .outcome import (
 )
 from .process import ExecutionError, invoke
 from .security import atomic_write_json
+
+
+@dataclass
+class ExecutionOptions:
+    """The agent/execution-context bundle every entry point that can reach
+    _execute() needs. _execute(), trigger(), continue_run(), retry(), and
+    respond() previously each redeclared and forwarded these same 7
+    keywords by hand; a new option added to _execute() only had to be
+    forgotten in one of the four public callers to silently not apply."""
+
+    agent: str | None = None
+    model: str | None = None
+    credential_resolver: CredentialResolver | None = None
+    event_sink: Callable[[dict[str, Any]], None] | None = None
+    policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    execution_backend: str = "filesystem"
+    _container_isolated: bool = False
+
+
+_DEFAULT_EXECUTION_OPTIONS = ExecutionOptions()
 
 
 def _id(intent: str) -> str:
@@ -614,14 +635,15 @@ def _execute(
     config: Path,
     state: dict[str, Any],
     *,
-    agent: str | None = None,
-    model: str | None = None,
-    credential_resolver: CredentialResolver | None = None,
-    event_sink: Callable[[dict[str, Any]], None] | None = None,
-    policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
-    execution_backend: str = "filesystem",
-    _container_isolated: bool = False,
+    options: ExecutionOptions = _DEFAULT_EXECUTION_OPTIONS,
 ) -> dict[str, Any]:
+    agent = options.agent
+    model = options.model
+    credential_resolver = options.credential_resolver
+    event_sink = options.event_sink
+    policy_reviewer = options.policy_reviewer
+    execution_backend = options.execution_backend
+    _container_isolated = options._container_isolated
     compiled = compile_workflow(config)
     configured_backend = compiled["workflow"]["spec"]["backend"].get("provider")
     if execution_backend not in {"filesystem", "outcomeci"}:
@@ -922,7 +944,7 @@ def start(
     opened = _before_gate(root, config, compiled, state)
     if opened is not None:
         return opened
-    return _execute(root, config, state, agent=agent, model=model)
+    return _execute(root, config, state, options=ExecutionOptions(agent=agent, model=model))
 
 
 def trigger(
@@ -931,14 +953,8 @@ def trigger(
     trigger_name: str,
     payload: dict[str, Any],
     *,
-    agent: str | None = None,
-    model: str | None = None,
     on_created: Callable[[str], None] | None = None,
-    credential_resolver: CredentialResolver | None = None,
-    event_sink: Callable[[dict[str, Any]], None] | None = None,
-    policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
-    execution_backend: str = "filesystem",
-    _container_isolated: bool = False,
+    options: ExecutionOptions = _DEFAULT_EXECUTION_OPTIONS,
 ) -> dict[str, Any]:
     """Validate and materialize a named trigger before any agent execution."""
     compiled = compile_workflow(config)
@@ -970,21 +986,12 @@ def trigger(
     if on_created is not None:
         _write(root, state)
         on_created(state["run_id"])
-    opened = _before_gate(root, config, compiled, state, credential_resolver=credential_resolver)
+    opened = _before_gate(
+        root, config, compiled, state, credential_resolver=options.credential_resolver
+    )
     if opened is not None:
         return opened
-    return _execute(
-        root,
-        config,
-        state,
-        agent=agent,
-        model=model,
-        credential_resolver=credential_resolver,
-        event_sink=event_sink,
-        policy_reviewer=policy_reviewer,
-        execution_backend=execution_backend,
-        _container_isolated=_container_isolated,
-    )
+    return _execute(root, config, state, options=options)
 
 
 def begin(root: Path, config: Path, intent: str) -> dict[str, Any]:
@@ -1188,13 +1195,7 @@ def continue_run(
     run_id: str,
     approve: bool,
     *,
-    agent: str | None = None,
-    model: str | None = None,
-    credential_resolver: CredentialResolver | None = None,
-    event_sink: Callable[[dict[str, Any]], None] | None = None,
-    policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
-    execution_backend: str = "filesystem",
-    _container_isolated: bool = False,
+    options: ExecutionOptions = _DEFAULT_EXECUTION_OPTIONS,
 ) -> dict[str, Any]:
     state = _read(root, run_id)
     if state.get("status") == "awaiting_input" and approve:
@@ -1206,13 +1207,7 @@ def continue_run(
             pending.get("id", ""),
             "Approved",
             approve=True,
-            agent=agent,
-            model=model,
-            credential_resolver=credential_resolver,
-            event_sink=event_sink,
-            policy_reviewer=policy_reviewer,
-            execution_backend=execution_backend,
-            _container_isolated=_container_isolated,
+            options=options,
         )
     if state.get("status") != "awaiting_confirmation":
         raise ExecutionError(f"outcome cannot continue from {state.get('status')}")
@@ -1234,22 +1229,11 @@ def continue_run(
             "before",
             before,
             config=config,
-            credential_resolver=credential_resolver,
+            credential_resolver=options.credential_resolver,
         )
         if opened is not None:
             return opened
-    return _execute(
-        root,
-        config,
-        state,
-        agent=agent,
-        model=model,
-        credential_resolver=credential_resolver,
-        event_sink=event_sink,
-        policy_reviewer=policy_reviewer,
-        execution_backend=execution_backend,
-        _container_isolated=_container_isolated,
-    )
+    return _execute(root, config, state, options=options)
 
 
 def retry(
@@ -1257,13 +1241,7 @@ def retry(
     config: Path,
     run_id: str,
     *,
-    agent: str | None = None,
-    model: str | None = None,
-    credential_resolver: CredentialResolver | None = None,
-    event_sink: Callable[[dict[str, Any]], None] | None = None,
-    policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
-    execution_backend: str = "filesystem",
-    _container_isolated: bool = False,
+    options: ExecutionOptions = _DEFAULT_EXECUTION_OPTIONS,
 ) -> dict[str, Any]:
     """Retry agent execution after a failure without replaying resolved gates."""
     state = _read(root, run_id)
@@ -1272,18 +1250,7 @@ def retry(
     state["status"] = "queued"
     state.pop("error", None)
     _write(root, state)
-    return _execute(
-        root,
-        config,
-        state,
-        agent=agent,
-        model=model,
-        credential_resolver=credential_resolver,
-        event_sink=event_sink,
-        policy_reviewer=policy_reviewer,
-        execution_backend=execution_backend,
-        _container_isolated=_container_isolated,
-    )
+    return _execute(root, config, state, options=options)
 
 
 def _worker_live(outcome_root: Path) -> bool:
@@ -1442,14 +1409,8 @@ def respond(
     *,
     approve: bool = False,
     reject: bool = False,
-    agent: str | None = None,
-    model: str | None = None,
     execute: bool = True,
-    credential_resolver: CredentialResolver | None = None,
-    event_sink: Callable[[dict[str, Any]], None] | None = None,
-    policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
-    execution_backend: str = "filesystem",
-    _container_isolated: bool = False,
+    options: ExecutionOptions = _DEFAULT_EXECUTION_OPTIONS,
 ) -> dict[str, Any]:
     state = _read(root, run_id)
     if approve and reject:
@@ -1524,7 +1485,7 @@ def respond(
                 "before",
                 next_interaction,
                 config=config,
-                credential_resolver=credential_resolver,
+                credential_resolver=options.credential_resolver,
             )
             if opened is not None:
                 return opened
@@ -1534,15 +1495,4 @@ def respond(
         return state
     state["status"] = "queued"
     _write(root, state)
-    return _execute(
-        root,
-        config,
-        state,
-        agent=agent,
-        model=model,
-        credential_resolver=credential_resolver,
-        event_sink=event_sink,
-        policy_reviewer=policy_reviewer,
-        execution_backend=execution_backend,
-        _container_isolated=_container_isolated,
-    )
+    return _execute(root, config, state, options=options)

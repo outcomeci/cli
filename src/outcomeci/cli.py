@@ -36,9 +36,9 @@ from .integrations import (
 )
 from .integrations import apply_patch as apply_integration_patch
 from .integrations import propose_patch as propose_integration_patch
+from .local import ExecutionOptions, compile_context, validate_artifacts
 from .local import advance as advance_local_outcome
 from .local import begin as begin_local_outcome
-from .local import compile_context, validate_artifacts
 from .local import continue_run as continue_local_outcome
 from .local import recover as recover_local_outcome
 from .local import request_input as request_local_input
@@ -744,8 +744,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     _workflow_path(args),
                     args.trigger_name,
                     payload,
-                    agent=args.agent,
-                    model=args.model,
+                    options=ExecutionOptions(agent=args.agent, model=args.model),
                 ),
                 sort_keys=True,
             )
@@ -757,8 +756,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     config,
                     args.run_id,
                     args.approve,
-                    agent=args.agent,
-                    model=args.model,
+                    options=ExecutionOptions(agent=args.agent, model=args.model),
                 ),
                 sort_keys=True,
             )
@@ -769,8 +767,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.workspace.resolve(),
                     config,
                     args.run_id,
-                    agent=args.agent,
-                    model=args.model,
+                    options=ExecutionOptions(agent=args.agent, model=args.model),
                 ),
                 sort_keys=True,
             )
@@ -819,8 +816,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.message,
                     approve=args.approve,
                     reject=args.reject,
-                    agent=args.agent,
-                    model=args.model,
+                    options=ExecutionOptions(agent=args.agent, model=args.model),
                 ),
                 sort_keys=True,
             )

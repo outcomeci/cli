@@ -289,10 +289,12 @@ def test_normal_email_agent_broker_policy_http_flow(tmp_path, monkeypatch, execu
         path,
         "inbound",
         email_payload(),
-        credential_resolver=(lambda _: "private-token"),
-        event_sink=events.append,
-        execution_backend=execution_backend,
-        _container_isolated=execution_backend == "outcomeci",
+        options=local.ExecutionOptions(
+            credential_resolver=(lambda _: "private-token"),
+            event_sink=events.append,
+            execution_backend=execution_backend,
+            _container_isolated=execution_backend == "outcomeci",
+        ),
     )
     assert state["completed_phases"] == ["notify"]
     assert len(requests) == len(reviews) == 3
@@ -322,7 +324,7 @@ def test_cloud_backend_requires_scoped_credential_resolver(tmp_path):
             path,
             "inbound",
             email_payload(),
-            execution_backend="outcomeci",
+            options=local.ExecutionOptions(execution_backend="outcomeci"),
         )
 
 
@@ -335,5 +337,5 @@ def test_filesystem_backend_cannot_claim_container_isolation(tmp_path):
             path,
             "inbound",
             email_payload(),
-            _container_isolated=True,
+            options=local.ExecutionOptions(_container_isolated=True),
         )

@@ -322,22 +322,22 @@ class FlowTests(unittest.TestCase):
             root = Path(parent) / "private"
             root.mkdir()
 
-            def trigger(workspace, config, name, payload, **options):
-                self.assertEqual(options["execution_backend"], "outcomeci")
-                self.assertIs(options["_container_isolated"], True)
+            def trigger(workspace, config, name, payload, *, on_created, options):
+                self.assertEqual(options.execution_backend, "outcomeci")
+                self.assertIs(options._container_isolated, True)
                 self.assertEqual(
-                    options["credential_resolver"]("vault:slack/bot-token")["secrets"]["value"],
+                    options.credential_resolver("vault:slack/bot-token")["secrets"]["value"],
                     "slack-secret",
                 )
                 self.assertEqual(name, "inbound")
-                options["on_created"]("run-1")
+                on_created("run-1")
                 trace = workspace / ".outcomeci" / "outcomes" / "run-1" / "transcripts"
                 trace.mkdir(parents=True)
                 (trace / "codex.jsonl").write_text('{"type":"event"}\n')
                 (workspace / ".outcomeci" / "outcomes" / "run-1" / ".env").write_text(
                     "TOKEN=never-upload\n"
                 )
-                options["event_sink"](
+                options.event_sink(
                     {
                         "event_id": "00000000-0000-0000-0000-000000000001",
                         "occurred_at": "2026-09-16T00:00:00+00:00",
@@ -438,9 +438,9 @@ class FlowTests(unittest.TestCase):
             root.mkdir()
             continue_calls = []
 
-            def trigger(workspace, config, name, payload, **options):
-                self.assertEqual(options["execution_backend"], "outcomeci")
-                options["on_created"]("run-1")
+            def trigger(workspace, config, name, payload, *, on_created, options):
+                self.assertEqual(options.execution_backend, "outcomeci")
+                on_created("run-1")
                 return {
                     "run_id": "run-1",
                     "status": "awaiting_confirmation",
@@ -448,11 +448,11 @@ class FlowTests(unittest.TestCase):
                     "ready_phases": ["notify"],
                 }
 
-            def continue_run(root_arg, config_arg, run_id, *, approve, **options):
+            def continue_run(root_arg, config_arg, run_id, *, approve, options):
                 continue_calls.append((run_id, approve, options))
-                self.assertEqual(options["execution_backend"], "outcomeci")
-                self.assertIs(options["_container_isolated"], True)
-                self.assertTrue(callable(options["credential_resolver"]))
+                self.assertEqual(options.execution_backend, "outcomeci")
+                self.assertIs(options._container_isolated, True)
+                self.assertTrue(callable(options.credential_resolver))
                 trace = root_arg / ".outcomeci" / "outcomes" / run_id / "transcripts"
                 trace.mkdir(parents=True, exist_ok=True)
                 return {
@@ -543,15 +543,15 @@ class FlowTests(unittest.TestCase):
             retry_calls = []
             continue_calls = []
 
-            def trigger(workspace, config, name, payload, **options):
+            def trigger(workspace, config, name, payload, *, on_created, options):
                 trigger_calls.append(options)
-                options["on_created"]("run-1")
+                on_created("run-1")
                 raise ExecutionError("codex failed with exit 1: Usage limit reached, try later")
 
-            def retry(root_arg, config_arg, run_id, **options):
+            def retry(root_arg, config_arg, run_id, *, options):
                 retry_calls.append(options)
-                self.assertEqual(options["agent"], "claude")
-                self.assertEqual(options["model"], "claude-opus-5")
+                self.assertEqual(options.agent, "claude")
+                self.assertEqual(options.model, "claude-opus-5")
                 return {
                     "run_id": run_id,
                     "status": "awaiting_confirmation",
@@ -559,9 +559,9 @@ class FlowTests(unittest.TestCase):
                     "ready_phases": ["notify"],
                 }
 
-            def continue_run(root_arg, config_arg, run_id, *, approve, **options):
+            def continue_run(root_arg, config_arg, run_id, *, approve, options):
                 continue_calls.append(options)
-                self.assertEqual(options["agent"], "claude")
+                self.assertEqual(options.agent, "claude")
                 trace = root_arg / ".outcomeci" / "outcomes" / run_id / "transcripts"
                 trace.mkdir(parents=True, exist_ok=True)
                 return {
@@ -664,12 +664,12 @@ class FlowTests(unittest.TestCase):
             root = Path(parent) / "private"
             root.mkdir()
 
-            def trigger(workspace, config, name, payload, **options):
-                options["on_created"]("run-1")
+            def trigger(workspace, config, name, payload, *, on_created, options):
+                on_created("run-1")
                 raise ExecutionError("codex failed with exit 1: Usage limit reached, try later")
 
-            def retry(root_arg, config_arg, run_id, **options):
-                self.assertEqual(options["agent"], "claude")
+            def retry(root_arg, config_arg, run_id, *, options):
+                self.assertEqual(options.agent, "claude")
                 raise ExecutionError("claude failed with exit 1: authentication rejected")
 
             with (
@@ -1069,8 +1069,8 @@ class FlowTests(unittest.TestCase):
         self.assertEqual((run_id, interaction_id, message), ("run-1", "approval-1", "looks good"))
         self.assertTrue(options["approve"])
         self.assertFalse(options["reject"])
-        self.assertEqual(options["execution_backend"], "outcomeci")
-        self.assertIs(options["_container_isolated"], True)
+        self.assertEqual(options["options"].execution_backend, "outcomeci")
+        self.assertIs(options["options"]._container_isolated, True)
         self.assertEqual(client.completed[0][0:2], ("lease-secret", "completed"))
         self.assertEqual(client.completed[0][2]["run_id"], "run-1")
 

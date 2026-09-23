@@ -51,15 +51,15 @@ def test_continue_run_forwards_the_cloud_execution_context(tmp_path: Path, monke
         tmp_path / "outcome.yml",
         "run-1",
         approve=True,
-        credential_resolver=resolver,
-        execution_backend="outcomeci",
-        _container_isolated=True,
+        options=local.ExecutionOptions(
+            credential_resolver=resolver, execution_backend="outcomeci", _container_isolated=True
+        ),
     )
 
     assert result["status"] == "completed"
-    assert captured["credential_resolver"] is resolver
-    assert captured["execution_backend"] == "outcomeci"
-    assert captured["_container_isolated"] is True
+    assert captured["options"].credential_resolver is resolver
+    assert captured["options"].execution_backend == "outcomeci"
+    assert captured["options"]._container_isolated is True
 
 
 def test_respond_forwards_the_cloud_execution_context(tmp_path: Path, monkeypatch) -> None:
@@ -102,15 +102,15 @@ def test_respond_forwards_the_cloud_execution_context(tmp_path: Path, monkeypatc
         "approval-1",
         "Looks good.",
         approve=True,
-        credential_resolver=resolver,
-        execution_backend="outcomeci",
-        _container_isolated=True,
+        options=local.ExecutionOptions(
+            credential_resolver=resolver, execution_backend="outcomeci", _container_isolated=True
+        ),
     )
 
     assert result["status"] == "completed"
-    assert captured["credential_resolver"] is resolver
-    assert captured["execution_backend"] == "outcomeci"
-    assert captured["_container_isolated"] is True
+    assert captured["options"].credential_resolver is resolver
+    assert captured["options"].execution_backend == "outcomeci"
+    assert captured["options"]._container_isolated is True
 
 
 def test_continue_run_forwards_the_cloud_execution_context_through_respond(
@@ -159,15 +159,15 @@ def test_continue_run_forwards_the_cloud_execution_context_through_respond(
         tmp_path / "outcome.yml",
         "run-1",
         approve=True,
-        credential_resolver=resolver,
-        execution_backend="outcomeci",
-        _container_isolated=True,
+        options=local.ExecutionOptions(
+            credential_resolver=resolver, execution_backend="outcomeci", _container_isolated=True
+        ),
     )
 
     assert result["status"] == "completed"
-    assert respond_options["credential_resolver"] is resolver
-    assert respond_options["execution_backend"] == "outcomeci"
-    assert respond_options["_container_isolated"] is True
+    assert respond_options["options"].credential_resolver is resolver
+    assert respond_options["options"].execution_backend == "outcomeci"
+    assert respond_options["options"]._container_isolated is True
 
 
 def _fake_invoke(
