@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 
 import jsonschema
 import yaml
 
+from outcomeci import cli
 from outcomeci.cli import main
 from outcomeci.config import compile_workflow
 from outcomeci.repository import initialize, update
@@ -26,6 +28,77 @@ def test_init_and_validate(tmp_path: Path, capsys) -> None:
     jsonschema.validate(yaml.safe_load((tmp_path / "outcome.yml").read_text()), load_schema())
     assert main(["validate", "--dir", str(tmp_path)]) == 0
     assert '"valid": true' in capsys.readouterr().out
+
+
+def test_workflow_get_writes_content_and_support_files(tmp_path: Path, capsys, monkeypatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "get_workflow",
+        lambda workspace_id, workflow_id: {
+            "workflow_id": workflow_id,
+            "revision": 12,
+            "content_sha256": "deadbeef",
+            "content": "apiVersion: outcomeci.dev/v1alpha1\n",
+            "files": {
+                ".outcomeci/instructions/orchestrator.md": base64.b64encode(
+                    b"Run the phases."
+                ).decode()
+            },
+        },
+    )
+    output = tmp_path / "outcome.yml"
+    assert (
+        main(
+            [
+                "workflow",
+                "get",
+                "workflow_1",
+                "--workspace-id",
+                "workspace_1",
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    assert output.read_text() == "apiVersion: outcomeci.dev/v1alpha1\n"
+    support_file = tmp_path / ".outcomeci/instructions/orchestrator.md"
+    assert support_file.read_text() == "Run the phases."
+    result = json.loads(capsys.readouterr().out)
+    assert result["revision"] == 12
+    assert result["support_files_written"] == [str(support_file)]
+
+
+def test_workflow_get_rejects_a_support_file_path_outside_outcomeci(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "get_workflow",
+        lambda workspace_id, workflow_id: {
+            "workflow_id": workflow_id,
+            "revision": 1,
+            "content_sha256": "deadbeef",
+            "content": "apiVersion: outcomeci.dev/v1alpha1\n",
+            "files": {"../escape.md": base64.b64encode(b"x").decode()},
+        },
+    )
+    output = tmp_path / "outcome.yml"
+    assert (
+        main(
+            [
+                "workflow",
+                "get",
+                "workflow_1",
+                "--workspace-id",
+                "workspace_1",
+                "--output",
+                str(output),
+            ]
+        )
+        == 2
+    )
+    assert "workflow support file path is invalid" in capsys.readouterr().err
 
 
 def test_schema_can_be_printed_and_exported(tmp_path: Path, capsys) -> None:
