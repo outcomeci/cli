@@ -38,9 +38,19 @@ def _mapping(value: Any, path: str) -> dict[str, Any]:
     return value
 
 
+def _non_empty_str(value: Any, message: str) -> str:
+    """Validate value is a non-blank string, raising `message` verbatim if
+    not -- callers keep their own field-specific wording (a workflow author
+    reading "outcome.yml.trigger.timezone is required" needs that to stay
+    distinct from ".subject_prefix must be non-empty"), only the identical
+    isinstance+strip check they all repeated collapses to one place."""
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(message)
+    return value
+
+
 def _relative_path(root: Path, relative: Any, field: str) -> Path:
-    if not isinstance(relative, str) or not relative.strip():
-        raise ConfigError(f"{field} must be a non-empty path")
+    relative = _non_empty_str(relative, f"{field} must be a non-empty path")
     path = (root / relative).resolve()
     if private_path(relative):
         raise ConfigError(f"{field} references a credential-bearing or broker-private path")
@@ -87,8 +97,8 @@ def _agent_policy(value: Any, field: str) -> dict[str, Any]:
     runner, model = item.get("runner"), item.get("model")
     if runner is not None and runner not in RUNNERS:
         raise ConfigError(f"{field}.runner must be codex, claude, or opencode")
-    if model is not None and (not isinstance(model, str) or not model.strip()):
-        raise ConfigError(f"{field}.model must be non-empty")
+    if model is not None:
+        model = _non_empty_str(model, f"{field}.model must be non-empty")
     if runner == "opencode" and (not isinstance(model, str) or not model.startswith("openrouter/")):
         raise ConfigError(f"{field}.model must use openrouter/provider/model for OpenCode")
     return {key: item[key] for key in ("runner", "model") if item.get(key) is not None}
@@ -119,10 +129,7 @@ def _contract(value: Any, field: str, *, output: bool) -> dict[str, Any]:
             raise ConfigError(f"{field}.path must remain within the run directory")
         result["path"] = Path(path).as_posix()
     else:
-        source = item.get("from")
-        if not isinstance(source, str) or not source.strip():
-            raise ConfigError(f"{field}.from is required")
-        result["from"] = source
+        result["from"] = _non_empty_str(item.get("from"), f"{field}.from is required")
     if item.get("schema") is not None:
         schema = item["schema"]
         if isinstance(schema, (dict, bool)):
@@ -165,17 +172,18 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
             if isinstance(participant, str):
                 participant = {"role": participant}
             participant = _mapping(participant, f"{field}.{timing}[{index}].participant")
-            if not isinstance(participant.get("role"), str) or not participant["role"].strip():
-                raise ConfigError(f"{field}.{timing}[{index}].participant.role is required")
+            _non_empty_str(
+                participant.get("role"), f"{field}.{timing}[{index}].participant.role is required"
+            )
             interaction = item.get("interaction")
             if interaction not in INTERACTIONS:
                 raise ConfigError(f"{field}.{timing}[{index}].interaction is unsupported")
             required = item.get("required", interaction != "notification")
             if not isinstance(required, bool):
                 raise ConfigError(f"{field}.{timing}[{index}].required must be true or false")
-            purpose = item.get("purpose")
-            if not isinstance(purpose, str) or not purpose.strip():
-                raise ConfigError(f"{field}.{timing}[{index}].purpose is required")
+            purpose = _non_empty_str(
+                item.get("purpose"), f"{field}.{timing}[{index}].purpose is required"
+            )
             delivery = _mapping(
                 item.get("delivery", {"type": "local"}),
                 f"{field}.{timing}[{index}].delivery",
@@ -213,9 +221,10 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
                     raise ConfigError(
                         f"{field}.{timing}[{index}].delivery.source must reference <phase>.outputs.<name>"
                     )
-                emoji = delivery.get("emoji", "+1")
-                if not isinstance(emoji, str) or not emoji.strip():
-                    raise ConfigError(f"{field}.{timing}[{index}].delivery.emoji must be non-empty")
+                emoji = _non_empty_str(
+                    delivery.get("emoji", "+1"),
+                    f"{field}.{timing}[{index}].delivery.emoji must be non-empty",
+                )
                 delivery["emoji"] = emoji.strip()
                 poll_interval = delivery.get("poll_interval_seconds", 20)
                 if not isinstance(poll_interval, int) or not 5 <= poll_interval <= 60:
@@ -240,10 +249,10 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
                     raise ConfigError(
                         f"{field}.{timing}[{index}].delivery.targets[{target_index}].kind is unsupported"
                     )
-                if not isinstance(target.get("name"), str) or not target["name"].strip():
-                    raise ConfigError(
-                        f"{field}.{timing}[{index}].delivery.targets[{target_index}].name is required"
-                    )
+                _non_empty_str(
+                    target.get("name"),
+                    f"{field}.{timing}[{index}].delivery.targets[{target_index}].name is required",
+                )
                 normalized_targets.append(
                     {
                         "kind": target["kind"],
@@ -328,10 +337,9 @@ def _phase_integrations(
         entry = _mapping(raw_entry, entry_field)
         integration_type = entry.get("type")
         if integration_type == "api":
-            capability = entry.get("capability")
-            if not isinstance(capability, str) or not capability.strip():
-                raise ConfigError(f"{entry_field}.capability is required")
-            capability = capability.strip()
+            capability = _non_empty_str(
+                entry.get("capability"), f"{entry_field}.capability is required"
+            ).strip()
             capability_names.append(capability)
             required = entry.get("required", False)
             if not isinstance(required, bool):
@@ -372,8 +380,7 @@ def _named_items(value: Any, field: str) -> list[dict[str, Any]]:
 
 
 def _cron_expression(value: Any, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ConfigError(f"{field} must be a five-field cron expression")
+    value = _non_empty_str(value, f"{field} must be a five-field cron expression")
     fields = value.split()
     if len(fields) != 5:
         raise ConfigError(f"{field} must have five space-separated fields")
@@ -416,10 +423,9 @@ def _triggers(value: Any) -> dict[str, dict[str, Any]]:
             if unknown_cron:
                 raise ConfigError(f"{field} has unknown fields: {', '.join(sorted(unknown_cron))}")
             expression = _cron_expression(trigger.get("expression"), f"{field}.expression")
-            timezone = trigger.get("timezone")
-            if not isinstance(timezone, str) or not timezone.strip():
-                raise ConfigError(f"{field}.timezone is required")
-            timezone = timezone.strip()
+            timezone = _non_empty_str(
+                trigger.get("timezone"), f"{field}.timezone is required"
+            ).strip()
             if timezone not in available_timezones():
                 raise ConfigError(f"{field}.timezone is not a recognized IANA time zone")
             normalized[name] = {
@@ -446,10 +452,8 @@ def _triggers(value: Any) -> dict[str, dict[str, Any]]:
         ):
             raise ConfigError(f"{field}.filters.senders must be a list of email addresses")
         subject_prefix = filters.get("subject_prefix")
-        if subject_prefix is not None and (
-            not isinstance(subject_prefix, str) or not subject_prefix.strip()
-        ):
-            raise ConfigError(f"{field}.filters.subject_prefix must be non-empty")
+        if subject_prefix is not None:
+            _non_empty_str(subject_prefix, f"{field}.filters.subject_prefix must be non-empty")
         normalized[name] = {
             "type": trigger_type,
             **(
@@ -490,10 +494,9 @@ def _http_auth(value: Any, field: str) -> dict[str, Any]:
         raise ConfigError(f"{field}.type is unsupported")
     result = {"type": kind}
     if kind != "none":
-        credential = auth.get("credential")
-        if not isinstance(credential, str) or not credential.strip():
-            raise ConfigError(f"{field}.credential is required")
-        result["credential"] = credential.strip()
+        result["credential"] = _non_empty_str(
+            auth.get("credential"), f"{field}.credential is required"
+        ).strip()
     for key in (
         "header",
         "query",
@@ -506,9 +509,7 @@ def _http_auth(value: Any, field: str) -> dict[str, Any]:
         "account_id",
     ):
         if auth.get(key) is not None:
-            if not isinstance(auth[key], str) or not auth[key].strip():
-                raise ConfigError(f"{field}.{key} must be non-empty")
-            result[key] = auth[key].strip()
+            result[key] = _non_empty_str(auth[key], f"{field}.{key} must be non-empty").strip()
     if kind == "api_key" and not (result.get("header") or result.get("query")):
         result["header"] = "Authorization"
         result["scheme"] = "Bearer"
@@ -698,8 +699,7 @@ def _load_integration_packages(path: Path, spec: dict[str, Any]) -> None:
         name, version = metadata.get("name"), metadata.get("version")
         if not isinstance(name, str) or not IDENTIFIER.fullmatch(name):
             raise ConfigError(f"{field}.metadata.name is invalid")
-        if not isinstance(version, str) or not version.strip():
-            raise ConfigError(f"{field}.metadata.version is required")
+        _non_empty_str(version, f"{field}.metadata.version is required")
         package_spec = _mapping(package.get("spec"), f"{field}.spec")
         for connection in _named_items(package_spec.get("connections", {}), f"{field}.connections"):
             ref = connection.pop("ref")
@@ -735,8 +735,7 @@ def _load_v1alpha1(path: Path) -> dict[str, Any]:
     if root.get("kind") != "OutcomeWorkflow":
         raise ConfigError("kind must be OutcomeWorkflow")
     metadata = _mapping(root.get("metadata"), "metadata")
-    if not isinstance(metadata.get("name"), str) or not metadata["name"].strip():
-        raise ConfigError("metadata.name is required")
+    _non_empty_str(metadata.get("name"), "metadata.name is required")
     spec = _mapping(root.get("spec"), "spec")
     _load_integration_packages(path.resolve(), spec)
     triggers = _triggers(spec.get("triggers"))

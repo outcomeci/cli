@@ -108,7 +108,7 @@ made — check one off once it's actually fixed and verified, not just filed.
 - [x] `local.py`: `_validate_required_effects` and `_write_effect_receipts`
   independently re-derive the same "did this broker call actually succeed"
   check — two copies to keep in sync.
-- [ ] `config.py`: a 16-times-repeated non-empty-string guard with
+- [x] `config.py`: a 14-times-repeated non-empty-string guard with
   inconsistent error wording has no shared helper, unlike the file's
   existing `_mapping()` pattern.
 - [ ] `config.py`: `_load_v1alpha1` (complexity 81) inlines two ~80-line
