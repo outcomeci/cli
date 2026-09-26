@@ -6,11 +6,11 @@ from pathlib import Path
 
 import httpx
 import pytest
+from outcomeci_connectors.slack import PROJECT_RELATIVE, SlackError
 
 from outcomeci import slack_vault
 from outcomeci.cli import main
 from outcomeci.local_vault import list_entries, resolve
-from outcomeci.slack import PROJECT_RELATIVE, SlackError
 
 BOT = "xoxb-private-test-credential"
 TOOLING = "xoxe-private-tooling-credential"

@@ -4,10 +4,10 @@ import json
 from pathlib import Path
 
 import yaml
+from outcomeci_connectors.slack import register_connection
 
 from outcomeci import humans
 from outcomeci.repository import initialize
-from outcomeci.slack import register_connection
 
 
 def test_assign_writes_only_readable_slack_selectors(tmp_path: Path) -> None:

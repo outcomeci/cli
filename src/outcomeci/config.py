@@ -188,23 +188,30 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
                 item.get("delivery", {"type": "local"}),
                 f"{field}.{timing}[{index}].delivery",
             )
-            if delivery.get("type") not in {"local", "slack", "custom", "reaction"}:
+            if delivery.get("type") not in {"local", "slack", "custom"}:
                 raise ConfigError(f"{field}.{timing}[{index}].delivery.type is unsupported")
-            if delivery.get("type") in {"slack", "custom"} and not isinstance(
-                delivery.get("connection"), str
+            if delivery.get("type") == "slack":
+                mode = delivery.get("mode", "message")
+                if mode not in {"message", "reaction"}:
+                    raise ConfigError(f"{field}.{timing}[{index}].delivery.mode is unsupported")
+                delivery["mode"] = mode
+            is_reaction = delivery.get("type") == "slack" and delivery.get("mode") == "reaction"
+            if (delivery.get("type") == "custom" or delivery.get("type") == "slack") and (
+                not is_reaction and not isinstance(delivery.get("connection"), str)
             ):
                 raise ConfigError(f"{field}.{timing}[{index}].delivery.connection is required")
-            if delivery.get("type") == "reaction":
+            if is_reaction:
                 if interaction != "approval":
                     raise ConfigError(
-                        f"{field}.{timing}[{index}].delivery.type: reaction requires interaction: approval"
+                        f"{field}.{timing}[{index}].delivery.mode: reaction requires interaction: approval"
                     )
                 if timing != "before":
                     raise ConfigError(
-                        f"{field}.{timing}[{index}].delivery.type: reaction is only supported for timing: before"
+                        f"{field}.{timing}[{index}].delivery.mode: reaction is only supported for timing: before"
                     )
                 unknown_reaction = set(delivery) - {
                     "type",
+                    "mode",
                     "source",
                     "emoji",
                     "poll_interval_seconds",
@@ -234,7 +241,7 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
                 delivery["poll_interval_seconds"] = poll_interval
             elif "on_timeout" in item:
                 raise ConfigError(
-                    f"{field}.{timing}[{index}].on_timeout is only supported with delivery.type: reaction"
+                    f"{field}.{timing}[{index}].on_timeout is only supported with delivery.mode: reaction"
                 )
             targets = delivery.get("targets", [])
             if not isinstance(targets, list):
@@ -263,7 +270,7 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
                 delivery["targets"] = normalized_targets
             wait_default = (
                 {"strategy": "block", "timeout_seconds": 300}
-                if delivery.get("type") == "reaction"
+                if is_reaction
                 else {"strategy": "ask"}
             )
             wait = _mapping(item.get("wait", wait_default), f"{field}.{timing}[{index}].wait")
@@ -276,16 +283,16 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
                 raise ConfigError(
                     f"{field}.{timing}[{index}].wait.timeout_seconds must be between 0 and 86400"
                 )
-            if delivery.get("type") == "reaction":
+            if is_reaction:
                 if wait.get("timeout_seconds") is None:
                     wait["timeout_seconds"] = 300
                 if wait.get("strategy") != "block" or not wait["timeout_seconds"]:
                     raise ConfigError(
-                        f"{field}.{timing}[{index}].delivery.type: reaction requires "
+                        f"{field}.{timing}[{index}].delivery.mode: reaction requires "
                         "wait.strategy: block and a positive wait.timeout_seconds"
                     )
             on_timeout = item.get("on_timeout", "fail")
-            if delivery.get("type") == "reaction" and on_timeout not in {"fail", "continue"}:
+            if is_reaction and on_timeout not in {"fail", "continue"}:
                 raise ConfigError(f"{field}.{timing}[{index}].on_timeout is unsupported")
             normalized = {
                 "id": interaction_id,
@@ -295,7 +302,7 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
                 "required": required,
                 "delivery": delivery,
             }
-            if delivery.get("type") == "reaction":
+            if is_reaction:
                 normalized["on_timeout"] = on_timeout
             normalized["wait"] = {
                 "strategy": wait["strategy"],
@@ -841,7 +848,10 @@ def _validate_phase_graph(
                 )
         for timing_group in phase["humans"].values():
             for hook in timing_group:
-                if hook["delivery"].get("type") != "reaction":
+                if (
+                    hook["delivery"].get("type") != "slack"
+                    or hook["delivery"].get("mode") != "reaction"
+                ):
                     continue
                 source = hook["delivery"]["source"]
                 match = re.fullmatch(
@@ -1071,7 +1081,9 @@ def _load_v1alpha1(path: Path) -> dict[str, Any]:
         for timing in ("before", "during", "after"):
             for hook in phase["humans"][timing]:
                 delivery = hook["delivery"]
-                if delivery.get("type") in {"slack", "custom"}:
+                if delivery.get("type") in {"slack", "custom"} and not (
+                    delivery.get("type") == "slack" and delivery.get("mode") == "reaction"
+                ):
                     ref = delivery["connection"]
                     if connection_providers.get(ref) != delivery["type"]:
                         raise ConfigError(
