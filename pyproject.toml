@@ -15,13 +15,11 @@ dependencies = [
     "httpx>=0.27",
     "jsonschema>=4.23",
     "pyte>=0.8",
-    # Pinned to a commit, not the v0.1.0 tag: a tag is mutable and this repo
-    # has no lockfile, so a commit SHA is what actually keeps this
-    # reproducible. Bump it deliberately when outcomeci/connectors releases
-    # something cli needs. Also provisional: outcomeci/connectors is
-    # currently private, so this dependency only resolves for installers
-    # with access to it -- revisit once that repo's visibility is decided.
-    "outcomeci-connectors @ git+https://github.com/outcomeci/connectors@9e7eced3f8e847f695c0657e0411be8d6e3760b1",
+    # Pinned to a commit, not a tag: a tag is mutable and this repo has no
+    # lockfile, so a commit SHA is what actually keeps this reproducible.
+    # Bump it deliberately when outcomeci/connectors releases something cli
+    # needs.
+    "outcomeci-connectors @ git+https://github.com/outcomeci/connectors@0170482fcadf6a7d3963a68a458134c30582197f",
 ]
 
 [project.scripts]

@@ -191,15 +191,16 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
             if delivery.get("type") not in {"local", "slack", "custom"}:
                 raise ConfigError(f"{field}.{timing}[{index}].delivery.type is unsupported")
             if delivery.get("type") == "slack":
-                mode = delivery.get("mode", "message")
-                if mode not in {"message", "reaction", "reply"}:
-                    raise ConfigError(f"{field}.{timing}[{index}].delivery.mode is unsupported")
+                mode = delivery.get("mode")
+                if mode not in {"reaction", "reply"}:
+                    raise ConfigError(
+                        f"{field}.{timing}[{index}].delivery.mode is required and must be "
+                        "reaction or reply"
+                    )
                 delivery["mode"] = mode
             is_reaction = delivery.get("type") == "slack" and delivery.get("mode") == "reaction"
             is_reply = delivery.get("type") == "slack" and delivery.get("mode") == "reply"
-            if (delivery.get("type") == "custom" or delivery.get("type") == "slack") and (
-                not is_reaction and not is_reply and not isinstance(delivery.get("connection"), str)
-            ):
+            if delivery.get("type") == "custom" and not isinstance(delivery.get("connection"), str):
                 raise ConfigError(f"{field}.{timing}[{index}].delivery.connection is required")
             if is_reaction:
                 if interaction != "approval":
@@ -1070,7 +1071,7 @@ def _load_v1alpha1(path: Path) -> dict[str, Any]:
             raise ConfigError("connection references must be unique non-empty strings")
         refs.add(ref)
         provider = item.get("provider")
-        if provider not in {"slack", "custom", "http"}:
+        if provider not in {"custom", "http"}:
             raise ConfigError(f"spec.connections[{index}].provider is unsupported")
         connection_providers[ref] = provider
         if provider == "http":
@@ -1115,10 +1116,7 @@ def _load_v1alpha1(path: Path) -> dict[str, Any]:
         for timing in ("before", "during", "after"):
             for hook in phase["humans"][timing]:
                 delivery = hook["delivery"]
-                if delivery.get("type") in {"slack", "custom"} and not (
-                    delivery.get("type") == "slack"
-                    and delivery.get("mode") in {"reaction", "reply"}
-                ):
+                if delivery.get("type") == "custom":
                     ref = delivery["connection"]
                     if connection_providers.get(ref) != delivery["type"]:
                         raise ConfigError(

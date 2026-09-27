@@ -16,7 +16,6 @@ from outcomeci_connectors.slack import SlackError
 from outcomeci_connectors.slack import manifest as slack_manifest
 from outcomeci_connectors.slack import setup as setup_slack
 from outcomeci_connectors.slack import status as slack_status
-from outcomeci_connectors.slack import targets as slack_targets
 
 from . import __version__, debug, slack_vault, tunnels, webhooks
 from .capability import invoke as invoke_capability
@@ -356,12 +355,8 @@ def parser() -> argparse.ArgumentParser:
     _add_workflow_arguments(respond_command, agent_overrides=True)
     human = commands.add_parser("human")
     human_commands = human.add_subparsers(dest="human_command", required=True)
-    human_targets = human_commands.add_parser(
-        "targets", help="List readable Slack people, channels, and groups"
-    )
-    _add_workspace_argument(human_targets)
     human_assign = human_commands.add_parser(
-        "assign", help="Assign readable targets to a workflow hook"
+        "assign", help="Assign readable targets to a custom-transport workflow hook"
     )
     human_assign.add_argument("phase")
     human_assign.add_argument("timing", choices=("before", "during", "after"))
@@ -371,14 +366,16 @@ def parser() -> argparse.ArgumentParser:
     human_assign.add_argument("--group", action="append", default=[])
     human_assign.add_argument("--wait", choices=("ask", "block", "continue"), default="ask")
     human_assign.add_argument("--timeout", type=int)
-    human_assign.add_argument("--connection", default="slack_local")
+    human_assign.add_argument("--connection", required=True)
     _add_workflow_arguments(human_assign)
     human_request = human_commands.add_parser("request", help="Deliver a configured human hook")
     human_request.add_argument("interaction_id")
     human_request.add_argument("--run", required=True)
     _add_workflow_arguments(human_request)
     human_request.add_argument("--continue", dest="continue_while_waiting", action="store_true")
-    human_poll = human_commands.add_parser("poll", help="Poll Slack for human responses")
+    human_poll = human_commands.add_parser(
+        "poll", help="Poll a custom-transport human hook for responses"
+    )
     human_poll.add_argument("interaction_id")
     human_poll.add_argument("--run", required=True)
     human_poll.add_argument("--wait", type=int, default=0)
@@ -466,7 +463,7 @@ def parser() -> argparse.ArgumentParser:
     _add_workspace_argument(slack_setup)
     slack_setup.add_argument("--name", default="OutcomeCI")
     slack_setup.add_argument("--team")
-    slack_setup.add_argument("--channel", help="Default Slack channel or user ID for human hooks")
+    slack_setup.add_argument("--channel", help="Default Slack channel or user ID for this app")
     slack_setup.add_argument("--force", action="store_true")
     slack_sync = slack_commands.add_parser(
         "sync-credentials", help="Sync the installed app token to a Vault"
@@ -481,8 +478,6 @@ def parser() -> argparse.ArgumentParser:
     slack_sync.add_argument("--workflow", action="append")
     slack_status_command = slack_commands.add_parser("status")
     _add_workspace_argument(slack_status_command)
-    slack_targets_command = slack_commands.add_parser("targets", help="List readable Slack targets")
-    _add_workspace_argument(slack_targets_command)
     slack_manifest_command = slack_commands.add_parser(
         "manifest", help="Print the generated Slack app manifest"
     )
@@ -858,11 +853,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "human":
             workspace = args.workspace.resolve()
             scoped = bool(os.environ.get("OUTCOMECI_CAPABILITY_SOCKET"))
-            if args.human_command == "targets":
-                if scoped:
-                    raise ExecutionError("target discovery is not allowed during outcome execution")
-                _print_json(slack_targets(workspace), sort_keys=True)
-            elif args.human_command == "assign":
+            if args.human_command == "assign":
                 if scoped:
                     raise ExecutionError("hook assignment is not allowed during outcome execution")
                 config = _workflow_path(args)
@@ -1060,8 +1051,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             elif args.slack_command == "status":
                 _print_json(slack_status(args.workspace), sort_keys=True)
-            elif args.slack_command == "targets":
-                _print_json(slack_targets(args.workspace.resolve()), sort_keys=True)
             elif args.slack_command == "manifest":
                 _print_json(slack_manifest(args.source or args.project), compact=True)
         return 0

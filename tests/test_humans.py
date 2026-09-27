@@ -3,16 +3,23 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
-from outcomeci_connectors.slack import register_connection
 
 from outcomeci import humans
+from outcomeci.process import ExecutionError
 from outcomeci.repository import initialize
 
 
-def test_assign_writes_only_readable_slack_selectors(tmp_path: Path) -> None:
+def _register_custom_connection(config: Path, ref: str = "people_api") -> None:
+    document = yaml.safe_load(config.read_text(encoding="utf-8"))
+    document["spec"].setdefault("connections", []).append({"ref": ref, "provider": "custom"})
+    config.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+
+
+def test_assign_writes_only_readable_custom_selectors(tmp_path: Path) -> None:
     initialize(tmp_path, "filesystem")
-    register_connection(tmp_path / "outcome.yml")
+    _register_custom_connection(tmp_path / "outcome.yml")
     result = humans.assign(
         tmp_path,
         tmp_path / "outcome.yml",
@@ -22,6 +29,7 @@ def test_assign_writes_only_readable_slack_selectors(tmp_path: Path) -> None:
         [("user", "@isaah"), ("channel", "#product"), ("group", "design")],
         "ask",
         900,
+        "people_api",
     )
     hook = yaml.safe_load((tmp_path / "outcome.yml").read_text())["spec"]["agents"]["phases"][
         "intake"
@@ -32,7 +40,22 @@ def test_assign_writes_only_readable_slack_selectors(tmp_path: Path) -> None:
         {"kind": "group", "name": "design"},
     ]
     assert hook["wait"] == {"strategy": "ask", "timeout_seconds": 900}
-    assert "U0" not in (tmp_path / "outcome.yml").read_text()
+
+
+def test_assign_rejects_a_non_custom_connection(tmp_path: Path) -> None:
+    initialize(tmp_path, "filesystem")
+    with pytest.raises(ExecutionError, match="was not found"):
+        humans.assign(
+            tmp_path,
+            tmp_path / "outcome.yml",
+            "intake",
+            "after",
+            "confirm_intent",
+            [("user", "isaah")],
+            "ask",
+            None,
+            "nonexistent",
+        )
 
 
 def test_poll_persists_readable_responses_without_provider_ids(tmp_path: Path, monkeypatch) -> None:
@@ -45,14 +68,17 @@ def test_poll_persists_readable_responses_without_provider_ids(tmp_path: Path, m
                 "phase": "plan",
                 "id": "review",
                 "status": "pending",
-                "delivery": {"type": "slack", "connection": "slack_local"},
+                "delivery": {"type": "custom", "connection": "people_api"},
+                "delivery_status": {"correlation_id": "corr-1"},
             }
         )
     )
     monkeypatch.setattr(
         humans,
-        "poll_replies",
-        lambda *args: [{"from": "Isaah", "message": "Proceed", "responded_at": "1.2"}],
+        "call_custom",
+        lambda *args: {
+            "responses": [{"from": "Isaah", "message": "Proceed", "responded_at": "1.2"}]
+        },
     )
     result = humans.poll(tmp_path, tmp_path / "outcome.yml", "run-1", "review")
     assert result["status"] == "responded"
@@ -62,7 +88,7 @@ def test_poll_persists_readable_responses_without_provider_ids(tmp_path: Path, m
 
 def test_request_delivers_existing_pending_hook_once(tmp_path: Path, monkeypatch) -> None:
     initialize(tmp_path, "filesystem")
-    register_connection(tmp_path / "outcome.yml")
+    _register_custom_connection(tmp_path / "outcome.yml")
     humans.assign(
         tmp_path,
         tmp_path / "outcome.yml",
@@ -72,6 +98,7 @@ def test_request_delivers_existing_pending_hook_once(tmp_path: Path, monkeypatch
         [("user", "isaah")],
         "ask",
         None,
+        "people_api",
     )
     outcome = tmp_path / ".outcomeci/outcomes/run-1"
     interaction = outcome / "interactions/intake/confirm_intent.json"
@@ -83,7 +110,13 @@ def test_request_delivers_existing_pending_hook_once(tmp_path: Path, monkeypatch
                 "phase": "intake",
                 "id": "confirm_intent",
                 "status": "pending",
-                "delivery": {"type": "slack", "targets": [{"kind": "user", "name": "isaah"}]},
+                "interaction": "consultation",
+                "purpose": "Confirm intent",
+                "delivery": {
+                    "type": "custom",
+                    "connection": "people_api",
+                    "targets": [{"kind": "user", "name": "isaah"}],
+                },
                 "wait": {"strategy": "ask"},
             }
         )
@@ -97,20 +130,12 @@ def test_request_delivers_existing_pending_hook_once(tmp_path: Path, monkeypatch
             }
         )
     )
-    monkeypatch.setattr(
-        humans,
-        "deliver_slack",
-        lambda *args: {
-            "delivered": True,
-            "targets": [{"kind": "user", "name": "isaah"}],
-            "threads": 1,
-        },
-    )
+    monkeypatch.setattr(humans, "call_custom", lambda *args: {"correlation_id": "corr-1"})
     result = humans.request(tmp_path, tmp_path / "outcome.yml", "run-1", "confirm_intent")
-    assert result["threads"] == 1
+    assert result["correlation_id"] == "corr-1"
     assert json.loads(interaction.read_text())["delivery_status"] == {
         "delivered": True,
-        "threads": 1,
+        "correlation_id": "corr-1",
     }
 
 
@@ -126,7 +151,13 @@ def test_request_can_continue_with_durable_open_interaction(tmp_path: Path, monk
                 "phase": "plan",
                 "id": "expert",
                 "status": "pending",
-                "delivery": {"type": "slack", "targets": [{"kind": "channel", "name": "product"}]},
+                "interaction": "consultation",
+                "purpose": "Consult an expert",
+                "delivery": {
+                    "type": "custom",
+                    "connection": "people_api",
+                    "targets": [{"kind": "channel", "name": "product"}],
+                },
                 "wait": {"strategy": "ask"},
             }
         )
@@ -141,15 +172,7 @@ def test_request_can_continue_with_durable_open_interaction(tmp_path: Path, monk
             }
         )
     )
-    monkeypatch.setattr(
-        humans,
-        "deliver_slack",
-        lambda *args: {
-            "delivered": True,
-            "targets": [{"kind": "channel", "name": "product"}],
-            "threads": 1,
-        },
-    )
+    monkeypatch.setattr(humans, "call_custom", lambda *args: {"correlation_id": "corr-2"})
     humans.request(tmp_path, tmp_path / "outcome.yml", "run-1", "expert", True)
     state = json.loads(run_path.read_text())
     assert state["status"] == "running"
