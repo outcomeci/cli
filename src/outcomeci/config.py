@@ -192,12 +192,13 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
                 raise ConfigError(f"{field}.{timing}[{index}].delivery.type is unsupported")
             if delivery.get("type") == "slack":
                 mode = delivery.get("mode", "message")
-                if mode not in {"message", "reaction"}:
+                if mode not in {"message", "reaction", "reply"}:
                     raise ConfigError(f"{field}.{timing}[{index}].delivery.mode is unsupported")
                 delivery["mode"] = mode
             is_reaction = delivery.get("type") == "slack" and delivery.get("mode") == "reaction"
+            is_reply = delivery.get("type") == "slack" and delivery.get("mode") == "reply"
             if (delivery.get("type") == "custom" or delivery.get("type") == "slack") and (
-                not is_reaction and not isinstance(delivery.get("connection"), str)
+                not is_reaction and not is_reply and not isinstance(delivery.get("connection"), str)
             ):
                 raise ConfigError(f"{field}.{timing}[{index}].delivery.connection is required")
             if is_reaction:
@@ -239,9 +240,42 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
                         f"{field}.{timing}[{index}].delivery.poll_interval_seconds must be between 5 and 60"
                     )
                 delivery["poll_interval_seconds"] = poll_interval
+            elif is_reply:
+                if interaction != "consultation":
+                    raise ConfigError(
+                        f"{field}.{timing}[{index}].delivery.mode: reply requires interaction: consultation"
+                    )
+                if timing != "before":
+                    raise ConfigError(
+                        f"{field}.{timing}[{index}].delivery.mode: reply is only supported for timing: before"
+                    )
+                unknown_reply = set(delivery) - {
+                    "type",
+                    "mode",
+                    "source",
+                    "poll_interval_seconds",
+                }
+                if unknown_reply:
+                    raise ConfigError(
+                        f"{field}.{timing}[{index}].delivery has unknown fields: "
+                        + ", ".join(sorted(unknown_reply))
+                    )
+                source = delivery.get("source")
+                if not isinstance(source, str) or not re.fullmatch(
+                    r"[a-z][a-z0-9_-]{0,62}\.outputs\.[a-z][a-z0-9_-]{0,62}", source
+                ):
+                    raise ConfigError(
+                        f"{field}.{timing}[{index}].delivery.source must reference <phase>.outputs.<name>"
+                    )
+                poll_interval = delivery.get("poll_interval_seconds", 20)
+                if not isinstance(poll_interval, int) or not 5 <= poll_interval <= 60:
+                    raise ConfigError(
+                        f"{field}.{timing}[{index}].delivery.poll_interval_seconds must be between 5 and 60"
+                    )
+                delivery["poll_interval_seconds"] = poll_interval
             elif "on_timeout" in item:
                 raise ConfigError(
-                    f"{field}.{timing}[{index}].on_timeout is only supported with delivery.mode: reaction"
+                    f"{field}.{timing}[{index}].on_timeout is only supported with delivery.mode: reaction or reply"
                 )
             targets = delivery.get("targets", [])
             if not isinstance(targets, list):
@@ -270,7 +304,7 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
                 delivery["targets"] = normalized_targets
             wait_default = (
                 {"strategy": "block", "timeout_seconds": 300}
-                if is_reaction
+                if is_reaction or is_reply
                 else {"strategy": "ask"}
             )
             wait = _mapping(item.get("wait", wait_default), f"{field}.{timing}[{index}].wait")
@@ -283,16 +317,16 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
                 raise ConfigError(
                     f"{field}.{timing}[{index}].wait.timeout_seconds must be between 0 and 86400"
                 )
-            if is_reaction:
+            if is_reaction or is_reply:
                 if wait.get("timeout_seconds") is None:
                     wait["timeout_seconds"] = 300
                 if wait.get("strategy") != "block" or not wait["timeout_seconds"]:
                     raise ConfigError(
-                        f"{field}.{timing}[{index}].delivery.mode: reaction requires "
+                        f"{field}.{timing}[{index}].delivery.mode: {'reaction' if is_reaction else 'reply'} requires "
                         "wait.strategy: block and a positive wait.timeout_seconds"
                     )
             on_timeout = item.get("on_timeout", "fail")
-            if is_reaction and on_timeout not in {"fail", "continue"}:
+            if (is_reaction or is_reply) and on_timeout not in {"fail", "continue"}:
                 raise ConfigError(f"{field}.{timing}[{index}].on_timeout is unsupported")
             normalized = {
                 "id": interaction_id,
@@ -302,7 +336,7 @@ def _human_interactions(value: Any, field: str) -> dict[str, list[dict[str, Any]
                 "required": required,
                 "delivery": delivery,
             }
-            if is_reaction:
+            if is_reaction or is_reply:
                 normalized["on_timeout"] = on_timeout
             normalized["wait"] = {
                 "strategy": wait["strategy"],
@@ -817,7 +851,7 @@ def _validate_phase_graph(
     normalized: dependency edges point at real, non-self phases; every
     input's `from` resolves to a declared producer that's a direct
     dependency (or a known trigger/runtime/context source); the same for
-    reaction hooks' output sources."""
+    reaction and reply hooks' output sources."""
     for phase_name, phase in normalized_phases.items():
         for dependency in phase["needs"]:
             if dependency == phase_name:
@@ -848,10 +882,10 @@ def _validate_phase_graph(
                 )
         for timing_group in phase["humans"].values():
             for hook in timing_group:
-                if (
-                    hook["delivery"].get("type") != "slack"
-                    or hook["delivery"].get("mode") != "reaction"
-                ):
+                if hook["delivery"].get("type") != "slack" or hook["delivery"].get("mode") not in {
+                    "reaction",
+                    "reply",
+                }:
                     continue
                 source = hook["delivery"]["source"]
                 match = re.fullmatch(
@@ -1082,7 +1116,8 @@ def _load_v1alpha1(path: Path) -> dict[str, Any]:
             for hook in phase["humans"][timing]:
                 delivery = hook["delivery"]
                 if delivery.get("type") in {"slack", "custom"} and not (
-                    delivery.get("type") == "slack" and delivery.get("mode") == "reaction"
+                    delivery.get("type") == "slack"
+                    and delivery.get("mode") in {"reaction", "reply"}
                 ):
                     ref = delivery["connection"]
                     if connection_providers.get(ref) != delivery["type"]:
