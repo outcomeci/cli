@@ -10,7 +10,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 RUN apt-get update \
     && apt-get upgrade --yes \
-    && apt-get install --yes --no-install-recommends ca-certificates \
+    # git: outcomeci-connectors is a git dependency of outcomeci-cli, and
+    # pip needs git installed to resolve it at install time.
+    && apt-get install --yes --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/* \
     && python -m pip install --no-cache-dir awscli \
     && groupadd --gid 10001 proof \
