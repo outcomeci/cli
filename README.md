@@ -386,7 +386,10 @@ connections:
 ```
 
 To deliver a human interaction through Slack, declare Slack delivery on the
-phase hook:
+phase hook. This is `mode: message` (the default, so it can be left out) --
+the agent-driven `oci human request`/`poll`/`accept` lifecycle; see
+"Reaction delivery" below for the other mode, a runtime-native fast path for
+a single approve-or-timeout gate.
 
 ```yaml
 integrations:
@@ -479,8 +482,10 @@ and `operations.poll.tool`.
 ### Reaction delivery
 
 A `before` approval hook can resolve itself by polling for a Slack reaction,
-with no `oci human request`/`poll`/`accept` involved. The runtime resolves it
-directly, the same way locally and in OutcomeCI Cloud:
+with no `oci human request`/`poll`/`accept` involved. Set `delivery.mode:
+reaction` on a `type: slack` hook -- there is no separate `type: reaction`.
+The runtime resolves it directly, the same way locally and in OutcomeCI
+Cloud:
 
 ```yaml
 integrations:
@@ -491,7 +496,8 @@ integrations:
     purpose: Approve opening a fix PR.
     interaction: approval
     delivery:
-      type: reaction
+      type: slack
+      mode: reaction
       source: notify.outputs.delivery
       emoji: "+1"
       poll_interval_seconds: 20
@@ -502,6 +508,10 @@ integrations:
     capability: slack.get_reactions
     required: false
 ```
+
+Reaction mode needs no `connection` (unlike `mode: message`, below) -- it
+resolves its Slack access through the phase's own `slack.get_reactions` API
+capability grant instead.
 
 `source` is `<phase>.outputs.<name>`, a direct `needs` dependency's own
 declared output holding the `channel` and `ts` of the message to watch. The

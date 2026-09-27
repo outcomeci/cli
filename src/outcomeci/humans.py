@@ -8,12 +8,12 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from outcomeci_connectors.slack import deliver as deliver_slack
+from outcomeci_connectors.slack import poll_replies
 
 from .custom import call as call_custom
 from .process import ExecutionError
 from .security import atomic_write_json, atomic_write_text
-from .slack import deliver as deliver_slack
-from .slack import poll_replies
 
 
 def assign(

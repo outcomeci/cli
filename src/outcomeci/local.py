@@ -524,7 +524,8 @@ def _open_interaction(
     config: Path | None = None,
     credential_resolver: CredentialResolver | None = None,
 ) -> dict[str, Any] | None:
-    if definition.get("delivery", {}).get("type") == "reaction":
+    delivery = definition.get("delivery", {})
+    if delivery.get("type") == "slack" and delivery.get("mode") == "reaction":
         _resolve_reaction(root, config, state, phase, timing, definition, credential_resolver)
         return None
     request = {

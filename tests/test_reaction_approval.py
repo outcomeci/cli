@@ -21,7 +21,12 @@ def _hook(**overrides):
         "participant": "approver",
         "purpose": "Wait for a thumbs up",
         "interaction": "approval",
-        "delivery": {"type": "reaction", "source": "notify.outputs.delivery", "emoji": "+1"},
+        "delivery": {
+            "type": "slack",
+            "mode": "reaction",
+            "source": "notify.outputs.delivery",
+            "emoji": "+1",
+        },
     }
     hook.update(overrides)
     return hook
@@ -31,7 +36,8 @@ def test_valid_reaction_delivery_is_normalized():
     result = _human_interactions({"before": [_hook()]}, "spec.agents.phases.approve.humans")
     normalized = result["before"][0]
     assert normalized["delivery"] == {
-        "type": "reaction",
+        "type": "slack",
+        "mode": "reaction",
         "source": "notify.outputs.delivery",
         "emoji": "+1",
         "poll_interval_seconds": 20,
@@ -53,19 +59,26 @@ def test_reaction_delivery_only_supported_before():
 
 
 def test_reaction_delivery_requires_source():
-    hook = _hook(delivery={"type": "reaction"})
+    hook = _hook(delivery={"type": "slack", "mode": "reaction"})
     with pytest.raises(ConfigError, match="delivery.source"):
         _human_interactions({"before": [hook]}, "spec.agents.phases.approve.humans")
 
 
 def test_reaction_delivery_rejects_malformed_source():
-    hook = _hook(delivery={"type": "reaction", "source": "not-a-reference"})
+    hook = _hook(delivery={"type": "slack", "mode": "reaction", "source": "not-a-reference"})
     with pytest.raises(ConfigError, match="delivery.source"):
         _human_interactions({"before": [hook]}, "spec.agents.phases.approve.humans")
 
 
 def test_reaction_delivery_rejects_unknown_fields():
-    hook = _hook(delivery={"type": "reaction", "source": "notify.outputs.delivery", "bogus": "x"})
+    hook = _hook(
+        delivery={
+            "type": "slack",
+            "mode": "reaction",
+            "source": "notify.outputs.delivery",
+            "bogus": "x",
+        }
+    )
     with pytest.raises(ConfigError, match="unknown fields"):
         _human_interactions({"before": [hook]}, "spec.agents.phases.approve.humans")
 
@@ -73,7 +86,8 @@ def test_reaction_delivery_rejects_unknown_fields():
 def test_reaction_delivery_poll_interval_bounds():
     hook = _hook(
         delivery={
-            "type": "reaction",
+            "type": "slack",
+            "mode": "reaction",
             "source": "notify.outputs.delivery",
             "poll_interval_seconds": 1,
         }
@@ -99,7 +113,7 @@ def test_on_timeout_rejects_invalid_value():
 
 def test_on_timeout_rejected_without_reaction_delivery():
     hook = _hook(delivery={"type": "local"}, on_timeout="fail")
-    with pytest.raises(ConfigError, match="only supported with delivery.type: reaction"):
+    with pytest.raises(ConfigError, match="only supported with delivery.mode: reaction"):
         _human_interactions({"before": [hook]}, "spec.agents.phases.approve.humans")
 
 
@@ -158,7 +172,8 @@ def _workflow(tmp_path: Path, *, on_timeout: str = "fail") -> Path:
                                 "purpose": "Wait for a thumbs up",
                                 "interaction": "approval",
                                 "delivery": {
-                                    "type": "reaction",
+                                    "type": "slack",
+                                    "mode": "reaction",
                                     "source": "notify.outputs.delivery",
                                     "emoji": "+1",
                                     "poll_interval_seconds": 5,
@@ -237,7 +252,8 @@ def test_source_must_come_from_a_direct_dependency(tmp_path: Path):
 def test_compiles_cleanly_with_a_valid_reaction_hook(tmp_path: Path):
     compiled = compile_workflow(_workflow(tmp_path))
     hook = compiled["instructions"]["phases"]["approve"]["humans"]["before"][0]
-    assert hook["delivery"]["type"] == "reaction"
+    assert hook["delivery"]["type"] == "slack"
+    assert hook["delivery"]["mode"] == "reaction"
     assert "slack.get_reactions" in compiled["instructions"]["phases"]["approve"]["capabilities"]
 
 
