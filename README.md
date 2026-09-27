@@ -278,10 +278,6 @@ agents:
           interaction: consultation
           required: true
           availability: on_demand
-          delivery:
-            type: slack
-            connection: slack_local
-            targets: [{kind: user, name: izzy}]
           wait: {strategy: ask}
     plan:
       instructions: .outcomeci/instructions/delivery-design.md
@@ -305,7 +301,6 @@ initialize a filesystem workflow, and run:
 ```console
 oci integration slack setup --name "Acme Outcomes"
 oci integration slack status
-oci human targets
 ```
 
 `setup` delegates workspace authorization, manifest validation, and app
@@ -313,8 +308,6 @@ installation to Slack CLI. Slack may ask you to run an authorization ticket in
 your workspace and approve the new app in a browser. OutcomeCI generates the
 Slack project metadata directly, so setup will not ask whether to link an
 existing app. The generated project lives in `.outcomeci/integrations/slack/`.
-Human hooks use short-lived `slack api` calls, so they need no public webhook,
-long-running listener, or OutcomeCI backend.
 
 By default, Slack credentials remain in Slack CLI's own credential store. When
 ready to use the installed app from an HTTP workflow integration, sync its bot
@@ -376,69 +369,13 @@ Syncing does not modify workflow connections or enable a cloud runner to read
 a local Vault. Local execution uses the local Vault; cloud execution needs the
 cloud secret and a grant for its workflow.
 
-For human hooks, OutcomeCI adds only this non-secret reference to `outcome.yml`:
-
-```yaml
-connections:
-  - ref: slack_local
-    provider: slack
-    delivery: on_demand
-```
-
-To deliver a human interaction through Slack, declare Slack delivery on the
-phase hook. This is `mode: message` (the default, so it can be left out) --
-the agent-driven `oci human request`/`poll`/`accept` lifecycle; see
-"Reaction delivery" below for the other mode, a runtime-native fast path for
-a single approve-or-timeout gate.
-
-```yaml
-integrations:
-  - type: human
-    timing: after
-    id: confirm_scope
-    participant: requester
-    purpose: Confirm the intent and affected scope before planning.
-    interaction: approval
-    required: true
-    delivery:
-      type: slack
-      connection: slack_local
-      targets:
-        - kind: user
-          name: izzy
-        - kind: channel
-          name: product
-    wait:
-      strategy: ask
-```
-
-Discover and assign people without copying Slack IDs:
-
-```console
-oci human targets
-oci human assign intake after confirm_scope --user izzy --channel product --wait ask
-```
-
-Agents deliver and poll hooks through deterministic commands:
-
-```console
-oci human request confirm_scope --run <run-id>
-oci human poll confirm_scope --run <run-id> --wait 300
-oci human accept confirm_scope "Use the existing navigation" --run <run-id>
-```
-
-The CLI privately resolves readable names to Slack transport identifiers. IDs
-never enter `outcome.yml`, agent prompts, command output, or outcome artifacts.
-When `wait.strategy` is `ask`, Codex or Claude Code asks whether to wait for a
-bounded duration or continue. Polled replies are stored with the interaction
-and become context for subsequent phases.
-
-During local agent execution, OutcomeCI uses Bubblewrap to mount workflow
-configuration read-only, hide Slack CLI credentials, and expose only the
-current outcome artifact directory as writable. A short-lived Unix-socket
-capability permits only the current phase's configured hook IDs. Human
-responses are re-read from Slack before acceptance. Execution fails closed if
-Bubblewrap is unavailable; prompts are not treated as a security boundary.
+An installed app's token, once synced, backs the `slack` HTTP connection used
+by `slack.send_message`/`slack.get_reactions`/`slack.get_replies` capability
+calls, and by `mode: reaction`/`mode: reply` human hooks (see "Reaction
+delivery" and "Reply delivery" below) -- all portable, cloud-executable
+mechanisms with no local Slack CLI dependency at runtime. For a hook that
+needs an interactive request/poll/accept lifecycle instead, see "Custom human
+transports" next.
 
 ### Custom human transports
 
@@ -479,6 +416,14 @@ hook. The request operation returns `correlation_id`. Poll returns
 `streamable_http` or `stdio`, and tool names under `operations.request.tool`
 and `operations.poll.tool`.
 
+During local agent execution, OutcomeCI uses Bubblewrap to mount workflow
+configuration read-only, hide local credentials such as the Slack CLI's, and
+expose only the current outcome artifact directory as writable. A short-lived
+Unix-socket capability permits only the current phase's configured hook IDs.
+Human responses are re-read from the transport before acceptance. Execution
+fails closed if Bubblewrap is unavailable; prompts are not treated as a
+security boundary.
+
 ### Reaction delivery
 
 A `before` approval hook can resolve itself by polling for a Slack reaction,
@@ -509,9 +454,8 @@ integrations:
     required: false
 ```
 
-Reaction mode needs no `connection` (unlike `mode: message`, below) -- it
-resolves its Slack access through the phase's own `slack.get_reactions` API
-capability grant instead.
+Reaction mode needs no `connection` -- it resolves its Slack access through
+the phase's own `slack.get_reactions` API capability grant instead.
 
 `source` is `<phase>.outputs.<name>`, a direct `needs` dependency's own
 declared output holding the `channel` and `ts` of the message to watch. The
@@ -531,6 +475,54 @@ reject path, only unblock-or-timeout.
 Credentials remain in the named environment variable on the host side of the
 capability broker. OutcomeCI removes every connection-declared credential from
 the agent environment.
+
+### Reply delivery
+
+A consultation hook can resolve itself the same way reaction delivery does --
+no `oci human request`/`poll`/`accept` and no local Slack CLI. Set
+`delivery.mode: reply` on a `type: slack` hook. The
+runtime polls the same message's thread for a new, non-bot reply and resolves
+the hook with that reply's actual text, the same way locally and in OutcomeCI
+Cloud:
+
+```yaml
+integrations:
+  - type: human
+    timing: before
+    id: plan_consultation
+    participant: {role: requester}
+    purpose: Discuss and refine the proposed plan before implementation.
+    interaction: consultation
+    delivery:
+      type: slack
+      mode: reply
+      source: plan.outputs.delivery
+      poll_interval_seconds: 20
+    on_timeout: continue
+    required: false
+    wait: {strategy: block, timeout_seconds: 1800}
+  - type: api
+    capability: slack.get_replies
+    required: false
+```
+
+Like reaction mode, reply mode needs no `connection` -- it resolves its Slack
+access through the phase's own `slack.get_replies` API capability grant, and
+`source` is `<phase>.outputs.<name>`, a direct `needs` dependency's own
+declared output holding the `channel` and `ts` of the message whose thread to
+watch (the agent sends that message itself, e.g. via a `slack.send_message`
+capability call, in an earlier phase this one `needs`). Like reaction, reply
+mode only supports `timing: before` -- the runtime resolves both modes
+synchronously before the gated phase starts, and that's currently the only
+call site that threads through what resolving them needs. Reply requires
+`interaction: consultation` rather than `approval` -- there is no emoji to
+match, so any new human reply resolves it.
+
+The resolved reply's text becomes that interaction's `response.message`,
+automatically part of every later phase's context -- no special file to read.
+`on_timeout: continue` (unlike reaction's `fail` default) is usually what you
+want here: a consultation with no reply shouldn't hard-fail the run, just let
+the deciding phase treat "no reply" as its own outcome.
 
 ## Sync a workflow to OutcomeCI Cloud
 

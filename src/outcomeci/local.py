@@ -390,8 +390,8 @@ def _finish_interaction(
     message: str,
 ) -> None:
     """Write an interaction as already-resolved, without ever passing through
-    the durable awaiting_input pause -- used by delivery types (currently
-    only 'reaction') that the runtime itself resolves synchronously."""
+    the durable awaiting_input pause -- used by delivery modes ('reaction',
+    'reply') that the runtime itself resolves synchronously."""
     request = {
         "schema_version": 1,
         "run_id": state["run_id"],
@@ -416,7 +416,9 @@ def _finish_interaction(
     )
 
 
-def _provider_value(root: Path, run_id: str, integration: str, value: str) -> str:
+def _provider_value(
+    root: Path, run_id: str, integration: str, value: str, *, mode: str = "reaction"
+) -> str:
     if not value.startswith("ref:"):
         return value
     journal = root / ".outcomeci" / ".broker" / run_id / "journal.json"
@@ -427,7 +429,7 @@ def _provider_value(root: Path, run_id: str, integration: str, value: str) -> st
     # The broker keeps one reference table per integration.
     resolved = state.get("references", {}).get(integration, {}).get(value)
     if not isinstance(resolved, str) or not resolved:
-        raise ExecutionError(f"reaction delivery source holds an unresolvable reference: {value}")
+        raise ExecutionError(f"{mode} delivery source holds an unresolvable reference: {value}")
     return resolved
 
 
@@ -514,6 +516,92 @@ def _resolve_reaction(
     raise ExecutionError(f"approval window expired for interaction {definition['id']}")
 
 
+def _resolve_reply(
+    root: Path,
+    config: Path,
+    state: dict[str, Any],
+    phase: str,
+    timing: str,
+    definition: dict[str, Any],
+    credential_resolver: CredentialResolver | None,
+) -> None:
+    """Poll Slack for a new reply on a prior phase's message, blocking the
+    current call for up to wait.timeout_seconds. Mirrors _resolve_reaction:
+    runtime-driven, not agent-driven -- IntegrationExecutor(reviewed=True)
+    bypasses the independent policy-review agent deliberately, since this is a
+    fixed, non-agent-controllable action (check this exact thread for a new
+    reply), not an arbitrary agent-initiated request. Unlike a reaction, a
+    reply's actual text is the point: it's carried in the finished
+    interaction's response.message for whichever phase declared this hook to
+    read back from its own context."""
+    if credential_resolver is None:
+        raise ExecutionError("reply delivery requires a credential resolver")
+    delivery = definition["delivery"]
+    compiled = compile_workflow(config)
+    producer, _, output_name = delivery["source"].partition(".outputs.")
+    try:
+        output = next(
+            item
+            for item in compiled["instructions"]["phases"][producer]["expects"]["outputs"]
+            if item["name"] == output_name
+        )
+    except (KeyError, StopIteration) as exc:
+        raise ExecutionError(
+            f"reply delivery source is unresolvable: {delivery['source']}"
+        ) from exc
+    source_file = root / ".outcomeci" / "outcomes" / state["run_id"] / output["path"]
+    try:
+        value = json.loads(source_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ExecutionError(f"reply delivery source could not be read: {output['path']}") from exc
+    channel, ts = value.get("channel"), value.get("ts")
+    if not isinstance(channel, str) or not isinstance(ts, str):
+        raise ExecutionError(f"reply delivery source is missing channel/ts: {output['path']}")
+    channel = _provider_value(root, state["run_id"], "slack", channel, mode="reply")
+    ts = _provider_value(root, state["run_id"], "slack", ts, mode="reply")
+    executor = IntegrationExecutor(compiled, resolver=credential_resolver, reviewed=True)
+    deadline = time.monotonic() + definition["wait"]["timeout_seconds"]
+    while True:
+        result = executor.execute(
+            "slack.get_replies", {"channel": channel, "timestamp": ts}, phase=phase
+        )
+        messages = (result.get("output") or {}).get("messages") or []
+        reply = next(
+            (
+                item
+                for item in messages[1:]
+                if isinstance(item, dict) and not item.get("bot_id") and item.get("text")
+            ),
+            None,
+        )
+        if reply is not None:
+            _finish_interaction(
+                root,
+                state,
+                phase,
+                timing,
+                definition,
+                status="responded",
+                message=str(reply["text"]),
+            )
+            return
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(delivery["poll_interval_seconds"])
+    if definition.get("on_timeout") == "continue":
+        _finish_interaction(
+            root,
+            state,
+            phase,
+            timing,
+            definition,
+            status="answered",
+            message="Consultation window expired with no reply",
+        )
+        return
+    raise ExecutionError(f"consultation window expired for interaction {definition['id']}")
+
+
 def _open_interaction(
     root: Path,
     state: dict[str, Any],
@@ -527,6 +615,9 @@ def _open_interaction(
     delivery = definition.get("delivery", {})
     if delivery.get("type") == "slack" and delivery.get("mode") == "reaction":
         _resolve_reaction(root, config, state, phase, timing, definition, credential_resolver)
+        return None
+    if delivery.get("type") == "slack" and delivery.get("mode") == "reply":
+        _resolve_reply(root, config, state, phase, timing, definition, credential_resolver)
         return None
     request = {
         "schema_version": 1,
@@ -566,7 +657,7 @@ def _first_required_interaction(
         for item in (state or {}).get("interaction_history", [])
         if item.get("phase") == phase
         and item.get("timing") == timing
-        and item.get("status") in {"approved", "answered"}
+        and item.get("status") in {"approved", "answered", "responded"}
     }
     return next(
         (

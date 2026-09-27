@@ -8,8 +8,6 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from outcomeci_connectors.slack import deliver as deliver_slack
-from outcomeci_connectors.slack import poll_replies
 
 from .custom import call as call_custom
 from .process import ExecutionError
@@ -25,7 +23,7 @@ def assign(
     targets: list[tuple[str, str]],
     strategy: str,
     timeout_seconds: int | None,
-    connection: str = "slack_local",
+    connection: str,
 ) -> dict[str, Any]:
     document = yaml.safe_load(config.read_text(encoding="utf-8"))
     try:
@@ -48,7 +46,7 @@ def assign(
         if isinstance(item, dict)
     }
     provider = connections.get(connection, {}).get("provider")
-    if provider not in {"slack", "custom"}:
+    if provider != "custom":
         raise ExecutionError(f"human delivery connection {connection} was not found")
     hook["delivery"] = {
         "type": provider,
@@ -94,8 +92,6 @@ def transport_responses(
     root: Path, config: Path, interaction: dict[str, Any]
 ) -> list[dict[str, str]]:
     delivery = interaction.get("delivery", {})
-    if delivery.get("type") == "slack":
-        return poll_replies(root, str(interaction["run_id"]), str(interaction["id"]))
     if delivery.get("type") == "custom":
         return _custom_responses(config, interaction)
     raise ExecutionError("human interaction has no pollable delivery")
@@ -171,10 +167,7 @@ def request(
         interaction["delivery"] = authoritative_hook["delivery"]
         interaction["wait"] = authoritative_hook.get("wait", {"strategy": "ask"})
     delivery = interaction.get("delivery", {})
-    if delivery.get("type") == "slack":
-        delivered = deliver_slack(root, interaction)
-        interaction["delivery_status"] = {"delivered": True, "threads": delivered["threads"]}
-    elif delivery.get("type") == "custom":
+    if delivery.get("type") == "custom":
         existing_correlation = interaction.get("delivery_status", {}).get("correlation_id")
         if isinstance(existing_correlation, str) and existing_correlation:
             delivered = {

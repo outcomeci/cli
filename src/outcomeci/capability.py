@@ -59,7 +59,7 @@ class Broker:
             hook["id"]: hook
             for timing in ("before", "during", "after")
             for hook in hooks[timing]
-            if hook.get("delivery", {}).get("type") in {"slack", "custom"}
+            if hook.get("delivery", {}).get("type") == "custom"
             and hook.get("delivery", {}).get("targets")
         }
         self.root, self.config, self.run_id, self.phase = root, config, run_id, phase
@@ -131,7 +131,7 @@ class Broker:
             interaction = json.loads(matches[0].read_text(encoding="utf-8"))
             replies = transport_responses(self.root, self.config, interaction)
             if not any(reply.get("message") == message for reply in replies):
-                raise ExecutionError("response was not verified in the configured Slack thread")
+                raise ExecutionError("response was not verified by the configured transport")
             return accept(
                 self.root,
                 self.config,
