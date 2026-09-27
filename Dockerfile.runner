@@ -1,15 +1,15 @@
 FROM python:3.12-slim AS cli-build
 
 ARG OUTCOMECI_CLI_VERSION=0.0.0
-# Package-specific, not the generic SETUPTOOLS_SCM_PRETEND_VERSION -- see
-# Dockerfile.proof-runner for why: it would also stamp outcomeci-connectors
-# (a git dependency, built from source alongside outcomeci-cli) with this
-# same pretend version, which pip's resolver then rejects as a conflict.
-ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_OUTCOMECI_CLI="${OUTCOMECI_CLI_VERSION}"
 WORKDIR /source
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN python -m pip wheel --no-cache-dir --no-deps --wheel-dir /wheels .
+# --no-deps means outcomeci-connectors (a git dependency) is never touched
+# in this step, so the generic SETUPTOOLS_SCM_PRETEND_VERSION is safe here
+# (unlike Dockerfile.proof-runner, which also builds dependencies in this
+# same step and needs to keep this var away from them).
+RUN SETUPTOOLS_SCM_PRETEND_VERSION="${OUTCOMECI_CLI_VERSION}" \
+    python -m pip wheel --no-cache-dir --no-deps --wheel-dir /wheels .
 
 FROM node:22-bookworm-slim
 

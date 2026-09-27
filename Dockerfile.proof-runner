@@ -1,22 +1,29 @@
 FROM python:3.12-slim AS cli-build
 
 ARG OUTCOMECI_CLI_VERSION=0.0.0
-# Package-specific, not the generic SETUPTOOLS_SCM_PRETEND_VERSION: this repo
-# now pulls in outcomeci-connectors as a git dependency, also built from
-# source in this same `pip wheel` step, and the generic var would stamp it
-# with outcomeci-cli's own pretend version too -- a real version mismatch
-# pip's resolver then rejects.
-ENV SETUPTOOLS_SCM_PRETEND_VERSION_FOR_OUTCOMECI_CLI="${OUTCOMECI_CLI_VERSION}"
 # outcomeci-connectors is a git dependency (see pyproject.toml); resolving it
-# during `pip wheel` needs git, unlike the pure-PyPI deps this stage used to
-# have.
+# needs git, unlike the pure-PyPI deps this stage used to have.
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends ca-certificates git \
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /source
 COPY pyproject.toml README.md ./
 COPY src ./src
-RUN python -m pip wheel --no-cache-dir --wheel-dir /wheels .
+# Two steps, not one `pip wheel .`: setuptools-scm can only honor a
+# pretend-version for a package it can already name (a real git checkout, or
+# one already resolved from a prior step) -- from this git-less COPY alone it
+# has no name to match SETUPTOOLS_SCM_PRETEND_VERSION_FOR_OUTCOMECI_CLI
+# against, so it needs the generic SETUPTOOLS_SCM_PRETEND_VERSION instead.
+# But that generic var isn't scoped to outcomeci-cli -- it would *also* stamp
+# outcomeci-connectors (built from a real git clone alongside it) with
+# outcomeci-cli's version instead of its own real one, which pip's resolver
+# then rejects as a mismatch. Building outcomeci-cli's own wheel alone first
+# (--no-deps, generic var scoped to just this RUN) keeps that var away from
+# connectors entirely; resolving dependencies afterwards, from the wheel
+# rather than from source, needs no pretend-version at all.
+RUN SETUPTOOLS_SCM_PRETEND_VERSION="${OUTCOMECI_CLI_VERSION}" \
+    python -m pip wheel --no-cache-dir --no-deps --wheel-dir /wheels .
+RUN python -m pip wheel --no-cache-dir --wheel-dir /wheels /wheels/outcomeci_cli-*.whl
 
 FROM python:3.12-slim
 
@@ -34,12 +41,12 @@ RUN apt-get update \
     && chown proof:proof /proof
 
 COPY --from=cli-build /wheels /wheels
-# --no-deps: stage 1's `pip wheel .` already computed and built the full
-# dependency closure into /wheels, including outcomeci-connectors (a git
-# dependency). Without --no-deps, pip re-resolves that requirement here and
-# refuses to accept the wheel already sitting in /wheels for it -- pip's
-# resolver won't treat a prebuilt local wheel as satisfying a VCS/direct-URL
-# dependency, even one with a matching name and version.
+# --no-deps: stage 1 already computed and built the full dependency closure
+# into /wheels, including outcomeci-connectors (a git dependency). Without
+# --no-deps, pip re-resolves that requirement here and refuses to accept the
+# wheel already sitting in /wheels for it -- pip's resolver won't treat a
+# prebuilt local wheel as satisfying a VCS/direct-URL dependency, even one
+# with a matching name and version.
 RUN python -m pip install --no-cache-dir --no-deps /wheels/* \
     && python -m pip check \
     && python -m pip uninstall --yes pip setuptools \
