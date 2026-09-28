@@ -122,7 +122,7 @@ def _workflow(tmp_path: Path, *, on_timeout: str = "fail") -> Path:
     (instructions / "plan.md").write_text("# Plan\n", encoding="utf-8")
     (instructions / "implement.md").write_text("# Implement\n", encoding="utf-8")
     value = {
-        "apiVersion": "outcomeci.dev/v1alpha1",
+        "apiVersion": "outcomeci.com/v1alpha1",
         "kind": "OutcomeWorkflow",
         "metadata": {"name": "reply-gate"},
         "spec": {

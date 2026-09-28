@@ -1,4 +1,4 @@
-"""The outcomeci.dev/v1 front end: secrets, apis, reasoning and ordered steps.
+"""The outcomeci.com/v1 front end: secrets, apis, reasoning and ordered steps.
 
 A v1 file lowers to the same validated phase graph every API version runs
 on (`config.validate_lowered`). Each phase also carries a `v1` block the
@@ -23,7 +23,7 @@ import yaml
 
 from .config import IDENTIFIER, RUNNERS, ConfigError, validate_lowered
 
-API_VERSION = "outcomeci.dev/v1"
+API_VERSION = "outcomeci.com/v1"
 ENTRY_POINT_GROUP = "outcomeci.connectors"
 CONNECTOR_CONTRACT = "outcomeci.connector/v1"
 INSTRUCTIONS_DIR = Path(".outcomeci/instructions")

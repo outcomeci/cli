@@ -163,7 +163,7 @@ def test_get_workflow_reads_the_latest_revision(monkeypatch) -> None:
             "workflow_id": "00000000-0000-0000-0000-000000000001",
             "name": "code-outcome",
             "revision": 3,
-            "content": "apiVersion: outcomeci.dev/v1alpha1\n",
+            "content": "apiVersion: outcomeci.com/v1alpha1\n",
             "content_sha256": "deadbeef",
             "content_type": "yaml",
             "source_filename": "outcome.yml",
@@ -237,7 +237,7 @@ def test_sync_sends_patch_lineage_for_new_version(tmp_path: Path, monkeypatch) -
     digest = hashlib.sha256(workflow.read_bytes()).hexdigest()
     patch = tmp_path / "patch.yml"
     patch.write_text(
-        "apiVersion: outcomeci.dev/v1alpha1\n"
+        "apiVersion: outcomeci.com/v1alpha1\n"
         "kind: OutcomeWorkflowPatch\n"
         "metadata:\n"
         "  parentRevision: compiled-parent\n"

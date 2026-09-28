@@ -18,7 +18,7 @@ def _workflow(tmp_path: Path) -> Path:
     schemas.mkdir()
     (schemas / "packet.json").write_text(json.dumps({"type": "object", "required": ["intent"]}))
     value = {
-        "apiVersion": "outcomeci.dev/v1alpha1",
+        "apiVersion": "outcomeci.com/v1alpha1",
         "kind": "OutcomeWorkflow",
         "metadata": {"name": "custom"},
         "spec": {
@@ -133,14 +133,14 @@ def test_compiler_registry_preserves_v1alpha1_contract(tmp_path: Path) -> None:
 
     compiled = compile_workflow(path)
 
-    assert compiled["api_version"] == "outcomeci.dev/v1alpha1"
+    assert compiled["api_version"] == "outcomeci.com/v1alpha1"
     assert compiled["engine_version"] == "2"
 
 
 def test_compiler_registry_rejects_unknown_api_version(tmp_path: Path) -> None:
     path = _workflow(tmp_path)
     value = yaml.safe_load(path.read_text())
-    value["apiVersion"] = "outcomeci.dev/v9"
+    value["apiVersion"] = "outcomeci.com/v9"
     path.write_text(yaml.safe_dump(value, sort_keys=False))
 
     with pytest.raises(ConfigError, match="unsupported apiVersion.*v9"):

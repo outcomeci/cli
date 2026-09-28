@@ -125,7 +125,7 @@ def load_definition(path: Path) -> dict[str, Any]:
         raise ExecutionError(f"simulation definition could not be read: {exc}") from exc
     if not isinstance(value, dict):
         raise ExecutionError("simulation definition must be an object")
-    if value.get("apiVersion") != "outcomeci.dev/v1alpha1" or value.get("kind") != "OutcomeProof":
+    if value.get("apiVersion") != "outcomeci.com/v1alpha1" or value.get("kind") != "OutcomeProof":
         raise ExecutionError("unsupported proof definition")
     metadata, spec = value.get("metadata"), value.get("spec")
     if not isinstance(metadata, dict) or not isinstance(spec, dict):

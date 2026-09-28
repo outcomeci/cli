@@ -899,7 +899,7 @@ def _step_prompt(
     result_path: Path | None = None,
     grants: list[dict[str, Any]] | None = None,
 ) -> str:
-    """The prompt for one outcomeci.dev/v1 step: its inputs, grants and result shape.
+    """The prompt for one outcomeci.com/v1 step: its inputs, grants and result shape.
 
     A for_each step gets one prompt per item, with the item bound to its name
     and its own result path."""
@@ -1263,7 +1263,7 @@ def _settle(
 
 
 def _is_v1(compiled: dict[str, Any]) -> bool:
-    return compiled.get("api_version") == "outcomeci.dev/v1"
+    return compiled.get("api_version") == "outcomeci.com/v1"
 
 
 def _before_gate(

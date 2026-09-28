@@ -1,4 +1,4 @@
-"""Runtime semantics for outcomeci.dev/v1 steps.
+"""Runtime semantics for outcomeci.com/v1 steps.
 
 References resolve against a run's own records: the trigger payload, each
 step's result file, and the broker journal of calls each step made. A step
