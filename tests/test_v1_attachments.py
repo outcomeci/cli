@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import httpx
@@ -59,10 +60,16 @@ def _grant(channel="C1"):
     return [{"name": "channel", "paths": SHARED_IN, "granted": channel}]
 
 
+def _alternatives(channel="C1"):
+    return [_grant(channel)]
+
+
 def test_a_file_shared_in_the_granted_channel_is_saved_for_the_agent(tmp_path, monkeypatch):
     executor, sent = _executor(tmp_path, monkeypatch, _info())
 
-    result = executor.execute("slack.file", {"file": "F1"}, phase="draft", response_grants=_grant())
+    result = executor.execute(
+        "slack.file", {"file": "F1"}, phase="draft", response_grants=_alternatives()
+    )
 
     file = result["output"]["file"]
     assert Path(file["path"]).read_bytes() == IMAGE
@@ -79,7 +86,9 @@ def test_a_file_not_shared_in_the_granted_channel_is_never_downloaded(tmp_path, 
     executor, sent = _executor(tmp_path, monkeypatch, _info(channels=("C2",)))
 
     with pytest.raises(IntegrationError, match="channel must be C1"):
-        executor.execute("slack.file", {"file": "F1"}, phase="draft", response_grants=_grant())
+        executor.execute(
+            "slack.file", {"file": "F1"}, phase="draft", response_grants=_alternatives()
+        )
 
     assert [request.url.path for request in sent] == ["/api/files.info"]
     assert not (tmp_path / "attachments").exists()
@@ -90,7 +99,9 @@ def test_a_download_from_another_host_is_refused(tmp_path, monkeypatch):
     executor, sent = _executor(tmp_path, monkeypatch, info)
 
     with pytest.raises(IntegrationError, match="only from files.slack.com"):
-        executor.execute("slack.file", {"file": "F1"}, phase="draft", response_grants=_grant())
+        executor.execute(
+            "slack.file", {"file": "F1"}, phase="draft", response_grants=_alternatives()
+        )
 
     assert len(sent) == 1
 
@@ -107,7 +118,9 @@ def test_a_download_that_cannot_complete_fails(tmp_path, monkeypatch, response, 
     executor, _ = _executor(tmp_path, monkeypatch, _info(), file_response=response)
 
     with pytest.raises(IntegrationError, match=message):
-        executor.execute("slack.file", {"file": "F1"}, phase="draft", response_grants=_grant())
+        executor.execute(
+            "slack.file", {"file": "F1"}, phase="draft", response_grants=_alternatives()
+        )
 
     assert not list((tmp_path / "attachments").glob("*"))
 
@@ -121,10 +134,10 @@ def test_a_response_grant_becomes_a_check_for_the_executor(tmp_path):
         grants=[{"capability": "slack.file", "args": {"channel": "C1"}, "as": None}],
     )
 
-    request, _, checks = policy._apply_grants("slack.file", {"file": "F1"})
+    request, _, alternatives = policy._apply_grants("slack.file", {"file": "F1"})
 
     assert request == {"file": "F1"}
-    assert checks == _grant()
+    assert alternatives == [(None, _grant())]
 
 
 def test_the_slack_example_lets_its_draft_step_open_the_requests_files():
@@ -167,3 +180,67 @@ def test_a_v1alpha1_integration_cannot_download():
 
     with pytest.raises(ConfigError, match="response.download"):
         _reject_lowered_only(spec)
+
+
+def _broker(tmp_path, monkeypatch, info, grants, *, step_policy=None):
+    executor, sent = _executor(tmp_path, monkeypatch, info)
+    policy = PolicyExecutor(
+        executor,
+        tmp_path / "broker",
+        {},
+        reviewer=lambda proposal: {
+            "decision": "allow",
+            "proposal_sha256": proposal["proposal_sha256"],
+            "reason": "ok",
+        },
+        grants=grants,
+        step_policy=step_policy,
+    )
+    return policy, sent
+
+
+@pytest.mark.parametrize(
+    "step_policy",
+    [None, {"content": "Read only what the request attached.", "policy": {}}],
+    ids=["direct", "reviewed"],
+)
+def test_the_broker_refuses_a_file_outside_the_granted_channel(tmp_path, monkeypatch, step_policy):
+    grants = [{"capability": "slack.file", "args": {"channel": "C1"}, "as": None}]
+    policy, sent = _broker(
+        tmp_path, monkeypatch, _info(channels=("C2",)), grants, step_policy=step_policy
+    )
+
+    with pytest.raises(IntegrationError, match="channel must be C1"):
+        policy.execute("slack.file", {"file": "F1"}, phase="draft")
+
+    assert [request.url.path for request in sent] == ["/api/files.info"]
+
+
+def test_any_grant_that_holds_opens_the_file_and_is_recorded(tmp_path, monkeypatch):
+    grants = [
+        {"capability": "slack.file", "args": {"channel": "C1"}, "as": "here"},
+        {"capability": "slack.file", "args": {"channel": "C2"}, "as": "there"},
+    ]
+    policy, _ = _broker(
+        tmp_path,
+        monkeypatch,
+        _info(channels=("C2",)),
+        grants,
+        step_policy={"content": "Read attachments.", "policy": {}},
+    )
+
+    result = policy.execute("slack.file", {"file": "F1"}, phase="draft")
+
+    assert Path(result["output"]["file"]["path"]).read_bytes() == IMAGE
+    journal = json.loads((tmp_path / "broker" / "journal.json").read_text())
+    (call,) = journal["calls"].values()
+    assert call["as"] == "there"
+
+
+def test_downloads_are_kept_out_of_the_workspaces_history(tmp_path, monkeypatch):
+    executor, _ = _executor(tmp_path, monkeypatch, _info())
+
+    executor.execute("slack.file", {"file": "F1"}, phase="draft", response_grants=_alternatives())
+
+    assert (tmp_path / ".gitignore").read_text() == "*\n"
+    assert not list((tmp_path / "attachments").glob(".download-*"))

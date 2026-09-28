@@ -11,6 +11,7 @@ import os
 import re
 import socket
 import sys
+import tempfile
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -297,7 +298,7 @@ def _found(body: Any, source: str) -> Any:
 
 
 def _response_grant_problems(body: Any, checks: list[dict[str, Any]]) -> list[str]:
-    """Each check needs its granted value in one of the lists at its paths."""
+    """Each check of one grant needs its granted value in a list at its paths."""
     problems = []
     for check in checks:
         values = []
@@ -434,8 +435,17 @@ class IntegrationExecutor:
         name = _found(body, spec["name"])
         digest = hashlib.sha256(url.encode()).hexdigest()[:12]
         target = self.downloads / f"{digest}-{_safe_name(name)}"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(bytes(received))
+        self.downloads.mkdir(parents=True, exist_ok=True)
+        # What people attached never belongs in the workspace's history.
+        ignore = self.downloads.parent / ".gitignore"
+        if not ignore.exists():
+            ignore.write_text("*\n", encoding="utf-8")
+        # Written beside the target and renamed over it, so a link planted at
+        # the target is replaced, never followed.
+        descriptor, temporary = tempfile.mkstemp(dir=self.downloads, prefix=".download-")
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(received)
+        Path(temporary).replace(target)
         return {
             "path": str(target),
             "name": str(name or target.name),
@@ -585,11 +595,13 @@ class IntegrationExecutor:
         inputs: Mapping[str, Any],
         *,
         phase: str,
-        response_grants: list[dict[str, Any]] | None = None,
+        response_grants: list[list[dict[str, Any]]] | None = None,
     ) -> dict[str, Any]:
-        """Send one authorized request. `response_grants` are grants a request
-        cannot name, checked against the response before any of it is used:
-        each `{name, paths, granted}` needs `granted` in a list at `paths`."""
+        """Send one authorized request. `response_grants` are the grants a
+        request cannot name, checked against the response before any of it is
+        used: alternatives, one list of `{name, paths, granted}` checks per
+        grant, of which one must hold entirely (`granted` in a list at one of
+        `paths`). The result's audit names the alternative that held."""
         if capability not in self.capabilities(phase):
             raise IntegrationError(
                 "integration.capability_denied",
@@ -757,13 +769,21 @@ class IntegrationExecutor:
                     body = {"text": response.text}
                 body = _redact(body, [item for item in sensitive if isinstance(item, str)])
                 _rejected(body)
-                problems = _response_grant_problems(body, response_grants or [])
-                if problems:
-                    raise IntegrationError(
-                        "integration.grant_denied",
-                        f"{capability} is outside this step's grants: " + "; ".join(problems),
-                        category="policy",
-                    )
+                granted_by = None
+                if response_grants:
+                    problems: list[str] = []
+                    for index, checks in enumerate(response_grants):
+                        found = _response_grant_problems(body, checks)
+                        if not found:
+                            granted_by = index
+                            break
+                        problems.extend(found)
+                    if granted_by is None:
+                        raise IntegrationError(
+                            "integration.grant_denied",
+                            f"{capability} is outside this step's grants: " + "; ".join(problems),
+                            category="policy",
+                        )
                 download = operation["response"].get("download")
                 file = (
                     self._download(client, download, body, headers, capability)
@@ -805,6 +825,7 @@ class IntegrationExecutor:
                 "workflow_revision": self.compiled["workflow_revision"],
                 "phase": phase,
                 "policy": operation["policy"],
+                **({"grant": granted_by} if granted_by is not None else {}),
             },
         }
 

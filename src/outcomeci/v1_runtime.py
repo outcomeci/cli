@@ -613,9 +613,9 @@ def _attachment(
         return {"name": name, "error": "the file cannot be scoped to this conversation"}
     try:
         result = executor.execute(
-            capability, {"file": item.get("id")}, phase=phase, response_grants=[grant]
+            capability, {"file": item.get("id")}, phase=phase, response_grants=[[grant]]
         )
-    except ExecutionError as exc:
+    except (ExecutionError, OSError) as exc:
         return {"name": name, "error": str(exc)[:200]}
     file = (result.get("output") or {}).get("file") or {}
     return {
