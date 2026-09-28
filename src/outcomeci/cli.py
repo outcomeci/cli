@@ -213,6 +213,11 @@ def parser() -> argparse.ArgumentParser:
         "(held exclusively for the run, as a cloud run holds it)",
     )
     workflow_debug.add_argument(
+        "--retry",
+        metavar="RUN_ID",
+        help="Resume a run in --dir that stopped on an error, from its recorded state",
+    )
+    workflow_debug.add_argument(
         "--network",
         help="Docker network for the --image container, such as host when the default "
         "bridge network cannot resolve DNS",
@@ -620,6 +625,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     auto_continue=args.auto_continue,
                     image=args.image,
                     network=args.network,
+                    retry_run=args.retry,
                 )
                 _print_json(result)
                 return 0

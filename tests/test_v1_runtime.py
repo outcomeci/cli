@@ -389,3 +389,85 @@ def test_a_step_policy_review_inside_the_container_uses_no_nested_sandbox(tmp_pa
 
     assert seen["container_isolated"] is True
     assert seen["read_only"] is True
+
+
+def test_a_review_sees_earlier_requests_but_not_their_response_bodies(workflow, monkeypatch):
+    services = sentry.Services()
+    sentry._serve(monkeypatch, services)
+    reviews: list = []
+
+    sentry._run(workflow, sentry.Agent(), monkeypatch, reviews)
+
+    receipts = reviews[0]["receipts"]
+    assert receipts and all(
+        set(item) == {"capability", "phase", "status", "request"} for item in receipts
+    )
+
+
+def _broker(tmp_path, monkeypatch, reviewer, responses):
+    compiled = compile_workflow(sentry.EXAMPLES / sentry.WORKFLOW)
+    monkeypatch.setattr(sentry.integrations, "_safe_destination", lambda url, allow: None)
+    executor = IntegrationExecutor(
+        compiled,
+        resolver=lambda ref: "ghp-test-credential",
+        transport=httpx.MockTransport(lambda request: next(responses)),
+        reviewed=True,
+    )
+    grants = [{"capability": "github.write", "args": {"repo": "outcomeci/cli"}, "as": None}]
+    return PolicyExecutor(
+        executor,
+        tmp_path,
+        {},
+        reviewer=reviewer,
+        grants=grants,
+        step_policy={"content": "p", "policy": {"runner": "codex"}},
+    )
+
+
+BRANCH = {
+    "method": "POST",
+    "path": "/repos/outcomeci/cli/git/refs",
+    "body": {"ref": "refs/heads/x"},
+}
+
+
+def test_a_call_whose_review_failed_was_never_sent_and_can_run_again(tmp_path, monkeypatch):
+    attempts = iter([RuntimeError("advisor crashed"), None])
+
+    def reviewer(proposal):
+        failure = next(attempts)
+        if failure:
+            raise failure
+        return {"decision": "allow", "proposal_sha256": proposal["proposal_sha256"], "reason": "ok"}
+
+    broker = _broker(
+        tmp_path, monkeypatch, reviewer, iter([httpx.Response(201, json={"ref": "x"})])
+    )
+    with pytest.raises(RuntimeError):
+        broker.execute("github.write", BRANCH, phase="fix")
+    journal = json.loads((tmp_path / "journal.json").read_text())
+    assert [call["status"] for call in journal["calls"].values()] == ["unsent"]
+
+    assert broker.execute("github.write", BRANCH, phase="fix")["ok"] is True
+
+
+def test_a_write_whose_delivery_is_uncertain_is_never_sent_twice(tmp_path, monkeypatch):
+    allow = lambda proposal: {  # noqa: E731
+        "decision": "allow",
+        "proposal_sha256": proposal["proposal_sha256"],
+        "reason": "ok",
+    }
+    broker = _broker(tmp_path, monkeypatch, allow, iter([httpx.Response(502, json={})]))
+    with pytest.raises(IntegrationError):
+        broker.execute("github.write", BRANCH, phase="fix")
+    with pytest.raises(IntegrationError, match="delivery is uncertain"):
+        broker.execute("github.write", BRANCH, phase="fix")
+
+
+def test_a_failed_read_can_run_again(tmp_path, monkeypatch):
+    responses = iter([httpx.Response(404, json={}), httpx.Response(200, json={"ok": True})])
+    broker = _broker(tmp_path, monkeypatch, None, responses)
+    read = {"method": "GET", "path": "/repos/outcomeci/cli/contents/missing.py"}
+    with pytest.raises(IntegrationError):
+        broker.execute("github.write", read, phase="fix")
+    assert broker.execute("github.write", read, phase="fix")["ok"] is True

@@ -319,6 +319,15 @@ class PolicyExecutor:
                 }
             )
             previous = state["calls"].get(fingerprint)
+            # A call that was never sent, or a read, has no effect to repeat:
+            # it runs again. Anything else that did not confirm may already
+            # have happened, so it is never sent twice.
+            if (
+                previous
+                and previous["status"] != "confirmed"
+                and (previous["status"] == "unsent" or self._reads_only(capability, request))
+            ):
+                previous = None
             if previous:
                 if previous["status"] == "confirmed":
                     return {**previous["result"], "replayed": True}
@@ -403,7 +412,13 @@ class PolicyExecutor:
                             "request": request,
                             "policy": policy,
                             "context": self.context,
-                            "receipts": list(state["calls"].values()),
+                            "receipts": [
+                                {
+                                    key: call.get(key)
+                                    for key in ("capability", "phase", "status", "request")
+                                }
+                                for call in state["calls"].values()
+                            ],
                         }
                     )
                     valid = (
@@ -488,10 +503,13 @@ class PolicyExecutor:
                             capability,
                             "Permission advisor failed; no request authorized",
                             decision="error",
-                            reason="Advisor execution failed",
+                            reason=safe_text(f"Advisor execution failed: {exc}")[:500],
                             proposal_sha256=fingerprint,
                             level="error",
                         )
+                        call["status"] = "unsent"
+                        self._save(state)
+                        raise
                     else:
                         self._event(
                             state,

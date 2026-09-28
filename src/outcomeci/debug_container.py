@@ -28,11 +28,12 @@ from .debug import (
     OUTPUT_WORK,
     _lease_resolver,
     execute,
+    resume,
 )
 from .process import ExecutionError
 from .security import atomic_write_json
 
-BUNDLE_KEYS = ("config", "trigger", "payload", "values", "expires_at", "provider", "credential")
+BUNDLE_KEYS = ("config", "trigger", "payload", "values", "expires_at", "credentials")
 
 
 def run_bundle(bundle: dict[str, Any], *, source: Path, output: Path) -> int:
@@ -43,7 +44,10 @@ def run_bundle(bundle: dict[str, Any], *, source: Path, output: Path) -> int:
     shutil.copytree(source, work, symlinks=True, ignore=shutil.ignore_patterns(".git"))
     home.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
-        os.environ.update(_inject_agent_credential(home, bundle["provider"], bundle["credential"]))
+        for login in bundle["credentials"]:
+            os.environ.update(
+                _inject_agent_credential(home, login["provider"], login["credential"])
+            )
         config = work / bundle["config"]
         options = local.ExecutionOptions(
             agent=bundle.get("agent"),
@@ -52,14 +56,20 @@ def run_bundle(bundle: dict[str, Any], *, source: Path, output: Path) -> int:
             execution_backend="outcomeci",
             _container_isolated=True,
         )
-        result = execute(
-            work,
-            config,
-            compile_workflow(config),
-            bundle["trigger"],
-            bundle["payload"],
-            options,
-            auto_continue=bool(bundle.get("auto_continue")),
+        compiled = compile_workflow(config)
+        auto_continue = bool(bundle.get("auto_continue"))
+        result = (
+            resume(work, config, compiled, bundle["retry"], options, auto_continue=auto_continue)
+            if bundle.get("retry")
+            else execute(
+                work,
+                config,
+                compiled,
+                bundle["trigger"],
+                bundle["payload"],
+                options,
+                auto_continue=auto_continue,
+            )
         )
     except (ConfigError, ContractError, ExecutionError) as exc:
         print(f"oci: {exc}", file=sys.stderr)

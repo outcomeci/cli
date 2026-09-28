@@ -196,8 +196,9 @@ def invoke(
             argv = ["claude", "--print", "--tools", "", "--permission-mode", "default"]
         if model:
             argv += ["--model", model]
-        argv += [prompt]
-        input_text = None
+        # On stdin, not argv: a single argument is capped at 128 KiB, and a
+        # prompt carrying a step's context or a review's receipts exceeds it.
+        input_text = prompt
     else:  # opencode, already validated above
         argv = ["opencode", "run", "--pure", "--auto", "--format", "json", "--model", model, prompt]
         input_text = None
@@ -357,8 +358,9 @@ def invoke_conversation(
             argv += ["--resume", session_id, "--fork-session"]
         if model:
             argv += ["--model", model]
-        argv += [prompt]
-        input_text = None
+        # On stdin, not argv: a single argument is capped at 128 KiB, and a
+        # prompt carrying a step's context or a review's receipts exceeds it.
+        input_text = prompt
     else:  # opencode, already validated above
         argv = ["opencode", "run", "--pure", "--format", "json", "--model", model, prompt]
         input_text = None
