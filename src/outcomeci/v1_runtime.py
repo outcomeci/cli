@@ -92,6 +92,36 @@ def _call_output(root: Path, run_id: str, step: str, parts: list[str]) -> Any:
     return _lookup((last.get("result") or {}).get("output") or {}, rest)
 
 
+def missing_call(root: Path, run_id: str, ref: str) -> str:
+    """Why `<step>.calls.<call>` has no output: the call failed, with the
+    reason the journal recorded, or the step never made it."""
+    step, _, rest = ref.partition(".calls.")
+    journal = _journal(root, run_id)
+    calls = [
+        call
+        for call in (journal.get("calls") or {}).values()
+        if isinstance(call, dict)
+        and call.get("phase") == step
+        and (call.get("as") == rest or call.get("capability") == rest)
+    ]
+    if not calls:
+        return f"step {step} never called {rest}"
+    last = max(calls, key=lambda call: call.get("sequence", 0))
+    reasons = [
+        item.get("detail") or item.get("reason")
+        for item in journal.get("events") or []
+        if isinstance(item, dict)
+        and item.get("proposal_sha256") == last.get("proposal_sha256")
+        and (item.get("detail") or item.get("reason"))
+    ]
+    status = last.get("status")
+    if status == "confirmed" and not reasons:
+        reasons = ["the provider reported a failure"]
+    return f"step {step}'s {rest} {'failed' if status != 'denied' else 'was denied'}" + (
+        f": {reasons[-1]}" if reasons else f" ({status})"
+    )
+
+
 def value(
     root: Path, state: dict[str, Any], ref: str, *, bound: dict[str, Any] | None = None
 ) -> Any:
@@ -326,7 +356,10 @@ def run_await(
     spec = block(compiled, phase)["await"]
     message = value(root, state, spec["message"])
     if not isinstance(message, dict) or not message.get("channel") or not message.get("ts"):
-        raise ExecutionError(f"await step {phase}: {spec['message']} recorded no message")
+        raise ExecutionError(
+            f"await step {phase} has no message to watch: "
+            + missing_call(root, state["run_id"], spec["message"])
+        )
     by = _person(root, state, spec.get("by"), phase)
     uses = compiled["connectors"][spec["api"]]["provider"]
     watcher = provider(uses).watchers[spec["watcher"]]
@@ -503,7 +536,10 @@ def run_converse(
     spec = phase_block["converse"]
     message = value(root, state, spec["message"])
     if not isinstance(message, dict) or not message.get("channel") or not message.get("ts"):
-        raise ExecutionError(f"converse step {phase}: {spec['message']} recorded no message")
+        raise ExecutionError(
+            f"converse step {phase} has no message to watch: "
+            + missing_call(root, state["run_id"], spec["message"])
+        )
     plan = value(root, state, spec["subject"])
     if plan is MISSING:
         raise ExecutionError(f"converse step {phase}: {spec['subject']} is unavailable")

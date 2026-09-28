@@ -472,3 +472,50 @@ def test_a_failed_read_can_run_again(tmp_path, monkeypatch):
     with pytest.raises(IntegrationError):
         broker.execute("github.write", read, phase="fix")
     assert broker.execute("github.write", read, phase="fix")["ok"] is True
+
+
+def _journal_with(tmp_path: Path, calls: dict, events: list) -> Path:
+    journal = tmp_path / ".outcomeci" / ".broker" / "run-1" / "journal.json"
+    journal.parent.mkdir(parents=True)
+    journal.write_text(json.dumps({"calls": calls, "events": events}), encoding="utf-8")
+    return tmp_path
+
+
+@pytest.mark.parametrize(
+    ("status", "events", "expected"),
+    [
+        (
+            "uncertain",
+            [{"proposal_sha256": "p1", "detail": "provider rejected the request (not_in_channel)"}],
+            "step triage's slack.post failed: provider rejected the request (not_in_channel)",
+        ),
+        (
+            "denied",
+            [{"proposal_sha256": "p1", "reason": "channel must be sentry"}],
+            "step triage's slack.post was denied: channel must be sentry",
+        ),
+    ],
+)
+def test_a_waiting_step_says_why_its_message_is_missing(tmp_path, status, events, expected):
+    from outcomeci.v1_runtime import missing_call
+
+    call = {
+        "phase": "triage",
+        "capability": "slack.post",
+        "sequence": 1,
+        "status": status,
+        "proposal_sha256": "p1",
+    }
+    root = _journal_with(tmp_path, {"p1": call}, events)
+
+    assert missing_call(root, "run-1", "triage.calls.slack.post") == expected
+
+
+def test_a_waiting_step_says_when_its_message_was_never_posted(tmp_path):
+    from outcomeci.v1_runtime import missing_call
+
+    root = _journal_with(tmp_path, {}, [])
+
+    assert missing_call(root, "run-1", "triage.calls.slack.post") == (
+        "step triage never called slack.post"
+    )
