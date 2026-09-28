@@ -237,7 +237,7 @@ def test_sync_sends_patch_lineage_for_new_version(tmp_path: Path, monkeypatch) -
     digest = hashlib.sha256(workflow.read_bytes()).hexdigest()
     patch = tmp_path / "patch.yml"
     patch.write_text(
-        "apiVersion: outcomeci.com/v1alpha1\n"
+        "apiVersion: outcomeci.workflow/v1alpha1\n"
         "kind: OutcomeWorkflowPatch\n"
         "metadata:\n"
         "  parentRevision: compiled-parent\n"

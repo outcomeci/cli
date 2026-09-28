@@ -776,7 +776,7 @@ def propose_patch(
 ) -> dict[str, Any]:
     compiled = compile_workflow(config)
     return {
-        "apiVersion": "outcomeci.com/v1alpha1",
+        "apiVersion": "outcomeci.workflow/v1alpha1",
         "kind": "OutcomeWorkflowPatch",
         "metadata": {
             "workflow": compiled["workflow"]["metadata"]["name"],
@@ -894,7 +894,7 @@ def import_openapi(
     if wanted:
         raise ConfigError(f"OpenAPI operations were not found: {', '.join(sorted(wanted))}")
     return {
-        "apiVersion": "outcomeci.com/v1alpha1",
+        "apiVersion": "outcomeci.workflow/v1alpha1",
         "kind": "OutcomeWorkflowPatch",
         "metadata": {
             "workflow": compiled["workflow"]["metadata"]["name"],

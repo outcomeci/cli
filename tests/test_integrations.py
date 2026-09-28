@@ -238,7 +238,7 @@ def test_versioned_local_integration_package_is_merged_and_pinned(tmp_path: Path
     path = workflow(tmp_path)
     value = yaml.safe_load(path.read_text())
     package_definition = {
-        "apiVersion": "outcomeci.com/v1alpha1",
+        "apiVersion": "outcomeci.workflow/v1alpha1",
         "kind": "OutcomeIntegrationPackage",
         "metadata": {"name": "tickets", "version": "1.2.0"},
         "spec": {

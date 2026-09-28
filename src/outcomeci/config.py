@@ -828,7 +828,7 @@ def _load_integration_packages(path: Path, spec: dict[str, Any]) -> None:
             package = _mapping(yaml.safe_load(content), field)
         except (OSError, yaml.YAMLError) as exc:
             raise ConfigError(f"could not read integration package {package_path}: {exc}") from exc
-        if package.get("apiVersion") != "outcomeci.com/v1alpha1" or package.get("kind") != (
+        if package.get("apiVersion") != "outcomeci.workflow/v1alpha1" or package.get("kind") != (
             "OutcomeIntegrationPackage"
         ):
             raise ConfigError(f"{field} must contain an OutcomeIntegrationPackage")
