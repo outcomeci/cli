@@ -409,7 +409,7 @@ def test_image_run_pipes_every_secret_on_stdin_and_writes_back_a_rotation(monkey
     assert "HOME=/debug-out/home" in command
     assert "--init" in command
     bundle = container.seen["bundle"]
-    assert bundle["credential"] == CODEX_LOGIN
+    assert bundle["credentials"] == [{"provider": "codex", "credential": CODEX_LOGIN}]
     assert bundle["values"]["slack/bot-token"]["secrets"]["value"] == "xoxb-secret"
     assert bundle["config"] == "outcome.yml"
     debug.complete_debug_agent_lease.assert_called_once_with(
@@ -650,3 +650,116 @@ def test_termination_signals_interrupt_an_image_run_and_are_restored():
     with pytest.raises(KeyboardInterrupt), debug._termination_interrupts():
         signal.raise_signal(signal.SIGTERM)
     assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_image_run_joins_the_requested_docker_network(monkeypatch, image_env):
+    root, _ = image_env
+    container = _container(monkeypatch, result={"run_id": "run-1"})
+
+    _image_run(root, network="host")
+
+    command = container.seen["command"]
+    assert command[command.index("--network") + 1] == "host"
+    assert command.index("--network") < command.index("outcomeci-runner:dev")
+
+
+def test_network_needs_an_image(monkeypatch, tmp_path):
+    monkeypatch.setattr(debug, "compile_workflow", lambda config: COMPILED)
+    with pytest.raises(ExecutionError, match="only to --image"):
+        debug.run(tmp_path, tmp_path / "outcome.yml", "w", "wf", trigger_name="go", network="host")
+
+
+STEP_RUNNERS = {
+    **IMAGE_COMPILED,
+    "instructions": {
+        "phases": {
+            "draft": {"policy": {"runner": "codex"}},
+            "implement": {"policy": {"runner": "claude"}},
+        }
+    },
+}
+
+
+def _claude_lease():
+    return _lease(
+        agent={
+            "provider": "claude",
+            "credential": "claude-oauth-token",
+            "credential_version": 1,
+            "job_id": "job-2",
+            "token": "claude-token",
+        }
+    )
+
+
+def test_every_runner_a_step_selects_gets_its_own_lease(monkeypatch, image_env):
+    root, _ = image_env
+    monkeypatch.setattr(debug, "compile_workflow", lambda config: STEP_RUNNERS)
+    debug.issue_debug_lease.side_effect = [_agent_lease(), _claude_lease()]
+    container = _container(monkeypatch, result={"run_id": "run-1"})
+
+    _image_run(root)
+
+    providers = [call.kwargs["agent_provider"] for call in debug.issue_debug_lease.call_args_list]
+    assert providers == ["codex", "claude"]
+    assert [item["provider"] for item in container.seen["bundle"]["credentials"]] == [
+        "codex",
+        "claude",
+    ]
+    released = [call.args[2] for call in debug.complete_debug_agent_lease.call_args_list]
+    assert released == ["job-1", "job-2"]
+
+
+def test_a_refused_second_lease_releases_the_first(monkeypatch, image_env):
+    root, _ = image_env
+    monkeypatch.setattr(debug, "compile_workflow", lambda config: STEP_RUNNERS)
+    debug.issue_debug_lease.side_effect = [_agent_lease(), CloudRequestError("busy", 409)]
+
+    with pytest.raises(CloudRequestError, match="busy"):
+        _image_run(root)
+
+    assert [call.args[2] for call in debug.complete_debug_agent_lease.call_args_list] == ["job-1"]
+
+
+def test_retry_resumes_a_failed_run_in_the_image(monkeypatch, image_env):
+    root, _ = image_env
+    record = root / ".outcomeci" / "outcomes" / "run-1" / "run.json"
+    record.parent.mkdir(parents=True)
+    record.write_text(json.dumps({"run_id": "run-1", "status": "error"}))
+    container = _container(monkeypatch, result={"run_id": "run-1", "status": "completed"})
+
+    _image_run(root, trigger_name=None, retry_run="run-1")
+
+    assert container.seen["bundle"]["retry"] == "run-1"
+    assert container.seen["bundle"]["trigger"] is None
+
+
+def test_retry_refuses_a_run_that_did_not_fail(monkeypatch, image_env):
+    root, _ = image_env
+    record = root / ".outcomeci" / "outcomes" / "run-1" / "run.json"
+    record.parent.mkdir(parents=True)
+    record.write_text(json.dumps({"run_id": "run-1", "status": "completed"}))
+
+    with pytest.raises(ExecutionError, match="only a failed or interrupted run retries"):
+        _image_run(root, trigger_name=None, retry_run="run-1")
+    debug.issue_debug_lease.assert_not_called()
+
+
+def test_resume_records_an_interrupted_run_before_retrying(monkeypatch, tmp_path):
+    from outcomeci import local
+
+    local._write(tmp_path, {"run_id": "run-1", "status": "running", "phase": "implement"})
+    retried = mock.Mock(return_value={"run_id": "run-1", "status": "completed"})
+    monkeypatch.setattr(local, "retry", retried)
+
+    debug.resume(
+        tmp_path,
+        tmp_path / "w.yaml",
+        {"instructions": {"phases": {}}},
+        "run-1",
+        None,
+        auto_continue=False,
+    )
+
+    assert local._read(tmp_path, "run-1")["error"] == "the debug run was interrupted"
+    retried.assert_called_once()

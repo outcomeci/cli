@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://outcomeci.dev/schemas/triggers/webhook-received/v1",
+  "$id": "https://outcomeci.com/schemas/triggers/webhook-received/v1",
   "title": "Webhook received v1",
   "description": "Immutable HTTP request bytes and a filtered header projection for local workflow delivery. Credentials and routing tokens are not included.",
   "type": "object",

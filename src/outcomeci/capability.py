@@ -52,6 +52,8 @@ class Broker:
         resolver: CredentialResolver | None = None,
         event_sink=None,
         policy_reviewer=None,
+        grants=None,
+        container_isolated=False,
     ):
         compiled = compiled if compiled is not None else compile_workflow(config)
         hooks = compiled["instructions"]["phases"][phase]["humans"]
@@ -66,6 +68,21 @@ class Broker:
         run_directory = root / ".outcomeci" / "outcomes" / run_id
         state_path = run_directory / "run.json"
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
+        step = compiled["instructions"]["phases"][phase]
+        step_policy = None
+        if "v1" in step:
+            # A v1 step's grants are resolved by the caller before its agent
+            # starts; with none given, the step may call nothing.
+            grants = grants if grants is not None else []
+            if step["v1"].get("policy"):
+                step_policy = {
+                    "content": (
+                        f"Step policy for {phase}: {step['v1']['policy']}\n"
+                        "Grant arguments such as the channel or repository are enforced "
+                        "separately; judge the proposal against this policy only."
+                    ),
+                    "policy": step["policy"],
+                }
         self.integrations = PolicyExecutor(
             IntegrationExecutor(
                 compiled,
@@ -80,6 +97,9 @@ class Broker:
             },
             reviewer=policy_reviewer,
             event_sink=event_sink,
+            grants=grants,
+            step_policy=step_policy,
+            container_isolated=container_isolated,
         )
         self.token = secrets.token_urlsafe(32)
         self.server = _Server(str(socket_path), _Handler)
@@ -155,6 +175,8 @@ def serve(
     resolver: CredentialResolver | None = None,
     event_sink=None,
     policy_reviewer=None,
+    grants=None,
+    container_isolated=False,
 ) -> Iterator[dict[str, str]]:
     temporary = tempfile.TemporaryDirectory(prefix="oci-cap-")
     directory = Path(temporary.name)
@@ -170,6 +192,8 @@ def serve(
         resolver,
         event_sink,
         policy_reviewer,
+        grants,
+        container_isolated,
     )
     thread = threading.Thread(target=broker.server.serve_forever, daemon=True)
     thread.start()

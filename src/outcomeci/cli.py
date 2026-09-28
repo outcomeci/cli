@@ -12,10 +12,10 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
-from outcomeci_connectors.slack import SlackError
-from outcomeci_connectors.slack import manifest as slack_manifest
-from outcomeci_connectors.slack import setup as setup_slack
-from outcomeci_connectors.slack import status as slack_status
+from outcomeci_connectors.providers.slack.setup import SlackError
+from outcomeci_connectors.providers.slack.setup import manifest as slack_manifest
+from outcomeci_connectors.providers.slack.setup import setup as setup_slack
+from outcomeci_connectors.providers.slack.setup import status as slack_status
 
 from . import __version__, debug, slack_vault, tunnels, webhooks
 from .capability import invoke as invoke_capability
@@ -211,6 +211,16 @@ def parser() -> argparse.ArgumentParser:
         "--image",
         help="Run inside this runner image, leasing the workspace's cloud agent credential "
         "(held exclusively for the run, as a cloud run holds it)",
+    )
+    workflow_debug.add_argument(
+        "--retry",
+        metavar="RUN_ID",
+        help="Resume a run in --dir that stopped on an error, from its recorded state",
+    )
+    workflow_debug.add_argument(
+        "--network",
+        help="Docker network for the --image container, such as host when the default "
+        "bridge network cannot resolve DNS",
     )
     workflow_sync.add_argument("file", type=Path)
     workflow_sync.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
@@ -614,6 +624,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                     model=args.model,
                     auto_continue=args.auto_continue,
                     image=args.image,
+                    network=args.network,
+                    retry_run=args.retry,
                 )
                 _print_json(result)
                 return 0

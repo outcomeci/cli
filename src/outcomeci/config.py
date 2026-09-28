@@ -571,9 +571,103 @@ def _http_auth(value: Any, field: str) -> dict[str, Any]:
     return result
 
 
+def _request_operation(item: dict[str, Any], request: dict[str, Any], field: str) -> dict[str, Any]:
+    """An operation whose method and path the caller chooses, within a method set."""
+    methods = request.get("methods")
+    if not isinstance(methods, list) or not methods:
+        raise ConfigError(f"{field}.request.methods must be a non-empty list")
+    methods = sorted({str(method).upper() for method in methods})
+    if any(method not in HTTP_METHODS for method in methods):
+        raise ConfigError(f"{field}.request.methods contains an unsupported method")
+    reads_only = set(methods) <= {"GET", "HEAD"}
+    policy = _mapping(item.get("policy", {}), f"{field}.policy")
+    side_effect = policy.get("side_effect", "read" if reads_only else "execute")
+    if side_effect not in SIDE_EFFECTS:
+        raise ConfigError(f"{field}.policy.side_effect is unsupported")
+    expose = _mapping(
+        _mapping(item.get("response", {}), f"{field}.response").get("expose", {"result": "body"}),
+        f"{field}.response.expose",
+    )
+    return {
+        "description": str(item.get("description", "")).strip(),
+        "input": {
+            "type": "object",
+            "required": ["method", "path"],
+            "properties": {
+                "method": {"enum": methods},
+                "path": {"type": "string", "pattern": "^/[^/].*|^/$"},
+                "query": {"type": "object"},
+                "headers": {"type": "object"},
+                "body": {},
+                "purpose": {"type": "string", "minLength": 1},
+            },
+            "additionalProperties": False,
+        },
+        "request": {"methods": methods},
+        "response": {"expose": expose},
+        "policy": {
+            "side_effect": side_effect,
+            "approval": "none" if side_effect == "read" else "inherit",
+            "idempotency": "none",
+        },
+        **_grantable(item, field),
+    }
+
+
+def _grantable(item: dict[str, Any], field: str) -> dict[str, Any]:
+    """Which grant arguments may scope this operation, and which requests it
+    refuses outright, as a connector declares them."""
+    result: dict[str, Any] = {}
+    if "grantable" in item:
+        grantable = _mapping(item["grantable"], f"{field}.grantable")
+        for name, rule in grantable.items():
+            rule = _mapping(rule, f"{field}.grantable.{name}")
+            if ("field" in rule) == ("path_prefix" in rule):
+                raise ConfigError(
+                    f"{field}.grantable.{name} sets exactly one of field or path_prefix"
+                )
+        result["grantable"] = grantable
+    if item.get("deny"):
+        deny = item["deny"]
+        if not isinstance(deny, list):
+            raise ConfigError(f"{field}.deny must be a list")
+        for index, rule in enumerate(deny):
+            rule = _mapping(rule, f"{field}.deny[{index}]")
+            try:
+                re.compile(str(rule.get("path")))
+            except re.error as exc:
+                raise ConfigError(f"{field}.deny[{index}].path is not a pattern") from exc
+        result["deny"] = deny
+    return result
+
+
+LOWERED_ONLY = "is produced only by a newer API version's compiler"
+
+
+def _reject_lowered_only(spec: dict[str, Any]) -> None:
+    """Keep v1alpha1's contract: newer versions lower to shapes it never accepted."""
+    for name, integration in (spec.get("integrations") or {}).items():
+        for operation_name, operation in ((integration or {}).get("operations") or {}).items():
+            field = f"spec.integrations.{name}.operations.{operation_name}"
+            if not isinstance(operation, dict):
+                continue
+            if "grantable" in operation or "deny" in operation:
+                raise ConfigError(f"{field}: grantable and deny {LOWERED_ONLY}")
+            if isinstance(operation.get("request"), dict) and "methods" in operation["request"]:
+                raise ConfigError(f"{field}.request.methods {LOWERED_ONLY}")
+    for name, phase in ((spec.get("agents") or {}).get("phases") or {}).items():
+        if isinstance(phase, dict) and isinstance(phase.get("instructions"), dict):
+            raise ConfigError(f"spec.agents.phases.{name}: inline instructions {LOWERED_ONLY}")
+    for name, value in (spec.get("instructions") or {}).items():
+        if isinstance(value, dict) and "content" in value:
+            raise ConfigError(f"spec.instructions.{name}: inline instructions {LOWERED_ONLY}")
+
+
 def _operation(value: Any, field: str) -> dict[str, Any]:
     item = _mapping(value, field)
     request = _mapping(item.get("request"), f"{field}.request")
+    if "methods" in request:
+        return _request_operation(item, request, field)
     method = request.get("method")
     if not isinstance(method, str) or method.upper() not in HTTP_METHODS:
         raise ConfigError(f"{field}.request.method is unsupported")
@@ -624,6 +718,7 @@ def _operation(value: Any, field: str) -> dict[str, Any]:
             "approval": approval,
             "idempotency": idempotency,
         },
+        **_grantable(item, field),
     }
 
 
@@ -733,7 +828,7 @@ def _load_integration_packages(path: Path, spec: dict[str, Any]) -> None:
             package = _mapping(yaml.safe_load(content), field)
         except (OSError, yaml.YAMLError) as exc:
             raise ConfigError(f"could not read integration package {package_path}: {exc}") from exc
-        if package.get("apiVersion") != "outcomeci.dev/v1alpha1" or package.get("kind") != (
+        if package.get("apiVersion") != "outcomeci.workflow/v1alpha1" or package.get("kind") != (
             "OutcomeIntegrationPackage"
         ):
             raise ConfigError(f"{field} must contain an OutcomeIntegrationPackage")
@@ -902,19 +997,40 @@ def _validate_phase_graph(
                     )
 
 
+def _inline_content(value: Any) -> bool:
+    """Instructions given as {content: <text>} instead of a file path."""
+    return (
+        isinstance(value, dict)
+        and set(value) <= {"content", "runner", "model"}
+        and isinstance(value.get("content"), str)
+        and bool(value["content"].strip())
+    )
+
+
 def _load_v1alpha1(path: Path) -> dict[str, Any]:
     try:
         root = _mapping(yaml.safe_load(path.read_text(encoding="utf-8")), "document")
     except (OSError, yaml.YAMLError) as exc:
         raise ConfigError(f"could not read {path}: {exc}") from exc
-    if root.get("apiVersion") != "outcomeci.dev/v1alpha1":
-        raise ConfigError("apiVersion must be outcomeci.dev/v1alpha1")
+    if root.get("apiVersion") != "outcomeci.workflow/v1alpha1":
+        raise ConfigError("apiVersion must be outcomeci.workflow/v1alpha1")
+    return validate_lowered(root, path)
+
+
+def validate_lowered(root: dict[str, Any], path: Path, *, lowered: bool = False) -> dict[str, Any]:
+    """Validate a v1alpha1-shaped document and attach its phase graph.
+
+    v1alpha1 files come here directly; newer API versions lower to this shape
+    first (`lowered`), so every version shares one validator and one runtime
+    graph. Shapes only a lowering produces are refused in v1alpha1 files."""
     if root.get("kind") != "OutcomeWorkflow":
         raise ConfigError("kind must be OutcomeWorkflow")
     metadata = _mapping(root.get("metadata"), "metadata")
     _non_empty_str(metadata.get("name"), "metadata.name is required")
     spec = _mapping(root.get("spec"), "spec")
     _load_integration_packages(path.resolve(), spec)
+    if not lowered:
+        _reject_lowered_only(spec)
     triggers = _triggers(spec.get("triggers"))
     spec["triggers"] = triggers
     for field, choices in (
@@ -964,7 +1080,7 @@ def _load_v1alpha1(path: Path) -> dict[str, Any]:
         orchestrator_value = {"path": orchestrator_value}
         instructions[orchestrator_name] = orchestrator_value
     orchestrator = _mapping(orchestrator_value, f"spec.instructions.{orchestrator_name}")
-    if not isinstance(orchestrator.get("path"), str):
+    if not isinstance(orchestrator.get("path"), str) and not _inline_content(orchestrator):
         raise ConfigError(f"spec.instructions.{orchestrator_name}.path is required")
     _agent_policy(orchestrator, f"spec.instructions.{orchestrator_name}")
 
@@ -1001,7 +1117,9 @@ def _load_v1alpha1(path: Path) -> dict[str, Any]:
             except ContractError as exc:
                 raise ConfigError(f"{field}: {exc}") from exc
         with_values = _mapping(policy.get("with", {}), f"{field}.with")
-        if not isinstance(policy.get("instructions"), str):
+        if not isinstance(policy.get("instructions"), str) and not _inline_content(
+            policy.get("instructions")
+        ):
             raise ConfigError(f"{field}.instructions is required")
         _agent_policy(policy, field)
         needs = policy.get("needs", [])
@@ -1136,7 +1254,16 @@ def _load_v1alpha1(path: Path) -> dict[str, Any]:
 # API versions are durable behavior contracts, not aliases for the newest
 # package implementation. Never replace an entry with incompatible rules; add a
 # new API version and keep the older compiler available.
-COMPILER_REGISTRY = {"outcomeci.dev/v1alpha1": _load_v1alpha1}
+def _load_v1(path: Path) -> dict[str, Any]:
+    from .v1 import load as load_v1
+
+    return load_v1(path)
+
+
+COMPILER_REGISTRY = {
+    "outcomeci.workflow/v1alpha1": _load_v1alpha1,
+    "outcomeci.workflow/v1": _load_v1,
+}
 
 
 def load(path: Path) -> dict[str, Any]:
@@ -1192,14 +1319,27 @@ def _filesystem_context(root: Path, context: dict[str, Any]) -> list[dict[str, A
     ]
 
 
+def _instructions(root: Path, value: Any, field: str) -> dict[str, Any]:
+    """Resolve instructions given as a path, {path: ...}, or inline {content: ...}."""
+    if isinstance(value, dict) and "content" in value and "path" not in value:
+        content = value["content"]
+        return {
+            "path": None,
+            "sha256": hashlib.sha256(content.encode()).hexdigest(),
+            "content": content,
+        }
+    relative = value["path"] if isinstance(value, dict) else value
+    return _reference(root, relative, field)
+
+
 def compile_workflow(path: Path) -> dict[str, Any]:
     document = load(path)
     graph = document.pop("_graph")
     spec, root = document["spec"], path.parent
     orchestrator_name = graph["orchestrator"]
     orchestrator_config = graph["orchestrator_config"]
-    orchestrator = _reference(
-        root, orchestrator_config["path"], f"spec.instructions.{orchestrator_name}.path"
+    orchestrator = _instructions(
+        root, orchestrator_config, f"spec.instructions.{orchestrator_name}.path"
     )
     default = graph["default_policy"]
     orchestrator["name"] = orchestrator_name
@@ -1212,7 +1352,7 @@ def compile_workflow(path: Path) -> dict[str, Any]:
     for phase_name, contract in graph["phases"].items():
         policy = spec["agents"]["phases"][phase_name]
         phases[phase_name] = {
-            **_reference(
+            **_instructions(
                 root,
                 policy["instructions"],
                 f"spec.agents.phases.{phase_name}.instructions",
@@ -1228,6 +1368,7 @@ def compile_workflow(path: Path) -> dict[str, Any]:
                 "runner": policy.get("runner", default.get("runner")),
                 "model": policy.get("model", default.get("model")),
             },
+            **({"v1": contract["v1"]} if "v1" in contract else {}),
         }
         for direction in ("inputs", "outputs"):
             for item in contract[direction]:
@@ -1281,6 +1422,8 @@ def compile_workflow(path: Path) -> dict[str, Any]:
         "integration_policies": reviewers,
     }
     revision_input = {
+        **({"source": graph["source"]} if "source" in graph else {}),
+        **({"connectors": graph["connectors"]} if "connectors" in graph else {}),
         "workflow": normalized,
         "graph": {"levels": graph["levels"]},
         "instructions": resolved,

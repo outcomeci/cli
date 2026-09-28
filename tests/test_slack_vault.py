@@ -6,7 +6,7 @@ from pathlib import Path
 
 import httpx
 import pytest
-from outcomeci_connectors.slack import PROJECT_RELATIVE, SlackError
+from outcomeci_connectors.providers.slack.setup import PROJECT_RELATIVE, SlackError
 
 from outcomeci import slack_vault
 from outcomeci.cli import main

@@ -23,8 +23,7 @@ def _bundle(**overrides):
         "auto_continue": False,
         "values": {"slack/bot-token": "xoxb-secret"},
         "expires_at": (datetime.now(UTC) + timedelta(minutes=10)).isoformat(),
-        "provider": "codex",
-        "credential": {"tokens": {"refresh_token": "rt-1"}},
+        "credentials": [{"provider": "codex", "credential": {"tokens": {"refresh_token": "rt-1"}}}],
     }
     value.update(overrides)
     return value
@@ -98,7 +97,7 @@ def test_claude_gets_its_token(monkeypatch, dirs):
 
     monkeypatch.setattr(debug_container, "execute", execute)
 
-    bundle = _bundle(provider="claude", credential="claude-oauth-token")
+    bundle = _bundle(credentials=[{"provider": "claude", "credential": "claude-oauth-token"}])
     assert debug_container.run_bundle(bundle, source=source, output=output) == 0
 
     assert seen["token"] == "claude-oauth-token"
@@ -109,7 +108,14 @@ def test_an_unsupported_provider_fails_cleanly(monkeypatch, dirs, capsys):
     source, output = dirs
     monkeypatch.setattr(debug_container, "execute", mock.Mock())
 
-    assert debug_container.run_bundle(_bundle(provider="gemini"), source=source, output=output) == 1
+    assert (
+        debug_container.run_bundle(
+            _bundle(credentials=[{"provider": "gemini", "credential": "x"}]),
+            source=source,
+            output=output,
+        )
+        == 1
+    )
     assert "unsupported workflow agent" in capsys.readouterr().err
 
 
@@ -142,3 +148,33 @@ def test_main_exits_quietly_when_the_host_stops_the_run(monkeypatch, capsys):
 
     assert debug_container.main() == 130
     assert "interrupted" in capsys.readouterr().err
+
+
+def test_every_leased_login_is_installed(monkeypatch, dirs):
+    source, output = dirs
+    seen = {}
+
+    def execute(*args, **kwargs):
+        seen["codex"] = os.environ.get("CODEX_HOME")
+        seen["claude"] = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+        return {"run_id": "run-1"}
+
+    monkeypatch.setattr(debug_container, "execute", execute)
+    bundle = _bundle(
+        credentials=[
+            {"provider": "codex", "credential": {"tokens": {"refresh_token": "rt-1"}}},
+            {"provider": "claude", "credential": "claude-oauth-token"},
+        ]
+    )
+    assert debug_container.run_bundle(bundle, source=source, output=output) == 0
+    assert seen == {"codex": str(output / "home" / ".codex"), "claude": "claude-oauth-token"}
+
+
+def test_a_retry_bundle_resumes_the_recorded_run(monkeypatch, dirs):
+    source, output = dirs
+    resumed = mock.Mock(return_value={"run_id": "run-1", "status": "completed"})
+    monkeypatch.setattr(debug_container, "resume", resumed)
+    monkeypatch.setattr(debug_container, "execute", mock.Mock(side_effect=AssertionError))
+
+    assert debug_container.run_bundle(_bundle(retry="run-1"), source=source, output=output) == 0
+    assert resumed.call_args.args[3] == "run-1"

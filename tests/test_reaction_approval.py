@@ -136,7 +136,7 @@ def _workflow(tmp_path: Path, *, on_timeout: str = "fail") -> Path:
     (instructions / "notify.md").write_text("# Notify\n", encoding="utf-8")
     (instructions / "approve.md").write_text("# Approve\n", encoding="utf-8")
     value = {
-        "apiVersion": "outcomeci.dev/v1alpha1",
+        "apiVersion": "outcomeci.workflow/v1alpha1",
         "kind": "OutcomeWorkflow",
         "metadata": {"name": "reaction-gate"},
         "spec": {

@@ -107,6 +107,67 @@ def _default_agent(compiled: dict[str, Any]) -> str:
     return (agents.get("default") or {}).get("runner") or "codex"
 
 
+def _runners(compiled: dict[str, Any], agent: str | None) -> list[str]:
+    """Every agent provider the run needs a login for: the default first, then any
+    runner a step selects for itself, or only `agent` when it overrides them all."""
+    if agent:
+        return [agent]
+    found = [_default_agent(compiled)]
+    for phase in (compiled.get("instructions") or {}).get("phases", {}).values():
+        runner = (phase.get("policy") or {}).get("runner")
+        if runner and runner not in found:
+            found.append(runner)
+    return found
+
+
+def _continue(
+    root: Path,
+    config: Path,
+    compiled: dict[str, Any],
+    result: dict[str, Any],
+    options: Any,
+    *,
+    auto_continue: bool,
+) -> dict[str, Any]:
+    """With auto_continue, drive each ready phase in turn."""
+    from . import local
+
+    phase_count = len(compiled["instructions"]["phases"]) if auto_continue else 0
+    while auto_continue and len(result.get("completed_phases", [])) != phase_count:
+        if not result.get("ready_phases") or result.get("status") in {
+            "awaiting_input",
+            "completed",
+        }:
+            break
+        next_phase = result["ready_phases"][0]
+        print(f"Continuing into phase {next_phase!r}...", file=sys.stderr)
+        result = local.continue_run(root, config, result["run_id"], approve=True, options=options)
+    return result
+
+
+def resume(
+    root: Path,
+    config: Path,
+    compiled: dict[str, Any],
+    run_id: str,
+    options: Any,
+    *,
+    auto_continue: bool,
+) -> dict[str, Any]:
+    """Retry a run that stopped on an error or was interrupted, from its recorded state.
+
+    A debug run is owned by this one process, so a run still marked running
+    here was interrupted, and is recorded as such before the retry."""
+    from . import local
+
+    state = local._read(root, run_id)
+    if state.get("status") == "running":
+        state.update({"status": "error", "error": "the debug run was interrupted"})
+        local._write(root, state)
+    result = local.retry(root, config, run_id, options=options)
+    return _continue(root, config, compiled, result, options, auto_continue=auto_continue)
+
+
 def execute(
     root: Path,
     config: Path,
@@ -121,14 +182,7 @@ def execute(
     from . import local
 
     result = local.trigger(root, config, name, payload, options=options)
-    phase_count = len(compiled["instructions"]["phases"]) if auto_continue else 0
-    while auto_continue and len(result.get("completed_phases", [])) != phase_count:
-        if not result.get("ready_phases") or result.get("status") == "awaiting_input":
-            break
-        next_phase = result["ready_phases"][0]
-        print(f"Continuing into phase {next_phase!r}...", file=sys.stderr)
-        result = local.continue_run(root, config, result["run_id"], approve=True, options=options)
-    return result
+    return _continue(root, config, compiled, result, options, auto_continue=auto_continue)
 
 
 def _resolve_trigger(
@@ -160,41 +214,46 @@ def run(
     model: str | None = None,
     auto_continue: bool = False,
     image: str | None = None,
+    network: str | None = None,
+    retry_run: str | None = None,
 ) -> dict[str, Any]:
     from . import local
 
     compiled = compile_workflow(config)
     # Everything that can fail on the user's input fails here, before a lease
     # takes the workspace's agent connection away from its cloud runs.
+    if network is not None and image is None:
+        raise ExecutionError("--network applies only to --image runs")
+    if retry_run is not None and invocation_id is not None:
+        raise ExecutionError("choose --retry or --run, not both")
     if image is not None:
         root, config = root.resolve(), config.resolve()
         if not config.is_relative_to(root):
             raise ExecutionError("the workflow file must live inside --dir to run in an image")
         _check_image(image)
         _flush_pending_releases()
-    name, payload = (
-        _resolve_trigger(compiled, trigger_name, payload_path)
-        if invocation_id is None
-        else (None, None)
-    )
-    lease = (
-        issue_debug_lease(
-            workspace_id,
-            workflow_id,
-            invocation_id=invocation_id,
-            ttl_seconds=IMAGE_LEASE_TTL_SECONDS,
-            agent_provider=agent or _default_agent(compiled),
+    if retry_run is not None:
+        _retryable(root, retry_run)
+        name, payload = None, None
+    else:
+        name, payload = (
+            _resolve_trigger(compiled, trigger_name, payload_path)
+            if invocation_id is None
+            else (None, None)
         )
+    leases = (
+        _issue_leases(workspace_id, workflow_id, _runners(compiled, agent), invocation_id)
         if image is not None
-        else issue_debug_lease(workspace_id, workflow_id, invocation_id=invocation_id)
+        else [issue_debug_lease(workspace_id, workflow_id, invocation_id=invocation_id)]
     )
+    lease = leases[0]
 
     with ExitStack() as held:
         try:
             if image is not None:
                 held.enter_context(_termination_interrupts())
             hold = (
-                held.enter_context(_hold_agent_lease(workspace_id, workflow_id, lease))
+                held.enter_context(_hold_agent_lease(workspace_id, workflow_id, leases))
                 if image is not None
                 else None
             )
@@ -206,8 +265,9 @@ def run(
                     )
                 payload = lease.get("input") or {}
             where = f"inside {image}" if image is not None else "locally"
+            what = f"run {retry_run}" if retry_run else f"trigger {name!r}"
             print(
-                f"Debugging trigger {name!r} {where} against workspace {workspace_id}, "
+                f"Debugging {what} {where} against workspace {workspace_id}, "
                 f"workflow {workflow_id}, using real cloud vault credentials.",
                 file=sys.stderr,
             )
@@ -223,6 +283,8 @@ def run(
                     agent=agent,
                     model=model,
                     auto_continue=auto_continue,
+                    network=network,
+                    retry_run=retry_run,
                 )
             else:
                 options = local.ExecutionOptions(
@@ -232,8 +294,12 @@ def run(
                     execution_backend="outcomeci",
                     _container_isolated=False,
                 )
-                result = execute(
-                    root, config, compiled, name, payload, options, auto_continue=auto_continue
+                result = (
+                    resume(root, config, compiled, retry_run, options, auto_continue=auto_continue)
+                    if retry_run
+                    else execute(
+                        root, config, compiled, name, payload, options, auto_continue=auto_continue
+                    )
                 )
         except BaseException:
             if invocation_id is not None:
@@ -243,6 +309,48 @@ def run(
     if invocation_id is not None:
         complete_debug_lease(workspace_id, workflow_id, invocation_id, "completed")
     return result
+
+
+def _retryable(root: Path, run_id: str) -> None:
+    if not _RUN_ID.match(run_id):
+        raise ExecutionError(f"{run_id!r} is not a run id")
+    record = root / ".outcomeci" / "outcomes" / run_id / "run.json"
+    try:
+        state = json.loads(record.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ExecutionError(f"no recorded run {run_id} in {root}") from exc
+    if state.get("status") not in {"error", "running"}:
+        raise ExecutionError(
+            f"run {run_id} is {state.get('status')}; only a failed or interrupted run retries"
+        )
+
+
+def _issue_leases(
+    workspace_id: str, workflow_id: str, runners: list[str], invocation_id: str | None
+) -> list[dict[str, Any]]:
+    """One debug lease per runner the run needs, each holding that runner's login.
+
+    Only the first claims a replayed invocation. When a later one is refused,
+    the logins already leased are released before the refusal is raised.
+    """
+    leases: list[dict[str, Any]] = []
+    try:
+        for index, runner in enumerate(runners):
+            leases.append(
+                issue_debug_lease(
+                    workspace_id,
+                    workflow_id,
+                    invocation_id=invocation_id if index == 0 else None,
+                    ttl_seconds=IMAGE_LEASE_TTL_SECONDS,
+                    agent_provider=runner,
+                )
+            )
+    except BaseException:
+        for lease in leases:
+            if isinstance(lease.get("agent"), dict):
+                _release_agent_lease(workspace_id, workflow_id, lease["agent"], "failed", None)
+        raise
+    return leases
 
 
 @contextmanager
@@ -297,40 +405,45 @@ def _check_image(image: str) -> None:
 
 @dataclass
 class _AgentHold:
-    """An agent lease held for one image run, and where that run keeps its files."""
+    """The agent leases held for one image run, and where that run keeps its files."""
 
-    agent_lease: dict[str, Any]
+    agent_leases: list[dict[str, Any]]
     output: Path
     status: str = "failed"
 
 
 @contextmanager
 def _hold_agent_lease(
-    workspace_id: str, workflow_id: str, lease: dict[str, Any]
+    workspace_id: str, workflow_id: str, leases: list[dict[str, Any]]
 ) -> Iterator[_AgentHold]:
-    """Hold the agent lease from issue to release, whatever happens in between.
+    """Hold every agent lease from issue to release, whatever happens in between.
 
-    The lease is renewed while held and always released afterwards. A Codex
+    Each lease is renewed while held and always released afterwards. A Codex
     login rotated during the run is always written back: once Codex spends the
     old refresh token, the rotated one is the only valid copy.
     """
-    agent_lease = lease.get("agent")
-    if not isinstance(agent_lease, dict):
+    agent_leases = [lease.get("agent") for lease in leases]
+    if not agent_leases or not all(isinstance(item, dict) for item in agent_leases):
         raise ExecutionError("the debug lease carried no agent credential for the image")
     with tempfile.TemporaryDirectory(prefix="oci-debug-") as output:
         os.chmod(output, 0o700)
-        hold = _AgentHold(agent_lease, Path(output))
+        hold = _AgentHold(agent_leases, Path(output))
         try:
-            with _agent_lease_heartbeat(workspace_id, workflow_id, agent_lease):
+            with ExitStack() as beats:
+                for agent_lease in agent_leases:
+                    beats.enter_context(
+                        _agent_lease_heartbeat(workspace_id, workflow_id, agent_lease)
+                    )
                 yield hold
         finally:
-            _release_agent_lease(
-                workspace_id,
-                workflow_id,
-                agent_lease,
-                hold.status,
-                _codex_rotation(hold.output / OUTPUT_HOME, agent_lease),
-            )
+            for agent_lease in agent_leases:
+                _release_agent_lease(
+                    workspace_id,
+                    workflow_id,
+                    agent_lease,
+                    hold.status,
+                    _codex_rotation(hold.output / OUTPUT_HOME, agent_lease),
+                )
 
 
 def _codex_rotation(home: Path, agent_lease: dict[str, Any]) -> dict[str, Any] | None:
@@ -487,24 +600,28 @@ def _run_in_image(
     agent: str | None,
     model: str | None,
     auto_continue: bool,
+    network: str | None = None,
+    retry_run: str | None = None,
 ) -> dict[str, Any]:
     """Run inside the runner image and bring the run's state back to --dir.
 
     Every secret crosses into the container on stdin, never argv or env, which
     `docker inspect` and process listings expose.
     """
-    agent_lease = hold.agent_lease
     bundle = {
         "config": str(config.relative_to(root)),
         "trigger": name,
         "payload": payload,
+        "retry": retry_run,
         "agent": agent,
         "model": model,
         "auto_continue": auto_continue,
         "values": lease["values"],
         "expires_at": lease["expires_at"],
-        "provider": agent_lease["provider"],
-        "credential": agent_lease["credential"],
+        "credentials": [
+            {"provider": item["provider"], "credential": item["credential"]}
+            for item in hold.agent_leases
+        ],
     }
     container = f"oci-debug-{uuid.uuid4().hex[:12]}"
     command = [
@@ -530,6 +647,7 @@ def _run_in_image(
         f"type=bind,src={hold.output},dst={CONTAINER_OUTPUT}",
         "-w",
         CONTAINER_OUTPUT,
+        *(["--network", network] if network else []),
         "--entrypoint",
         "/opt/oci/bin/python",
         image,

@@ -52,7 +52,7 @@ Schema: `https://outcomeci.com/schemas/email-received-v1.schema.json`
 
 Immutable HTTP request bytes and a filtered header projection for local workflow delivery. Credentials and routing tokens are not included.
 
-Schema: `https://outcomeci.dev/schemas/triggers/webhook-received/v1`
+Schema: `https://outcomeci.com/schemas/triggers/webhook-received/v1`
 
 | Field | Required | Type | Meaning |
 | --- | --- | --- | --- |

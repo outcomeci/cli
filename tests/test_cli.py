@@ -38,7 +38,7 @@ def test_workflow_get_writes_content_and_support_files(tmp_path: Path, capsys, m
             "workflow_id": workflow_id,
             "revision": 12,
             "content_sha256": "deadbeef",
-            "content": "apiVersion: outcomeci.dev/v1alpha1\n",
+            "content": "apiVersion: outcomeci.workflow/v1alpha1\n",
             "files": {
                 ".outcomeci/instructions/orchestrator.md": base64.b64encode(
                     b"Run the phases."
@@ -61,7 +61,7 @@ def test_workflow_get_writes_content_and_support_files(tmp_path: Path, capsys, m
         )
         == 0
     )
-    assert output.read_text() == "apiVersion: outcomeci.dev/v1alpha1\n"
+    assert output.read_text() == "apiVersion: outcomeci.workflow/v1alpha1\n"
     support_file = tmp_path / ".outcomeci/instructions/orchestrator.md"
     assert support_file.read_text() == "Run the phases."
     result = json.loads(capsys.readouterr().out)
@@ -79,7 +79,7 @@ def test_workflow_get_rejects_a_support_file_path_outside_outcomeci(
             "workflow_id": workflow_id,
             "revision": 1,
             "content_sha256": "deadbeef",
-            "content": "apiVersion: outcomeci.dev/v1alpha1\n",
+            "content": "apiVersion: outcomeci.workflow/v1alpha1\n",
             "files": {"../escape.md": base64.b64encode(b"x").decode()},
         },
     )

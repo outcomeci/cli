@@ -1,6 +1,6 @@
 """Built-in OutcomeCI repository and Standup templates."""
 
-OUTCOME_YAML = """apiVersion: outcomeci.dev/v1alpha1
+OUTCOME_YAML = """apiVersion: outcomeci.workflow/v1alpha1
 kind: OutcomeWorkflow
 metadata:
   name: default
@@ -99,6 +99,16 @@ EXECUTION_TASK = """{shared}
 
 {environment} Write durable artifacts beneath {outcome_root}. During intake, plan, and tasks, do not modify product source files. Only execute API capabilities listed for this phase, using `oci integration execute <capability> --phase {phase} --input-stdin`; the capability broker owns credentials and authorization. Only use human tools for a hook declared on this current phase with custom delivery and configured targets. Never discover targets or change hook assignments during execution. Use only readable names; never request or expose provider IDs. Before a wired hook with wait strategy `ask`, ask the requester how long to wait or whether to continue. Deliver it with `oci human request <interaction-id> --run {run_id} --workspace {root}`; add `--continue` only when the requester chose to keep working. Otherwise poll for exactly their bounded duration using `oci human poll <interaction-id> --run {run_id} --wait <seconds> --workspace {root}`. Apply a received response with `oci human accept` and preserve it as outcome context.
 {intake_contract}
+{context_json}"""
+
+V1_STEP_TASK = """{shared}
+
+## Step: {phase}
+
+{instructions}
+
+{environment} Write only this step's result file and notes beneath {outcome_root}. Call an API capability with `{runtime_cli} integration execute <capability> --phase {phase} --input-stdin`, passing its input as JSON on stdin; each capability's input schema is in the context below. The capability broker holds the credentials and enforces this step's grants.
+
 {context_json}"""
 
 EXECUTION_CLI_ADDENDUM = """
