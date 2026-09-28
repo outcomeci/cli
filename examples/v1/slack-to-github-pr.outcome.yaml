@@ -1,0 +1,58 @@
+# A feature request in Slack (an @mention or a DM) becomes a discussed plan,
+# then one pull request per repository it names.
+apiVersion: outcomeci.dev/v1
+
+trigger: webhook   # the Slack relay forwards @mentions and DMs: channel, user, text
+
+secrets:
+  slack: vault:slack/bot-token
+  github: vault:github/pat
+
+apis:
+  slack:  {uses: slack,  auth: secrets.slack}
+  github: {uses: github, auth: secrets.github}
+
+reasoning:
+  default:  {runner: codex,  model: gpt-5.5}
+  fallback: [{runner: claude, model: claude-opus-5-5}]
+
+steps:
+  - draft:
+      reason: >
+        Find every repository named in the request as `owner/repo` in
+        backticks and confirm each exists. Draft one plan with a section per
+        repo, noting any order between them, and post it in the request's
+        thread.
+      from: trigger
+      can:
+        - github.read
+        - slack.post: {channel: trigger.channel}
+      returns:
+        plan: {summary, repos: [{repo: {owner, name}, steps: [string]}]}
+
+  - discuss:
+      with: draft.plan
+      converse: slack.thread(draft.calls.slack.post)
+      by: trigger.user     # only the requester steers and approves the plan
+      until: converged
+      max_turns: 12
+      returns: [plan, status]
+
+  - implement:
+      when: discuss.status == "converged"
+      for_each: discuss.plan.repos as target
+      reason: implement-and-open-pr.md
+      using: {runner: claude, model: claude-opus-5-5}
+      with: [discuss.plan, target]
+      can:
+        - github.write: {repo: target.repo}
+      policy: "One new branch, one PR, only files this repo's steps name. No force-push."
+      returns:
+        pr?: {url, number: int, branch}
+        reason?: string
+
+  - announce:
+      with: implement.pr   # a list: one PR per repo
+      reason: "Post every PR link, with a one-line summary each, in the plan's thread."
+      can:
+        - slack.post: {channel: trigger.channel}

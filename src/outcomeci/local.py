@@ -90,10 +90,13 @@ def _ready(compiled: dict[str, Any], completed: list[str]) -> list[str]:
 
 def _phase_states(compiled: dict[str, Any], state: dict[str, Any]) -> dict[str, str]:
     completed = set(state.get("completed_phases", []))
+    skipped = set(state.get("skipped_phases", []))
     ready = set(_ready(compiled, list(completed)))
     return {
         name: (
-            "completed"
+            "skipped"
+            if name in skipped
+            else "completed"
             if name in completed
             else (
                 "active"
@@ -722,6 +725,24 @@ def _interactive_session(root: Path, compiled: dict[str, Any]) -> dict[str, Any]
     }
 
 
+def _connection_secrets(compiled: dict[str, Any]) -> set[str]:
+    """Environment variables holding connection credentials, kept from every agent."""
+    return {
+        name
+        for connection in compiled["workflow"]["spec"].get("connections", [])
+        if isinstance(connection, dict) and isinstance(connection.get("auth"), dict)
+        for name in [
+            connection["auth"].get("env")
+            or (
+                str(connection["auth"].get("credential", "")).removeprefix("env:")
+                if str(connection["auth"].get("credential", "")).startswith("env:")
+                else ""
+            )
+        ]
+        if isinstance(name, str) and name
+    }
+
+
 def _execute(
     root: Path,
     config: Path,
@@ -732,8 +753,6 @@ def _execute(
     agent = options.agent
     model = options.model
     credential_resolver = options.credential_resolver
-    event_sink = options.event_sink
-    policy_reviewer = options.policy_reviewer
     execution_backend = options.execution_backend
     _container_isolated = options._container_isolated
     compiled = compile_workflow(config)
@@ -749,27 +768,189 @@ def _execute(
     if _container_isolated and execution_backend != "outcomeci":
         raise ExecutionError("container isolation is reserved for OutcomeCI execution")
     phase = state["phase"]
+    step_block = compiled["instructions"]["phases"][phase].get("v1")
+    if step_block is not None and step_block["kind"] != "agent":
+        raise ExecutionError(f"step {phase} is driven by the runtime, not an agent")
     runner, chosen_model = _policy(compiled, phase, agent, model)
     outcome_root = root / ".outcomeci" / "outcomes" / state["run_id"]
     writable_artifacts = _prepare_writable_artifacts(compiled, outcome_root, phase)
-    connection_secrets = {
-        name
-        for connection in compiled["workflow"]["spec"].get("connections", [])
-        if isinstance(connection, dict) and isinstance(connection.get("auth"), dict)
-        for name in [
-            connection["auth"].get("env")
-            or (
-                str(connection["auth"].get("credential", "")).removeprefix("env:")
-                if str(connection["auth"].get("credential", "")).startswith("env:")
-                else ""
+    connection_secrets = _connection_secrets(compiled)
+    context_revision = f"{execution_backend}:{compiled['workflow_revision']}"
+    environment = (
+        f"This is an OutcomeCI Cloud execution in an isolated workspace at {root}. "
+        "Use only the supplied workflow context and scoped capabilities."
+        if execution_backend == "outcomeci"
+        else f"This is a filesystem-backed local Standup. Work in {root}. "
+        "There is no OutcomeCI Cloud or Digital Twin; inspect the local repository directly."
+    )
+    runtime_cli = shlex.join([sys.executable, "-m", "outcomeci.cli"])
+    if step_block is not None:
+        try:
+            invocations = _step_invocations(
+                root,
+                compiled,
+                state,
+                phase,
+                step_block,
+                outcome_root=outcome_root,
+                environment=environment,
+                runtime_cli=runtime_cli,
+                writable_artifacts=writable_artifacts,
             )
-        ]
-        if isinstance(name, str) and name
+        except ExecutionError as exc:
+            state.update({"status": "error", "error": str(exc)})
+            state["phases"] = _phase_states(compiled, state)
+            _write(root, state)
+            raise
+    else:
+        prompt = _phase_prompt(
+            root,
+            compiled,
+            state,
+            phase,
+            outcome_root=outcome_root,
+            environment=environment,
+            runtime_cli=runtime_cli,
+            context_revision=context_revision,
+        )
+        invocations = [(prompt, None)]
+    state.update(
+        {
+            "status": "running",
+            "agent": runner,
+            "model": chosen_model,
+            "workflow_revision": compiled["workflow_revision"],
+        }
+    )
+    _write(root, state)
+    return _run_phase(
+        root,
+        config,
+        compiled,
+        state,
+        phase,
+        invocations,
+        options=options,
+        runner=runner,
+        chosen_model=chosen_model,
+        outcome_root=outcome_root,
+        writable_artifacts=writable_artifacts,
+        connection_secrets=connection_secrets,
+        context_revision=context_revision,
+        step_block=step_block,
+    )
+
+
+def _step_invocations(
+    root: Path,
+    compiled: dict[str, Any],
+    state: dict[str, Any],
+    phase: str,
+    step_block: dict[str, Any],
+    *,
+    outcome_root: Path,
+    environment: str,
+    runtime_cli: str,
+    writable_artifacts: list[Path],
+) -> list[tuple[str, dict[str, Any]]]:
+    """One agent run per for_each item (one run otherwise), each with its grants.
+
+    Grants resolve here, from the run's records before any of the step's agents
+    start, so nothing an item's agent writes can widen a later item's grants."""
+    from . import v1_runtime
+
+    invocations = []
+    for index, bound in enumerate(v1_runtime.items(root, state, step_block)):
+        result_path = None
+        if "for_each" in step_block and step_block.get("returns"):
+            result_path = v1_runtime.item_path(root, state["run_id"], step_block, index)
+            result_path.parent.mkdir(parents=True, exist_ok=True)
+            result_path.touch(exist_ok=True)
+            writable_artifacts.append(result_path)
+        grants = v1_runtime.resolve_grants(root, state, step_block, bound)
+        prompt = _step_prompt(
+            root,
+            compiled,
+            state,
+            phase,
+            step_block,
+            outcome_root=outcome_root,
+            environment=environment,
+            runtime_cli=runtime_cli,
+            bound=bound,
+            result_path=result_path,
+            grants=grants,
+        )
+        invocations.append((prompt, {"bound": bound, "grants": grants}))
+    return invocations
+
+
+def _step_prompt(
+    root: Path,
+    compiled: dict[str, Any],
+    state: dict[str, Any],
+    phase: str,
+    step_block: dict[str, Any],
+    *,
+    outcome_root: Path,
+    environment: str,
+    runtime_cli: str,
+    bound: dict[str, Any] | None = None,
+    result_path: Path | None = None,
+    grants: list[dict[str, Any]] | None = None,
+) -> str:
+    """The prompt for one outcomeci.dev/v1 step: its inputs, grants and result shape.
+
+    A for_each step gets one prompt per item, with the item bound to its name
+    and its own result path."""
+    from . import v1_runtime
+
+    describer = IntegrationExecutor(compiled)
+    returns = step_block.get("returns")
+    if returns and result_path is not None:
+        returns = {"path": result_path, "schema": returns["item"]["schema"]}
+    elif returns:
+        returns = {"path": outcome_root / returns["path"], "schema": returns["schema"]}
+    context = {
+        "run_id": state["run_id"],
+        "step": phase,
+        "workflow_revision": compiled["workflow_revision"],
+        "inputs": v1_runtime.inputs(root, state, step_block, bound),
+        "capabilities": [
+            describer.describe(name)
+            for name in compiled["instructions"]["phases"][phase].get("capabilities", [])
+        ],
+        "grants": grants,
+        "policy": step_block.get("policy"),
+        "returns": (
+            {"path": str(returns["path"]), "schema": returns["schema"]} if returns else None
+        ),
     }
+    return templates.V1_STEP_TASK.format(
+        shared=compiled["instructions"]["orchestrator"]["content"],
+        instructions=compiled["instructions"]["phases"][phase]["content"],
+        environment=environment,
+        outcome_root=outcome_root,
+        phase=phase,
+        runtime_cli=runtime_cli,
+        context_json=json.dumps(context, separators=(",", ":")),
+    )
+
+
+def _phase_prompt(
+    root: Path,
+    compiled: dict[str, Any],
+    state: dict[str, Any],
+    phase: str,
+    *,
+    outcome_root: Path,
+    environment: str,
+    runtime_cli: str,
+    context_revision: str,
+) -> str:
     repository = root.name
     shared = compiled["instructions"]["orchestrator"]["content"]
     instructions = compiled["instructions"]["phases"][phase]["content"]
-    context_revision = f"{execution_backend}:{compiled['workflow_revision']}"
     context = {
         "run_id": state["run_id"],
         "phase": phase,
@@ -796,13 +977,6 @@ repository_id \"local:{repository}\", repository \"{repository}\", a non-empty
 rationale, and a candidates array following the stable role and disposition
 contract above. Use paths relative to this repository.
 """
-    environment = (
-        f"This is an OutcomeCI Cloud execution in an isolated workspace at {root}. "
-        "Use only the supplied workflow context and scoped capabilities."
-        if execution_backend == "outcomeci"
-        else f"This is a filesystem-backed local Standup. Work in {root}. "
-        "There is no OutcomeCI Cloud or Digital Twin; inspect the local repository directly."
-    )
     prompt = templates.EXECUTION_TASK.format(
         shared=shared,
         instructions=instructions,
@@ -814,41 +988,66 @@ contract above. Use paths relative to this repository.
         intake_contract=intake_contract,
         context_json=json.dumps(context, separators=(",", ":")),
     )
-    runtime_cli = shlex.join([sys.executable, "-m", "outcomeci.cli"])
-    prompt += templates.EXECUTION_CLI_ADDENDUM.format(runtime_cli=runtime_cli, phase=phase)
-    state.update(
-        {
-            "status": "running",
-            "agent": runner,
-            "model": chosen_model,
-            "workflow_revision": compiled["workflow_revision"],
-        }
-    )
-    _write(root, state)
+    return prompt + templates.EXECUTION_CLI_ADDENDUM.format(runtime_cli=runtime_cli, phase=phase)
+
+
+def _run_phase(
+    root: Path,
+    config: Path,
+    compiled: dict[str, Any],
+    state: dict[str, Any],
+    phase: str,
+    invocations: list[tuple[str, dict[str, Any] | None]],
+    *,
+    options: ExecutionOptions,
+    runner: str,
+    chosen_model: str | None,
+    outcome_root: Path,
+    writable_artifacts: list[Path],
+    connection_secrets: set[str],
+    context_revision: str,
+    step_block: dict[str, Any] | None,
+) -> dict[str, Any]:
+    credential_resolver = options.credential_resolver
+    event_sink = options.event_sink
+    policy_reviewer = options.policy_reviewer
+    execution_backend = options.execution_backend
+    _container_isolated = options._container_isolated
+    repository = root.name
     phase_started_at = datetime.now(UTC).isoformat()
     try:
-        with serve_capability(
-            root,
-            config,
-            state["run_id"],
-            phase,
-            compiled=compiled,
-            resolver=credential_resolver,
-            event_sink=event_sink,
-            policy_reviewer=policy_reviewer,
-        ) as capability_env:
-            summary = invoke(
-                runner,
-                chosen_model,
-                prompt,
+        summaries = []
+        for prompt, scope in invocations:
+            with serve_capability(
                 root,
-                7200,
-                allow_local_auth=True,
-                extra_env=capability_env,
-                writable_paths=writable_artifacts,
-                excluded_env=connection_secrets,
-                container_isolated=_container_isolated,
-            )
+                config,
+                state["run_id"],
+                phase,
+                compiled=compiled,
+                resolver=credential_resolver,
+                event_sink=event_sink,
+                policy_reviewer=policy_reviewer,
+                grants=(scope or {}).get("grants"),
+            ) as capability_env:
+                summaries.append(
+                    invoke(
+                        runner,
+                        chosen_model,
+                        prompt,
+                        root,
+                        7200,
+                        allow_local_auth=True,
+                        extra_env=capability_env,
+                        writable_paths=writable_artifacts,
+                        excluded_env=connection_secrets,
+                        container_isolated=_container_isolated,
+                    )
+                )
+        summary = "\n".join(summaries)
+        if step_block is not None and "for_each" in step_block:
+            from . import v1_runtime
+
+            v1_runtime.gather(root, state["run_id"], step_block, len(invocations))
         persisted = _read(root, state["run_id"])
         if persisted.get("status") == "awaiting_input":
             return persisted
@@ -906,7 +1105,7 @@ contract above. Use paths relative to this repository.
                     )
                 summary = f"{summary}\n{repair_summary}"
             _validate_required_effects(root, compiled, state["run_id"], phase)
-            if phase == "intake":
+            if phase == "intake" and step_block is None:
                 trajectory = json.loads(
                     (outcome_root / "intake" / "trajectory.json").read_text(encoding="utf-8")
                 )
@@ -938,6 +1137,8 @@ contract above. Use paths relative to this repository.
         state["status"] = (
             "awaiting_confirmation" if phase != "tasks" else "ready_for_implementation"
         )
+        if step_block is not None and not _ready(compiled, state["completed_phases"]):
+            state["status"] = "completed"
     state["summary"] = summary[-1000:]
     state["usage_records"] = transcripts["usage_records"]
     state.pop("error", None)
@@ -992,6 +1193,76 @@ def _new_run(
     if trigger is not None:
         state["trigger"] = trigger
     return state
+
+
+def _skip(state: dict[str, Any], phase: str, reason: str) -> None:
+    state["completed_phases"] = [*state.get("completed_phases", []), phase]
+    state["skipped_phases"] = [*state.get("skipped_phases", []), phase]
+    state.setdefault("skip_reasons", {})[phase] = reason
+
+
+def _settle(
+    root: Path,
+    compiled: dict[str, Any],
+    state: dict[str, Any],
+    options: ExecutionOptions,
+) -> bool:
+    """Resolve the v1 steps the runtime drives: skips, await steps and discussions.
+
+    Returns True with state["phase"] set when an agent step is next, or False
+    once every step is done and the run is completed.
+    """
+    from . import v1_runtime
+
+    while True:
+        ready = _ready(compiled, state.get("completed_phases", []))
+        if not ready:
+            state.update({"status": "completed", "ready_phases": []})
+            state["phases"] = _phase_states(compiled, state)
+            _write(root, state)
+            return False
+        phase = ready[0]
+        step = v1_runtime.block(compiled, phase)
+        if step is None:
+            state["phase"] = phase
+            return True
+        reason = v1_runtime.skip_reason(root, state, step)
+        if reason is not None:
+            _skip(state, phase, reason)
+            continue
+        if step["kind"] == "agent":
+            state["phase"] = phase
+            return True
+        state.update({"phase": phase, "status": "running"})
+        _write(root, state)
+        try:
+            if step["kind"] == "converse":
+                v1_runtime.run_converse(root, compiled, state, phase, options)
+                approved = True
+            else:
+                approved = v1_runtime.run_await(
+                    root, compiled, state, phase, options.credential_resolver
+                )
+        except (ExecutionError, OSError) as exc:
+            # Recorded as an error so `retry` can resume the step; retry sends
+            # runtime-driven steps back through here, never to an agent.
+            state.update({"status": "error", "error": str(exc)})
+            state["phases"] = _phase_states(compiled, state)
+            _write(root, state)
+            if isinstance(exc, ExecutionError):
+                raise
+            raise ExecutionError(f"step {phase} failed: {exc}") from exc
+        if approved:
+            state["completed_phases"] = [*state.get("completed_phases", []), phase]
+            continue
+        _skip(state, phase, "the await window expired without the signal")
+        for name in compiled["instructions"]["phases"]:
+            if name not in state["completed_phases"]:
+                _skip(state, name, f"{phase} expired")
+
+
+def _is_v1(compiled: dict[str, Any]) -> bool:
+    return compiled.get("api_version") == "outcomeci.dev/v1"
 
 
 def _before_gate(
@@ -1078,6 +1349,8 @@ def trigger(
     if on_created is not None:
         _write(root, state)
         on_created(state["run_id"])
+    if _is_v1(compiled) and not _settle(root, compiled, state, options):
+        return state
     opened = _before_gate(
         root, config, compiled, state, credential_resolver=options.credential_resolver
     )
@@ -1306,6 +1579,8 @@ def continue_run(
     if not approve:
         raise ExecutionError("continuation requires explicit --approve")
     compiled = compile_workflow(config)
+    if _is_v1(compiled) and not _settle(root, compiled, state, options):
+        return state
     ready = _ready(compiled, state.get("completed_phases", []))
     if not ready:
         raise ExecutionError("outcome workflow is complete")
@@ -1342,6 +1617,9 @@ def retry(
     state["status"] = "queued"
     state.pop("error", None)
     _write(root, state)
+    compiled = compile_workflow(config)
+    if _is_v1(compiled) and not _settle(root, compiled, state, options):
+        return state
     return _execute(root, config, state, options=options)
 
 

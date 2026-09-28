@@ -416,6 +416,24 @@ class IntegrationExecutor:
                 f"unknown capability {capability}",
                 category="configuration",
             )
+        if "methods" in operation["request"]:
+            connection = next(
+                item
+                for item in self.compiled["workflow"]["spec"]["connections"]
+                if item["ref"] == integration["connection"]
+            )
+            return {
+                "name": capability,
+                "description": (
+                    f"{operation['description']} path is relative to {connection['base_url']}, "
+                    "starting with a single leading slash; methods: "
+                    + ", ".join(operation["request"]["methods"])
+                    + "."
+                ),
+                "input": operation["input"],
+                "output": sorted(operation["response"]["expose"]),
+                "policy": operation["policy"],
+            }
         return {
             "name": capability,
             "description": operation["description"],
@@ -467,6 +485,19 @@ class IntegrationExecutor:
                 category="configuration",
             )
         operation = integration["operations"].get(operation_name)
+        if operation is not None and "methods" in operation["request"]:
+            operation = {
+                **operation,
+                "request": {
+                    "method": inputs.get("method"),
+                    "path": inputs.get("path"),
+                    "headers": inputs.get("headers", {}),
+                    "query": inputs.get("query", {}),
+                    **({"body": inputs["body"]} if "body" in inputs else {}),
+                    "timeout_seconds": 30,
+                    "_dynamic": True,
+                },
+            }
         if operation_name == "request" and integration["access"]["mode"] == "full":
             operation = {
                 "description": "Dynamic request inside an authorized origin.",
@@ -487,6 +518,19 @@ class IntegrationExecutor:
                     "idempotency": "none",
                 },
             }
+        if operation is not None and operation.get("deny"):
+            method = str(inputs.get("method", "")).upper()
+            path = str(inputs.get("path", "")).split("?", 1)[0]
+            for rule in operation["deny"]:
+                if (not rule.get("methods") or method in rule["methods"]) and re.search(
+                    rule["path"], path
+                ):
+                    raise IntegrationError(
+                        "integration.request_denied",
+                        f"{capability} does not allow {method} {path}: {rule.get('reason')}",
+                        category="policy",
+                    )
+        if operation is not None and operation["request"].get("_dynamic"):
             forbidden = {
                 name.lower()
                 for name in operation["request"]["headers"]

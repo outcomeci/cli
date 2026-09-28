@@ -101,6 +101,16 @@ EXECUTION_TASK = """{shared}
 {intake_contract}
 {context_json}"""
 
+V1_STEP_TASK = """{shared}
+
+## Step: {phase}
+
+{instructions}
+
+{environment} Write only this step's result file and notes beneath {outcome_root}. Call an API capability with `{runtime_cli} integration execute <capability> --phase {phase} --input-stdin`, passing its input as JSON on stdin; each capability's input schema is in the context below. The capability broker holds the credentials and enforces this step's grants.
+
+{context_json}"""
+
 EXECUTION_CLI_ADDENDUM = """
 The authoritative CLI for this run is `{runtime_cli}`. Use this absolute command instead of bare `oci` in every tool invocation; login shells may select an older globally installed CLI. For API requests use `{runtime_cli} integration execute <capability> --phase {phase} --input-stdin`. Do not fall back to a global CLI."""
 

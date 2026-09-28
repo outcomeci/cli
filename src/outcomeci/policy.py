@@ -21,6 +21,34 @@ from .integrations import IntegrationError, IntegrationExecutor
 from .process import invoke
 
 
+def _within(path: Any, prefix: str) -> bool:
+    """Whether a request path is `prefix` itself or a path beneath it."""
+    if not isinstance(path, str):
+        return False
+    path = path.split("?", 1)[0]
+    lowered = path.lower()
+    if ".." in path or "\\" in path or "//" in path or "%2e" in lowered or "%2f" in lowered:
+        return False
+    prefix = prefix.rstrip("/").lower()
+    return lowered.rstrip("/") == prefix or lowered.startswith(prefix + "/")
+
+
+def _same(actual: Any, granted: Any) -> bool:
+    if isinstance(actual, str) and isinstance(granted, str):
+        return actual.strip().lstrip("#") == granted.strip().lstrip("#")
+    return actual == granted
+
+
+def _path_fields(value: Any, fields: list[str]) -> dict[str, str] | None:
+    if isinstance(value, str) and len(fields) == 2 and value.count("/") == 1:
+        value = dict(zip(fields, value.split("/"), strict=True))
+    if not isinstance(value, dict) or not all(
+        isinstance(value.get(name), str) and value[name] for name in fields
+    ):
+        return None
+    return {name: value[name] for name in fields}
+
+
 def digest(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
@@ -37,12 +65,19 @@ class PolicyExecutor:
         context: dict[str, Any],
         reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         event_sink: Callable[[dict[str, Any]], None] | None = None,
+        grants: list[dict[str, Any]] | None = None,
+        step_policy: dict[str, Any] | None = None,
     ):
+        """`grants` (v1 steps) scope every call by argument; None means no grant
+        layer. `step_policy` is a step's inline policy, reviewed before each call
+        with a side effect, in place of any integration-level policy."""
         self.executor = executor
         self.directory = directory
         self.context = context
         self.reviewer = reviewer or self._review
         self.event_sink = event_sink
+        self.grants = grants
+        self.step_policy = step_policy
         self._event_cursor = 0
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -177,13 +212,85 @@ class PolicyExecutor:
         )
         self._save(state)
 
+    def _apply_grants(
+        self, capability: str, request: dict[str, Any]
+    ) -> tuple[dict[str, Any], str | None]:
+        """Check a call against the step's grants, filling in fixed fields.
+
+        Returns the request to send and the matching grant's `as` name. A call
+        no grant covers is refused with the reason, so the agent can correct it.
+        """
+        integration_name, _, operation_name = capability.partition(".")
+        operation = self.executor.compiled["workflow"]["spec"]["integrations"][integration_name][
+            "operations"
+        ].get(operation_name, {})
+        grantable = operation.get("grantable", {})
+        reasons = []
+        for grant in (item for item in self.grants or [] if item["capability"] == capability):
+            candidate, problems = dict(request), []
+            for name, granted in grant["args"].items():
+                rule = grantable.get(name, {})
+                if granted is None:
+                    problems.append(f"{name} did not resolve in this run")
+                elif "field" in rule:
+                    field = rule["field"]
+                    if candidate.get(field) in (None, ""):
+                        candidate[field] = granted
+                    elif not _same(candidate[field], granted):
+                        problems.append(f"{field} must be {granted}")
+                else:
+                    fields = _path_fields(granted, rule.get("value_fields", []))
+                    prefix = rule["path_prefix"].format(**fields) if fields else None
+                    if prefix is None:
+                        problems.append(f"{name} did not resolve to {rule.get('value_fields')}")
+                    elif not _within(candidate.get("path"), prefix):
+                        problems.append(f"path must be under {prefix}")
+            if not problems:
+                return candidate, grant["as"]
+            reasons.extend(problems)
+        raise IntegrationError(
+            "integration.grant_denied",
+            f"{capability} is outside this step's grants: " + "; ".join(reasons or ["not granted"]),
+            category="policy",
+        )
+
+    def _reads_only(self, capability: str, request: Mapping[str, Any]) -> bool:
+        integration_name, _, operation_name = capability.partition(".")
+        operation = self.executor.compiled["workflow"]["spec"]["integrations"][integration_name][
+            "operations"
+        ].get(operation_name)
+        if operation is None:
+            return False
+        if "methods" in operation["request"]:
+            return str(request.get("method", "")).upper() in {"GET", "HEAD"}
+        return operation["policy"]["side_effect"] == "read"
+
     def execute(self, capability: str, inputs: Mapping[str, Any], *, phase: str) -> dict[str, Any]:
         integration = self.executor.compiled["workflow"]["spec"]["integrations"][
             capability.split(".")[0]
         ]
-        if not integration.get("policy") and not (
-            integration["access"].get("max_requests")
-            or integration["access"].get("opaque_identifiers")
+        grant_as = None
+        if self.grants is not None and capability in self.executor.capabilities(phase):
+            try:
+                inputs, grant_as = self._apply_grants(capability, dict(inputs))
+            except IntegrationError as exc:
+                with (self.directory / "lock").open("a+") as lock:
+                    fcntl.flock(lock, fcntl.LOCK_EX)
+                    file = self.directory / "journal.json"
+                    state = (
+                        json.loads(file.read_text())
+                        if file.exists()
+                        else {"calls": {}, "references": {}}
+                    )
+                    self._deny(state, phase, capability, str(exc))
+                raise
+        if (
+            not integration.get("policy")
+            and not self.step_policy
+            and not (
+                integration["access"].get("max_requests")
+                or integration["access"].get("opaque_identifiers")
+            )
         ):
             return self.executor.execute(capability, inputs, phase=phase)
         with (self.directory / "lock").open("a+") as lock:
@@ -250,6 +357,9 @@ class PolicyExecutor:
                 raise
             call = {
                 "capability": capability,
+                "phase": phase,
+                "sequence": len(state["calls"]) + 1,
+                "as": grant_as,
                 "status": "reviewing",
                 "proposal_sha256": fingerprint,
                 "request": request,
@@ -274,13 +384,16 @@ class PolicyExecutor:
                 ),
             )
             self._save(state)
-            policy = (
+            policy = self.step_policy or (
                 self.executor.compiled["instructions"]
                 .get("integration_policies", {})
                 .get(capability.split(".")[0])
             )
             try:
-                if integration.get("policy"):
+                reviewed = bool(integration.get("policy")) or (
+                    self.step_policy is not None and not self._reads_only(capability, request)
+                )
+                if reviewed:
                     review = self.reviewer(
                         {
                             "proposal_sha256": fingerprint,
