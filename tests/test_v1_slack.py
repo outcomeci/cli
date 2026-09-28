@@ -323,7 +323,9 @@ def test_a_screenshot_in_the_discussion_reaches_the_next_turn(workflow, monkeypa
     (file,) = agent.files
     assert file["name"] == "error.png" and file["content_type"] == "image/png"
     assert Path(file["path"]).read_bytes() == b"\x89PNG"
-    assert Path(file["path"]).is_relative_to(workflow / ".outcomeci/attachments")
+    assert Path(file["path"]).is_relative_to(
+        workflow / ".outcomeci/outcomes" / result["run_id"] / "attachments"
+    )
 
 
 def test_the_draft_step_opens_a_screenshot_attached_to_the_request(workflow, monkeypatch):
@@ -337,4 +339,6 @@ def test_the_draft_step_opens_a_screenshot_attached_to_the_request(workflow, mon
     (opened,) = agent.opened
     assert opened["mimetype"] == "image/png"
     assert Path(opened["file"]["path"]).read_bytes() == b"\x89PNG"
-    assert Path(opened["file"]["path"]).is_relative_to(workflow / ".outcomeci/attachments")
+    assert Path(opened["file"]["path"]).is_relative_to(
+        workflow / ".outcomeci/outcomes" / result["run_id"] / "attachments"
+    )

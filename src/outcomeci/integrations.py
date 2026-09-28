@@ -279,8 +279,9 @@ def _apply_auth(
 
 
 def attachments_path(root: Path, run_id: str) -> Path:
-    """Where a run's downloaded files are saved, inside the workspace its agents read."""
-    return root / ".outcomeci" / "attachments" / run_id
+    """Where a run's downloaded files are saved: with its artifacts, which its
+    agents read in the workspace and people open in the run's directory."""
+    return root / ".outcomeci" / "outcomes" / run_id / "attachments"
 
 
 def same(actual: Any, granted: Any) -> bool:
@@ -436,10 +437,6 @@ class IntegrationExecutor:
         digest = hashlib.sha256(url.encode()).hexdigest()[:12]
         target = self.downloads / f"{digest}-{_safe_name(name)}"
         self.downloads.mkdir(parents=True, exist_ok=True)
-        # What people attached never belongs in the workspace's history.
-        ignore = self.downloads.parent / ".gitignore"
-        if not ignore.exists():
-            ignore.write_text("*\n", encoding="utf-8")
         # Written beside the target and renamed over it, so a link planted at
         # the target is replaced, never followed.
         descriptor, temporary = tempfile.mkstemp(dir=self.downloads, prefix=".download-")

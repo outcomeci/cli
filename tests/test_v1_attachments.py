@@ -109,7 +109,7 @@ def test_a_download_from_another_host_is_refused(tmp_path, monkeypatch):
 @pytest.mark.parametrize(
     ("response", "message"),
     [
-        (httpx.Response(200, content=b"x" * (20 * 1024 * 1024 + 1)), "larger than"),
+        (httpx.Response(200, content=b"x" * (2 * 1024 * 1024 + 1)), "larger than"),
         (httpx.Response(302, headers={"location": "https://slack.com/signin"}), "HTTP 302"),
     ],
     ids=["too large", "redirected to sign-in"],
@@ -237,10 +237,14 @@ def test_any_grant_that_holds_opens_the_file_and_is_recorded(tmp_path, monkeypat
     assert call["as"] == "there"
 
 
-def test_downloads_are_kept_out_of_the_workspaces_history(tmp_path, monkeypatch):
-    executor, _ = _executor(tmp_path, monkeypatch, _info())
+def test_a_download_is_saved_with_the_runs_artifacts(tmp_path):
+    from outcomeci.cloud_runner.main import workflow_artifacts
+    from outcomeci.integrations import attachments_path
 
-    executor.execute("slack.file", {"file": "F1"}, phase="draft", response_grants=_alternatives())
+    target = attachments_path(tmp_path, "run-1") / "abc-shot.png"
+    target.parent.mkdir(parents=True)
+    target.write_bytes(IMAGE)
 
-    assert (tmp_path / ".gitignore").read_text() == "*\n"
-    assert not list((tmp_path / "attachments").glob(".download-*"))
+    (artifact,) = workflow_artifacts(tmp_path, "run-1")
+
+    assert artifact["path"] == ".outcomeci/outcomes/run-1/attachments/abc-shot.png"
