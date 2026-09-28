@@ -12,10 +12,10 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import yaml
-from outcomeci_connectors.slack import SlackError
-from outcomeci_connectors.slack import manifest as slack_manifest
-from outcomeci_connectors.slack import setup as setup_slack
-from outcomeci_connectors.slack import status as slack_status
+from outcomeci_connectors.providers.slack.setup import SlackError
+from outcomeci_connectors.providers.slack.setup import manifest as slack_manifest
+from outcomeci_connectors.providers.slack.setup import setup as setup_slack
+from outcomeci_connectors.providers.slack.setup import status as slack_status
 
 from . import __version__, debug, slack_vault, tunnels, webhooks
 from .capability import invoke as invoke_capability
