@@ -6,7 +6,7 @@ trigger: webhook   # the Slack relay forwards @mentions and DMs: channel, user, 
 
 secrets:
   slack: vault:slack/bot-token
-  github: vault:github/pat
+  github: vault:outcomeci-github
 
 apis:
   slack:  {uses: slack,  auth: secrets.slack}
