@@ -277,6 +277,44 @@ def _apply_auth(
         headers["Authorization"] = f"Bearer {_token(client, auth, credential)}"
 
 
+def attachments_path(root: Path, run_id: str) -> Path:
+    """Where a run's downloaded files are saved, inside the workspace its agents read."""
+    return root / ".outcomeci" / "attachments" / run_id
+
+
+def same(actual: Any, granted: Any) -> bool:
+    """Whether a value is the granted one, ignoring a channel's leading `#`."""
+    if isinstance(actual, str) and isinstance(granted, str):
+        return actual.strip().lstrip("#") == granted.strip().lstrip("#")
+    return actual == granted
+
+
+def _found(body: Any, source: str) -> Any:
+    try:
+        return _lookup(body, source.removeprefix("body.") if source != "body" else "")
+    except (KeyError, IndexError, ValueError, TypeError):
+        return None
+
+
+def _response_grant_problems(body: Any, checks: list[dict[str, Any]]) -> list[str]:
+    """Each check needs its granted value in one of the lists at its paths."""
+    problems = []
+    for check in checks:
+        values = []
+        for source in check["paths"]:
+            found = _found(body, source)
+            if isinstance(found, list):
+                values.extend(found)
+        if not any(same(item, check["granted"]) for item in values):
+            problems.append(f"{check['name']} must be {check['granted']}")
+    return problems
+
+
+def _safe_name(name: Any) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", str(name or "")).strip("._")
+    return cleaned[:100] or "file"
+
+
 def _project(body: Any, expose: Mapping[str, str]) -> dict[str, Any]:
     result = {}
     for name, source in expose.items():
@@ -315,6 +353,22 @@ def _redact(value: Any, secrets: list[str]) -> Any:
     return value
 
 
+def _rejected(body: Any) -> None:
+    """Refuse a provider's own `ok: false` answer, keeping only a safe code."""
+    if isinstance(body, dict) and body.get("ok") is False:
+        provider_code = body.get("error")
+        safe_code = (
+            provider_code
+            if isinstance(provider_code, str) and re.fullmatch(r"[a-z0-9_]{1,64}", provider_code)
+            else None
+        )
+        raise IntegrationError(
+            "integration.provider_rejected",
+            "provider rejected the request" + (f" ({safe_code})" if safe_code is not None else ""),
+            category="transport",
+        )
+
+
 class IntegrationExecutor:
     def __init__(
         self,
@@ -322,11 +376,72 @@ class IntegrationExecutor:
         resolver: CredentialResolver = environment_resolver,
         transport: httpx.BaseTransport | None = None,
         reviewed: bool = False,
+        downloads: Path | None = None,
     ) -> None:
+        """`downloads` is where an operation's downloaded files are saved for the
+        agent to open; an operation that downloads fails without it."""
         self.compiled = compiled
         self.resolver = resolver
         self.transport = transport
         self.reviewed = reviewed
+        self.downloads = downloads
+
+    def _download(
+        self,
+        client: httpx.Client,
+        spec: Mapping[str, Any],
+        body: Any,
+        headers: Mapping[str, str],
+        capability: str,
+    ) -> dict[str, Any]:
+        """Fetch the file a response points to, from an allowed host only."""
+        url = _found(body, spec["url"])
+        parsed = urlsplit(url) if isinstance(url, str) else None
+        if parsed is None or parsed.scheme != "https" or parsed.hostname not in spec["hosts"]:
+            raise IntegrationError(
+                "integration.download_denied",
+                f"{capability} may download only from {', '.join(spec['hosts'])}",
+                category="policy",
+            )
+        if self.downloads is None:
+            raise IntegrationError(
+                "integration.download_unavailable",
+                "this run has no place to save downloads",
+                category="configuration",
+            )
+        _safe_destination(url, False)
+        authorization = {k: v for k, v in headers.items() if k.lower() == "authorization"}
+        limit = int(spec["max_bytes"])
+        received = bytearray()
+        with client.stream("GET", url, headers=authorization) as response:
+            if response.status_code != 200:
+                raise IntegrationError(
+                    "integration.download_failed",
+                    f"download returned HTTP {response.status_code}",
+                    category="authorization"
+                    if response.status_code in {302, 401, 403}
+                    else "transport",
+                    retryable=response.status_code == 429 or response.status_code >= 500,
+                )
+            for chunk in response.iter_bytes():
+                received.extend(chunk)
+                if len(received) > limit:
+                    raise IntegrationError(
+                        "integration.download_too_large",
+                        f"the file is larger than {limit} bytes",
+                        category="validation",
+                    )
+        name = _found(body, spec["name"])
+        digest = hashlib.sha256(url.encode()).hexdigest()[:12]
+        target = self.downloads / f"{digest}-{_safe_name(name)}"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(bytes(received))
+        return {
+            "path": str(target),
+            "name": str(name or target.name),
+            "content_type": str(_found(body, spec["content_type"]) or ""),
+            "bytes": len(received),
+        }
 
     def capabilities(self, phase: str | None = None) -> list[str]:
         integrations = self.compiled["workflow"]["spec"].get("integrations", {})
@@ -464,7 +579,17 @@ class IntegrationExecutor:
             "requests_executed": False,
         }
 
-    def execute(self, capability: str, inputs: Mapping[str, Any], *, phase: str) -> dict[str, Any]:
+    def execute(
+        self,
+        capability: str,
+        inputs: Mapping[str, Any],
+        *,
+        phase: str,
+        response_grants: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Send one authorized request. `response_grants` are grants a request
+        cannot name, checked against the response before any of it is used:
+        each `{name, paths, granted}` needs `granted` in a list at `paths`."""
         if capability not in self.capabilities(phase):
             raise IntegrationError(
                 "integration.capability_denied",
@@ -626,6 +751,25 @@ class IntegrationExecutor:
                     elapsed_ms=int((time.monotonic() - started) * 1000),
                 )
                 response.raise_for_status()
+                try:
+                    body = response.json()
+                except ValueError:
+                    body = {"text": response.text}
+                body = _redact(body, [item for item in sensitive if isinstance(item, str)])
+                _rejected(body)
+                problems = _response_grant_problems(body, response_grants or [])
+                if problems:
+                    raise IntegrationError(
+                        "integration.grant_denied",
+                        f"{capability} is outside this step's grants: " + "; ".join(problems),
+                        category="policy",
+                    )
+                download = operation["response"].get("download")
+                file = (
+                    self._download(client, download, body, headers, capability)
+                    if download
+                    else None
+                )
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
             category = "authorization" if status in {401, 403} else "transport"
@@ -644,30 +788,14 @@ class IntegrationExecutor:
                 category="transport",
                 retryable=True,
             ) from exc
-        try:
-            body = response.json()
-        except ValueError:
-            body = {"text": response.text}
-        body = _redact(body, [item for item in sensitive if isinstance(item, str)])
-        if isinstance(body, dict) and body.get("ok") is False:
-            provider_code = body.get("error")
-            safe_code = (
-                provider_code
-                if isinstance(provider_code, str)
-                and re.fullmatch(r"[a-z0-9_]{1,64}", provider_code)
-                else None
-            )
-            raise IntegrationError(
-                "integration.provider_rejected",
-                "provider rejected the request"
-                + (f" ({safe_code})" if safe_code is not None else ""),
-                category="transport",
-            )
         duration = int((time.monotonic() - started) * 1000)
+        output = _project(body, operation["response"]["expose"])
+        if file is not None:
+            output["file"] = file
         return {
             "ok": True,
             "status": response.status_code,
-            "output": _project(body, operation["response"]["expose"]),
+            "output": output,
             "duration_ms": duration,
             "audit": {
                 "capability": capability,

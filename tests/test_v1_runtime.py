@@ -44,6 +44,7 @@ def test_field_grants_fill_in_and_refuse_other_values(tmp_path):
     assert policy._apply_grants("slack.post", {"text": "hi"}) == (
         {"text": "hi", "channel": "sentry"},
         None,
+        [],
     )
     assert (
         policy._apply_grants("slack.post", {"text": "hi", "channel": "#sentry"})[0]["channel"]

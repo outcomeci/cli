@@ -622,13 +622,18 @@ def _converse_step(name, step, phase, block, reads, *, scope: _Scope, apis, base
     )
     if "using" in step:
         phase.update(_agent(step["using"], f"{field}.using"))
-    phase["capabilities"] = sorted({f"{api}.{operation}", f"{api}.{respond['respond']}"})
+    attachment = respond.get("attachment")
+    phase["capabilities"] = sorted(
+        {f"{api}.{operation}", f"{api}.{respond['respond']}"}
+        | ({f"{api}.{attachment}"} if attachment else set())
+    )
     block["converse"] = {
         "api": api,
         "watcher": watcher,
         "operation": operation,
         "respond": respond["respond"],
         "thread_field": respond["thread_field"],
+        "attachment": attachment,
         "message": message["ref"],
         "subject": subject["ref"],
         "by": _by(step.get("by"), scope, reads, f"{field}.by"),

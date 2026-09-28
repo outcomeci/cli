@@ -19,6 +19,7 @@ from .humans import accept, poll, request, transport_responses
 from .integrations import (
     CredentialResolver,
     IntegrationExecutor,
+    attachments_path,
     local_credential_resolver,
 )
 from .policy import PolicyExecutor
@@ -88,6 +89,7 @@ class Broker:
                 compiled,
                 resolver=resolver or local_credential_resolver(root),
                 reviewed=True,
+                downloads=attachments_path(root, run_id),
             ),
             root / ".outcomeci" / ".broker" / run_id,
             {

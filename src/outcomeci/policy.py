@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from .execution_events import event, safe_text
-from .integrations import IntegrationError, IntegrationExecutor
+from .integrations import IntegrationError, IntegrationExecutor, same
 from .process import invoke
 
 
@@ -31,12 +31,6 @@ def _within(path: Any, prefix: str) -> bool:
         return False
     prefix = prefix.rstrip("/").lower()
     return lowered.rstrip("/") == prefix or lowered.startswith(prefix + "/")
-
-
-def _same(actual: Any, granted: Any) -> bool:
-    if isinstance(actual, str) and isinstance(granted, str):
-        return actual.strip().lstrip("#") == granted.strip().lstrip("#")
-    return actual == granted
 
 
 def _path_fields(value: Any, fields: list[str]) -> dict[str, str] | None:
@@ -217,11 +211,13 @@ class PolicyExecutor:
 
     def _apply_grants(
         self, capability: str, request: dict[str, Any]
-    ) -> tuple[dict[str, Any], str | None]:
+    ) -> tuple[dict[str, Any], str | None, list[dict[str, Any]]]:
         """Check a call against the step's grants, filling in fixed fields.
 
-        Returns the request to send and the matching grant's `as` name. A call
-        no grant covers is refused with the reason, so the agent can correct it.
+        Returns the request to send, the matching grant's `as` name, and the
+        grants only the response can show, for the executor to check before
+        using it. A call no grant covers is refused with the reason, so the
+        agent can correct it.
         """
         integration_name, _, operation_name = capability.partition(".")
         operation = self.executor.compiled["workflow"]["spec"]["integrations"][integration_name][
@@ -230,16 +226,18 @@ class PolicyExecutor:
         grantable = operation.get("grantable", {})
         reasons = []
         for grant in (item for item in self.grants or [] if item["capability"] == capability):
-            candidate, problems = dict(request), []
+            candidate, problems, checks = dict(request), [], []
             for name, granted in grant["args"].items():
                 rule = grantable.get(name, {})
                 if granted is None:
                     problems.append(f"{name} did not resolve in this run")
+                elif "response_in" in rule:
+                    checks.append({"name": name, "paths": rule["response_in"], "granted": granted})
                 elif "field" in rule:
                     field = rule["field"]
                     if candidate.get(field) in (None, ""):
                         candidate[field] = granted
-                    elif not _same(candidate[field], granted):
+                    elif not same(candidate[field], granted):
                         problems.append(f"{field} must be {granted}")
                 else:
                     fields = _path_fields(granted, rule.get("value_fields", []))
@@ -249,7 +247,7 @@ class PolicyExecutor:
                     elif not _within(candidate.get("path"), prefix):
                         problems.append(f"path must be under {prefix}")
             if not problems:
-                return candidate, grant["as"]
+                return candidate, grant["as"], checks
             reasons.extend(problems)
         raise IntegrationError(
             "integration.grant_denied",
@@ -272,10 +270,10 @@ class PolicyExecutor:
         integration = self.executor.compiled["workflow"]["spec"]["integrations"][
             capability.split(".")[0]
         ]
-        grant_as = None
+        grant_as, checks = None, []
         if self.grants is not None and capability in self.executor.capabilities(phase):
             try:
-                inputs, grant_as = self._apply_grants(capability, dict(inputs))
+                inputs, grant_as, checks = self._apply_grants(capability, dict(inputs))
             except IntegrationError as exc:
                 with (self.directory / "lock").open("a+") as lock:
                     fcntl.flock(lock, fcntl.LOCK_EX)
@@ -295,7 +293,7 @@ class PolicyExecutor:
                 or integration["access"].get("opaque_identifiers")
             )
         ):
-            return self.executor.execute(capability, inputs, phase=phase)
+            return self.executor.execute(capability, inputs, phase=phase, response_grants=checks)
         with (self.directory / "lock").open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             file = self.directory / "journal.json"
@@ -464,7 +462,9 @@ class PolicyExecutor:
                     proposal_sha256=fingerprint,
                 )
                 self._save(state)
-                result = self.executor.execute(capability, actual, phase=phase)
+                result = self.executor.execute(
+                    capability, actual, phase=phase, response_grants=checks
+                )
                 if integration["access"].get("opaque_identifiers"):
                     result = self._opaque(result, references)
                 result["receipt"] = fingerprint
