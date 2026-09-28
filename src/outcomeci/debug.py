@@ -41,6 +41,12 @@ def _lease_resolver(values: dict[str, Any], expires_at: str):
     return resolver
 
 
+def _lease_field(lease: dict[str, Any], field: str) -> Any:
+    if field not in lease:
+        raise ExecutionError(f"debug lease response did not include {field!r}")
+    return lease[field]
+
+
 def _synthesize_payload(trigger_name: str, definition: dict[str, Any]) -> dict[str, Any]:
     trigger_type = definition["type"]
     if trigger_type == "manual":
@@ -79,7 +85,7 @@ def run(
 
     compiled = compile_workflow(config)
     lease = issue_debug_lease(workspace_id, workflow_id, invocation_id=invocation_id)
-    resolver = _lease_resolver(lease["values"], lease["expires_at"])
+    resolver = _lease_resolver(_lease_field(lease, "values"), _lease_field(lease, "expires_at"))
 
     if invocation_id is not None:
         name = lease.get("trigger_name")
