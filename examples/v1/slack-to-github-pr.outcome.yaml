@@ -55,4 +55,4 @@ steps:
       with: implement.pr   # a list: one PR per repo
       reason: "Post every PR link, with a one-line summary each, in the plan's thread."
       can:
-        - slack.post: {channel: trigger.channel}
+        - slack.post: {channel: trigger.channel, thread_ts: trigger.ts}

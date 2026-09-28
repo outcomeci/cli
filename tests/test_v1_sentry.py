@@ -154,6 +154,10 @@ class Agent:
                 }
             }
         elif step == "announce":
+            try:
+                _call(env, "slack.post", {"text": "PR opened", "thread_ts": "99.9"})
+            except ExecutionError as exc:
+                self.denials.append(str(exc))
             _call(env, "slack.post", {"text": "PR opened"})
             outputs = None
         else:
@@ -226,6 +230,9 @@ def test_approved_alert_runs_every_step_inside_its_grants(workflow, monkeypatch)
     assert notice["thread_ts"] == "17.1"
     assert notice["text"].startswith("Reacting :+1: approves exactly this:")
     assert "- fix: github.write on repo outcomeci/cli" in notice["text"]
+    # The PR link is a reply in the alert's thread, filled in by the grant.
+    assert posts[2]["thread_ts"] == "17.1"
+    assert any("thread_ts must be 17.1" in denial for denial in agent.denials)
     # The await step polled the reaction on the message triage recorded.
     polled = services.sent("slack.com", "/api/reactions.get")
     assert polled and polled[0].url.params["channel"] == "C0SENTRY"

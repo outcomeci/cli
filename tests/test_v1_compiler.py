@@ -41,7 +41,7 @@ def test_the_sentry_example_compiles_to_a_linear_graph():
     assert set(compiled["connectors"]) == {"slack", "github"}
     phases = compiled["instructions"]["phases"]
     assert phases["triage"]["path"] == ".outcomeci/instructions/triage-and-notify.md"
-    assert phases["announce"]["content"].startswith("Post the PR link")
+    assert phases["announce"]["content"].startswith("Reply in the alert's thread")
     assert phases["fix"]["v1"]["policy"].startswith("One new branch")
     assert phases["approve"]["capabilities"] == ["slack.post", "slack.reactions"]
 

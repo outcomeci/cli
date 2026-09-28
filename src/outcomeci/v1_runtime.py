@@ -295,7 +295,8 @@ def _covers(root: Path, compiled: dict[str, Any], state: dict[str, Any], phase: 
             if not referenced or later_block.get("for_each"):
                 continue
             resolved = {
-                name: value(root, state, rule["ref"]) for name, rule in grant["args"].items()
+                name: rule["literal"] if "literal" in rule else value(root, state, rule["ref"])
+                for name, rule in grant["args"].items()
             }
             shown = ", ".join(
                 f"{name} {_show(found)}" for name, found in resolved.items() if found is not MISSING
