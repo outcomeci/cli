@@ -77,6 +77,7 @@ def run(
 ) -> dict[str, Any]:
     from . import local
 
+    print("[outcomeci] workflow debug run starting", file=sys.stderr)
     compiled = compile_workflow(config)
     lease = issue_debug_lease(workspace_id, workflow_id, invocation_id=invocation_id)
     resolver = _lease_resolver(lease["values"], lease["expires_at"])
