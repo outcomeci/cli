@@ -151,6 +151,24 @@ def test_run_mode_replays_the_real_claimed_invocation_and_reports_completion(mon
     complete.assert_called_once_with("workspace_1", "workflow_1", "inv-1", "completed")
 
 
+def test_run_mode_rejects_a_lease_missing_expiration(monkeypatch, tmp_path):
+    monkeypatch.setattr(debug, "compile_workflow", lambda config: COMPILED)
+    monkeypatch.setattr(
+        debug,
+        "issue_debug_lease",
+        lambda *a, **k: {"values": {}, "trigger_name": "daily", "input": {}},
+    )
+
+    with pytest.raises(ExecutionError, match="expires_at"):
+        debug.run(
+            tmp_path,
+            tmp_path / "outcome.yml",
+            "workspace_1",
+            "workflow_1",
+            invocation_id="inv-1",
+        )
+
+
 def test_run_mode_reports_failure_and_still_raises(monkeypatch, tmp_path):
     monkeypatch.setattr(debug, "compile_workflow", lambda config: COMPILED)
     monkeypatch.setattr(
