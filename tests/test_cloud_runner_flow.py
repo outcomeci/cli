@@ -1753,3 +1753,79 @@ class PublicationFallbackTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class MultiRunnerTests(unittest.TestCase):
+    def test_every_leased_login_is_installed_and_codex_is_written_back(self):
+        claim = {
+            "content": "apiVersion: outcomeci.workflow/v1\n",
+            "files": {},
+            "trigger_name": "webhook",
+            "input": {},
+            "lease_token": "lease-secret",
+            "agent": {"provider": "claude", "credential": "claude-token", "credential_version": 1},
+            "agents": [
+                {"provider": "claude", "credential": "claude-token", "credential_version": 1},
+                {
+                    "provider": "codex",
+                    "credential": {"tokens": {"refresh_token": "rt-1"}},
+                    "credential_version": 5,
+                },
+            ],
+            "vault": {"expires_at": "2099-01-01T00:00:00+00:00", "values": {}},
+        }
+        seen = {}
+
+        class WorkflowClient:
+            completed = []
+
+            def claim_workflow(self):
+                return claim
+
+            def workflow_start(self, token):
+                pass
+
+            def workflow_heartbeat(self, token, events=None):
+                return {"active": True, "policy_events_received": len(events or [])}
+
+            def workflow_complete(self, token, status, **values):
+                self.completed.append((status, values))
+
+        client = WorkflowClient()
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "private"
+            root.mkdir()
+
+            def trigger(workspace, config, name, payload, **options):
+                options["on_created"]("run-1")
+                seen["claude"] = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
+                seen["codex_home"] = os.environ.get("CODEX_HOME")
+                (root / ".codex" / "auth.json").write_text('{"tokens": {"refresh_token": "rt-2"}}')
+                outcome = root / ".outcomeci" / "outcomes" / "run-1"
+                outcome.mkdir(parents=True)
+                (outcome / "run.json").write_text("{}")
+                return {"run_id": "run-1", "completed_phases": ["only"], "status": "completed"}
+
+            with (
+                mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
+                mock.patch("outcomeci.cloud_runner.main.tempfile.mkdtemp", return_value=str(root)),
+                mock.patch("outcomeci.local.trigger", side_effect=trigger),
+                mock.patch(
+                    "outcomeci.config.compile_workflow",
+                    return_value={
+                        "instructions": {"phases": {"only": {}}},
+                        "workflow": {"spec": {"agents": {"default": {}}}},
+                    },
+                ),
+            ):
+                execute_workflow(
+                    Launch("workflow", "invocation-1", "boot", "https://api.outcomeci.com"),
+                    client,
+                )
+
+        self.assertEqual(seen["claude"], "claude-token")
+        self.assertEqual(seen["codex_home"], str(root / ".codex"))
+        status, values = client.completed[-1]
+        self.assertEqual(status, "completed")
+        self.assertEqual(values["expected_credential_version"], 5)
+        self.assertEqual(values["agent_credential"], {"tokens": {"refresh_token": "rt-2"}})

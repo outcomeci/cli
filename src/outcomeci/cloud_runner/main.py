@@ -193,14 +193,17 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(base64.b64decode(encoded, validate=True))
 
-        agent = dict(claim["agent"])
-        provider = str(agent["provider"])
-        credential = agent["credential"]
-        credential_version = int(agent["credential_version"])
-        injected = _inject_agent_credential(root, provider, credential)
-        for key, value in injected.items():
-            previous[key] = os.environ.get(key)
-            os.environ[key] = value
+        # One login per runner the workflow's steps use; the default first.
+        logins = [dict(item) for item in (claim.get("agents") or [claim["agent"]])]
+        for login in logins:
+            injected = _inject_agent_credential(root, str(login["provider"]), login["credential"])
+            for key, value in injected.items():
+                previous.setdefault(key, os.environ.get(key))
+                os.environ[key] = value
+        # Only a Codex login rotates, so writeback follows whichever login is Codex.
+        rotating = next((login for login in logins if login["provider"] == "codex"), logins[0])
+        provider = str(rotating["provider"])
+        credential_version = int(rotating["credential_version"])
         fallback_spec = compile_workflow(config)["workflow"]["spec"]["agents"]["default"].get(
             "fallback"
         )

@@ -251,9 +251,14 @@ def sync_workflow(
     compile_workflow(path)
     content = path.read_text(encoding="utf-8")
     document = json.loads(content) if suffix == ".json" else yaml.safe_load(content)
-    workflow_name = name or str((document.get("metadata") or {}).get("name") or "").strip()
+    workflow_name = (
+        name
+        or str(document.get("name") or (document.get("metadata") or {}).get("name") or "").strip()
+    )
     if not workflow_name:
-        raise ExecutionError("workflow name is required; set metadata.name or pass --name")
+        raise ExecutionError(
+            "workflow name is required; set name (v1) or metadata.name, or pass --name"
+        )
     lineage: dict[str, Any] = {}
     expected_parent_sha256 = None
     if patch_path is not None:
