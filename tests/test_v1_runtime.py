@@ -369,3 +369,23 @@ def test_gathered_outputs_keep_one_entry_per_item(tmp_path, monkeypatch):
     assert gathered["pr"][0]["number"] == 1
     assert gathered["pr"][1] is None
     assert gathered["reason"] == [None, "no such module"]
+
+
+def test_a_step_policy_review_inside_the_container_uses_no_nested_sandbox(tmp_path, monkeypatch):
+    from outcomeci import policy as policy_module
+
+    seen = {}
+
+    def invoke(runner, model, prompt, workspace, timeout, **kwargs):
+        seen.update(kwargs)
+        return '{"decision": "allow", "proposal_sha256": "x", "reason": "ok"}'
+
+    monkeypatch.setattr(policy_module, "invoke", invoke)
+    compiled = compile_workflow(sentry.EXAMPLES / sentry.WORKFLOW)
+    reviewer = PolicyExecutor(
+        IntegrationExecutor(compiled), tmp_path, {}, grants=[], container_isolated=True
+    )
+    reviewer._review({"policy": {"content": "policy", "policy": {"runner": "codex"}}})
+
+    assert seen["container_isolated"] is True
+    assert seen["read_only"] is True

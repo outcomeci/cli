@@ -1028,6 +1028,7 @@ def _run_phase(
                 event_sink=event_sink,
                 policy_reviewer=policy_reviewer,
                 grants=(scope or {}).get("grants"),
+                container_isolated=_container_isolated,
             ) as capability_env:
                 summaries.append(
                     invoke(

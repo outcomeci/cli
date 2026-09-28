@@ -173,7 +173,10 @@ def invoke(
                 "--dangerously-bypass-approvals-and-sandbox",
                 "--skip-git-repo-check",
             ]
-        if read_only:
+        if read_only and not container_isolated:
+            # Inside a container Codex's own sandbox is unavailable too; a
+            # read-only call there runs in an empty temporary workspace with
+            # no capability access, which is what keeps it read-only.
             argv = ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check"]
         if model:
             argv += ["--model", model]

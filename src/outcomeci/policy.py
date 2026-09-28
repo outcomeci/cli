@@ -67,6 +67,7 @@ class PolicyExecutor:
         event_sink: Callable[[dict[str, Any]], None] | None = None,
         grants: list[dict[str, Any]] | None = None,
         step_policy: dict[str, Any] | None = None,
+        container_isolated: bool = False,
     ):
         """`grants` (v1 steps) scope every call by argument; None means no grant
         layer. `step_policy` is a step's inline policy, reviewed before each call
@@ -78,6 +79,7 @@ class PolicyExecutor:
         self.event_sink = event_sink
         self.grants = grants
         self.step_policy = step_policy
+        self.container_isolated = container_isolated
         self._event_cursor = 0
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -99,6 +101,7 @@ class PolicyExecutor:
                 allow_local_auth=True,
                 writable_paths=[],
                 read_only=True,
+                container_isolated=self.container_isolated,
                 excluded_env={
                     str(connection["auth"]["credential"]).removeprefix("env:")
                     for connection in self.executor.compiled["workflow"]["spec"]["connections"]

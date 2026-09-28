@@ -288,3 +288,43 @@ def test_codex_conversation_falls_back_when_session_has_active_writer(
     assert "from artifacts" in result
     assert "resume" in calls[0]
     assert "resume" not in calls[1]
+
+
+@pytest.mark.parametrize(
+    ("container_isolated", "expected"),
+    [
+        (False, ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check", "-"]),
+        (
+            True,
+            [
+                "codex",
+                "exec",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--skip-git-repo-check",
+                "-",
+            ],
+        ),
+    ],
+)
+def test_read_only_codex_uses_the_container_as_its_sandbox(
+    monkeypatch, tmp_path: Path, container_isolated, expected
+) -> None:
+    calls = []
+    monkeypatch.setattr(
+        process,
+        "command",
+        lambda argv, **kwargs: calls.append(argv) or process.Result(0, "ok", ""),
+    )
+    monkeypatch.setattr(process.shutil, "which", lambda name: "/usr/bin/" + name)
+    process.invoke(
+        "codex",
+        None,
+        "review",
+        tmp_path,
+        10,
+        allow_local_auth=True,
+        writable_paths=[],
+        read_only=True,
+        container_isolated=container_isolated,
+    )
+    assert calls[-1][: len(expected)] == expected or calls[-1][-len(expected) :] == expected

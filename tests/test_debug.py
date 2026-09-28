@@ -650,3 +650,20 @@ def test_termination_signals_interrupt_an_image_run_and_are_restored():
     with pytest.raises(KeyboardInterrupt), debug._termination_interrupts():
         signal.raise_signal(signal.SIGTERM)
     assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_image_run_joins_the_requested_docker_network(monkeypatch, image_env):
+    root, _ = image_env
+    container = _container(monkeypatch, result={"run_id": "run-1"})
+
+    _image_run(root, network="host")
+
+    command = container.seen["command"]
+    assert command[command.index("--network") + 1] == "host"
+    assert command.index("--network") < command.index("outcomeci-runner:dev")
+
+
+def test_network_needs_an_image(monkeypatch, tmp_path):
+    monkeypatch.setattr(debug, "compile_workflow", lambda config: COMPILED)
+    with pytest.raises(ExecutionError, match="only to --image"):
+        debug.run(tmp_path, tmp_path / "outcome.yml", "w", "wf", trigger_name="go", network="host")

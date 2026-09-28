@@ -212,6 +212,11 @@ def parser() -> argparse.ArgumentParser:
         help="Run inside this runner image, leasing the workspace's cloud agent credential "
         "(held exclusively for the run, as a cloud run holds it)",
     )
+    workflow_debug.add_argument(
+        "--network",
+        help="Docker network for the --image container, such as host when the default "
+        "bridge network cannot resolve DNS",
+    )
     workflow_sync.add_argument("file", type=Path)
     workflow_sync.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     workflow_sync.add_argument("--name")
@@ -614,6 +619,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     model=args.model,
                     auto_continue=args.auto_continue,
                     image=args.image,
+                    network=args.network,
                 )
                 _print_json(result)
                 return 0

@@ -160,12 +160,15 @@ def run(
     model: str | None = None,
     auto_continue: bool = False,
     image: str | None = None,
+    network: str | None = None,
 ) -> dict[str, Any]:
     from . import local
 
     compiled = compile_workflow(config)
     # Everything that can fail on the user's input fails here, before a lease
     # takes the workspace's agent connection away from its cloud runs.
+    if network is not None and image is None:
+        raise ExecutionError("--network applies only to --image runs")
     if image is not None:
         root, config = root.resolve(), config.resolve()
         if not config.is_relative_to(root):
@@ -223,6 +226,7 @@ def run(
                     agent=agent,
                     model=model,
                     auto_continue=auto_continue,
+                    network=network,
                 )
             else:
                 options = local.ExecutionOptions(
@@ -487,6 +491,7 @@ def _run_in_image(
     agent: str | None,
     model: str | None,
     auto_continue: bool,
+    network: str | None = None,
 ) -> dict[str, Any]:
     """Run inside the runner image and bring the run's state back to --dir.
 
@@ -530,6 +535,7 @@ def _run_in_image(
         f"type=bind,src={hold.output},dst={CONTAINER_OUTPUT}",
         "-w",
         CONTAINER_OUTPUT,
+        *(["--network", network] if network else []),
         "--entrypoint",
         "/opt/oci/bin/python",
         image,
