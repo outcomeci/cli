@@ -661,6 +661,9 @@ def _reject_lowered_only(spec: dict[str, Any]) -> None:
     for name, value in (spec.get("instructions") or {}).items():
         if isinstance(value, dict) and "content" in value:
             raise ConfigError(f"spec.instructions.{name}: inline instructions {LOWERED_ONLY}")
+    for name, trigger in (spec.get("triggers") or {}).items():
+        if isinstance(trigger, dict) and "receiver" in trigger:
+            raise ConfigError(f"spec.triggers.{name}.receiver {LOWERED_ONLY}")
 
 
 def _operation(value: Any, field: str) -> dict[str, Any]:

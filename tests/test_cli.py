@@ -215,3 +215,23 @@ def test_filesystem_context_excludes_matching_artifacts(tmp_path: Path) -> None:
 def test_local_outcome_status_without_runs(tmp_path: Path, capsys) -> None:
     assert main(["outcome", "status", "--workspace", str(tmp_path)]) == 0
     assert '"status": "no_runs"' in capsys.readouterr().out
+
+
+def test_slack_setup_passes_the_request_url_and_events(tmp_path: Path, monkeypatch, capsys) -> None:
+    calls = []
+
+    def fake_setup(workspace, **options):
+        calls.append(options)
+        return {"configured": True}
+
+    monkeypatch.setattr(cli, "setup_slack", fake_setup)
+    url = "https://example.com/v1/webhooks/route/token"
+    base = ["integration", "slack", "setup", "--workspace", str(tmp_path)]
+
+    assert main(base) == 0
+    assert main([*base, "--request-url", url, "--event", "mention"]) == 0
+
+    assert [(call["request_url"], call["events"]) for call in calls] == [
+        (None, ["mention", "dm"]),
+        (url, ["mention"]),
+    ]
