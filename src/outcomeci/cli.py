@@ -478,8 +478,19 @@ def parser() -> argparse.ArgumentParser:
     _add_workspace_argument(slack_setup)
     slack_setup.add_argument("--name", default="OutcomeCI")
     slack_setup.add_argument("--team")
-    slack_setup.add_argument("--channel", help="Default Slack channel or user ID for this app")
-    slack_setup.add_argument("--force", action="store_true")
+    slack_setup.add_argument(
+        "--request-url",
+        help=(
+            "The workflow's webhook URL, which Slack sends events to. Leave it out "
+            "on the first run; add it once the signing secret is in the Vault"
+        ),
+    )
+    slack_setup.add_argument(
+        "--event",
+        action="append",
+        choices=["mention", "dm"],
+        help="An event the workflow's trigger listens for (repeatable; default: both)",
+    )
     slack_sync = slack_commands.add_parser(
         "sync-credentials", help="Sync the installed app token to a Vault"
     )
@@ -1049,9 +1060,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                     setup_slack(
                         args.workspace,
                         name=args.name,
+                        request_url=args.request_url,
+                        events=args.event or ["mention", "dm"],
                         team=args.team,
-                        channel=args.channel,
-                        force=args.force,
                     ),
                     sort_keys=True,
                 )

@@ -2,10 +2,14 @@
 # then one pull request per repository it names.
 apiVersion: outcomeci.workflow/v1
 
-trigger: webhook   # the Slack relay forwards @mentions and DMs: channel, user, text
+# Slack signs each event; the webhook verifies it with the signing secret and
+# starts a run for each top-level @mention or DM: channel, user, text, ts.
+trigger:
+  webhook: {uses: slack, auth: secrets.slack_signing, events: [mention, dm]}
 
 secrets:
   slack: vault:slack/bot-token
+  slack_signing: vault:slack/signing-secret
   github: vault:outcomeci-github
 
 apis:

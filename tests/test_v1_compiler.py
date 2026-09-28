@@ -100,6 +100,37 @@ def test_unknown_providers_and_secrets_are_rejected(tmp_path):
         compile_workflow(_write(tmp_path, [_step("a")], secrets={"slack": "xoxb-raw"}))
 
 
+def test_the_slack_example_triggers_on_signed_mentions_and_dms():
+    compiled = compile_workflow(EXAMPLES / "slack-to-github-pr.outcome.yaml")
+
+    assert compiled["triggers"] == {
+        "webhook": {
+            "type": "webhook.received",
+            "delivery": "queued",
+            "receiver": {
+                "uses": "slack",
+                "secret": "vault:slack/signing-secret",
+                "events": ["dm", "mention"],
+            },
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    ("webhook", "message"),
+    [
+        ({"uses": "github", "auth": "secrets.github", "events": ["push"]}, "cannot receive"),
+        ({"uses": "slack", "auth": "secrets.missing", "events": ["dm"]}, "declared secret"),
+        ({"uses": "slack", "auth": "secrets.slack", "events": ["reaction"]}, "not one of"),
+        ({"uses": "slack", "auth": "secrets.slack", "events": []}, "must list"),
+        ({"uses": "slack", "auth": "secrets.slack", "events": ["dm"], "x": 1}, "supports uses"),
+    ],
+)
+def test_a_webhook_receiver_is_checked_against_its_provider(tmp_path, webhook, message):
+    with pytest.raises(ConfigError, match=message):
+        compile_workflow(_write(tmp_path, [_step("a")], trigger={"webhook": webhook}))
+
+
 def test_literal_repos_and_as_names_compile(tmp_path):
     steps = [
         _step("a", can=[{"slack.post": {"channel": "build", "as": "plan_post"}}]),

@@ -347,6 +347,14 @@ def _agent(value: Any, field: str) -> dict[str, Any]:
     return {key: item[key] for key in ("runner", "model") if key in item}
 
 
+def _secret(auth: Any, secrets: dict[str, Any], field: str, hint: str) -> str:
+    """The declared secret an `auth: secrets.<name>` reference names."""
+    name = str(auth or "").removeprefix("secrets.")
+    if not str(auth or "").startswith("secrets.") or name not in secrets:
+        raise ConfigError(f"{field} must reference a declared secret, {hint}")
+    return name
+
+
 def _apis(document: dict[str, Any]) -> tuple[dict[str, Any], list[dict], dict[str, Any]]:
     secrets = _mapping(document.get("secrets") or {}, "secrets")
     for name, reference in secrets.items():
@@ -372,11 +380,7 @@ def _apis(document: dict[str, Any]) -> tuple[dict[str, Any], list[dict], dict[st
         if auth is None and contract["auth"]["type"] != "none":
             raise ConfigError(f"{field}.auth is required, such as secrets.{name}")
         if auth is not None:
-            secret = str(auth).removeprefix("secrets.")
-            if not str(auth).startswith("secrets.") or secret not in secrets:
-                raise ConfigError(
-                    f"{field}.auth must reference a declared secret, such as secrets.{name}"
-                )
+            secret = _secret(auth, secrets, f"{field}.auth", f"such as secrets.{name}")
         apis[name] = {"uses": found.name, "contract": contract, "digest": found.digest()}
         connections.append(
             {
@@ -409,12 +413,44 @@ def _apis(document: dict[str, Any]) -> tuple[dict[str, Any], list[dict], dict[st
     return apis, connections, integrations
 
 
-def _trigger(value: Any) -> tuple[str, dict[str, Any]]:
+def _receiver(value: Any, secrets: dict[str, Any]) -> dict[str, Any]:
+    """`webhook: {uses, auth, events}`: a provider verifies and translates the request."""
+    field = "trigger.webhook"
+    binding = _mapping(value, field)
+    if set(binding) - {"uses", "auth", "events"}:
+        raise ConfigError(f"{field} supports uses, auth and events")
+    found = provider(str(binding.get("uses")))
+    receiver = found.contract().get("receiver")
+    if not receiver:
+        raise ConfigError(f"{field}: {found.name} cannot receive webhooks")
+    secret = _secret(binding.get("auth"), secrets, f"{field}.auth", "the signing secret")
+    events = binding.get("events")
+    if (
+        not isinstance(events, list)
+        or not events
+        or not all(isinstance(event, str) for event in events)
+    ):
+        raise ConfigError(f"{field}.events must list {', '.join(sorted(receiver['events']))}")
+    unknown = sorted(set(events) - set(receiver["events"]))
+    if unknown:
+        raise ConfigError(
+            f"{field}.events: {', '.join(unknown)} is not one of "
+            + ", ".join(sorted(receiver["events"]))
+        )
+    return {"uses": found.name, "secret": secrets[secret], "events": sorted(set(events))}
+
+
+def _trigger(value: Any, secrets: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     if isinstance(value, str) and value in TRIGGERS:
         return value, dict(TRIGGERS[value])
     if isinstance(value, dict) and value.get("type") == "cron":
         return "cron", dict(value)
-    raise ConfigError(f"trigger must be one of {', '.join(sorted(TRIGGERS))}, or a cron mapping")
+    if isinstance(value, dict) and set(value) == {"webhook"}:
+        return "webhook", {**TRIGGERS["webhook"], "receiver": _receiver(value["webhook"], secrets)}
+    raise ConfigError(
+        f"trigger must be one of {', '.join(sorted(TRIGGERS))}, a cron mapping, "
+        "or webhook: {uses, auth, events}"
+    )
 
 
 def _by(value: Any, scope: _Scope, reads: set, field: str) -> str | None:
@@ -623,9 +659,9 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
     unknown = set(document) - TOP_LEVEL
     if unknown:
         raise ConfigError(f"unknown top-level fields: {', '.join(sorted(unknown))}")
-    trigger_name, trigger = _trigger(document.get("trigger"))
     default, fallback = _reasoning(document.get("reasoning"))
     apis, connections, integrations = _apis(document)
+    trigger_name, trigger = _trigger(document.get("trigger"), document.get("secrets") or {})
     raw_steps = document.get("steps")
     if not isinstance(raw_steps, list) or not raw_steps:
         raise ConfigError("steps must be a non-empty list")
