@@ -5,7 +5,7 @@
   "type": "object",
   "required": ["apiVersion", "kind", "metadata", "spec"],
   "properties": {
-    "apiVersion": {"const": "outcomeci.com/v1alpha1"},
+    "apiVersion": {"const": "outcomeci.workflow/v1alpha1"},
     "kind": {"const": "OutcomeWorkflow"},
     "metadata": {
       "type": "object",

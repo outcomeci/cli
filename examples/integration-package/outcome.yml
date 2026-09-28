@@ -1,4 +1,4 @@
-apiVersion: outcomeci.com/v1alpha1
+apiVersion: outcomeci.workflow/v1alpha1
 kind: OutcomeWorkflow
 metadata:
   name: customer-follow-up

@@ -1012,8 +1012,8 @@ def _load_v1alpha1(path: Path) -> dict[str, Any]:
         root = _mapping(yaml.safe_load(path.read_text(encoding="utf-8")), "document")
     except (OSError, yaml.YAMLError) as exc:
         raise ConfigError(f"could not read {path}: {exc}") from exc
-    if root.get("apiVersion") != "outcomeci.com/v1alpha1":
-        raise ConfigError("apiVersion must be outcomeci.com/v1alpha1")
+    if root.get("apiVersion") != "outcomeci.workflow/v1alpha1":
+        raise ConfigError("apiVersion must be outcomeci.workflow/v1alpha1")
     return validate_lowered(root, path)
 
 
@@ -1260,7 +1260,10 @@ def _load_v1(path: Path) -> dict[str, Any]:
     return load_v1(path)
 
 
-COMPILER_REGISTRY = {"outcomeci.com/v1alpha1": _load_v1alpha1, "outcomeci.com/v1": _load_v1}
+COMPILER_REGISTRY = {
+    "outcomeci.workflow/v1alpha1": _load_v1alpha1,
+    "outcomeci.workflow/v1": _load_v1,
+}
 
 
 def load(path: Path) -> dict[str, Any]:

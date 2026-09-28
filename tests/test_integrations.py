@@ -29,7 +29,7 @@ def workflow(tmp_path: Path) -> Path:
     (instructions / "standup.md").write_text("# Standup\n", encoding="utf-8")
     (instructions / "intake.md").write_text("# Intake\n", encoding="utf-8")
     value = {
-        "apiVersion": "outcomeci.com/v1alpha1",
+        "apiVersion": "outcomeci.workflow/v1alpha1",
         "kind": "OutcomeWorkflow",
         "metadata": {"name": "delivery"},
         "spec": {

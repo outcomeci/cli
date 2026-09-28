@@ -14,7 +14,7 @@ EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "v1"
 
 def _write(tmp_path: Path, steps: list, **top) -> Path:
     document = {
-        "apiVersion": "outcomeci.com/v1",
+        "apiVersion": "outcomeci.workflow/v1",
         "trigger": "manual",
         "secrets": {"slack": "vault:slack/bot-token", "github": "vault:github/pat"},
         "apis": {
@@ -35,9 +35,9 @@ def _step(name: str, **fields) -> dict:
 
 def test_the_sentry_example_compiles_to_a_linear_graph():
     compiled = compile_workflow(EXAMPLES / "sentry-to-github-pr.outcome.yaml")
-    assert compiled["api_version"] == "outcomeci.com/v1"
+    assert compiled["api_version"] == "outcomeci.workflow/v1"
     assert compiled["graph"]["levels"] == [["triage"], ["approve"], ["fix"], ["announce"]]
-    assert compiled["source"]["apiVersion"] == "outcomeci.com/v1"
+    assert compiled["source"]["apiVersion"] == "outcomeci.workflow/v1"
     assert set(compiled["connectors"]) == {"slack", "github"}
     phases = compiled["instructions"]["phases"]
     assert phases["triage"]["path"] == ".outcomeci/instructions/triage-and-notify.md"

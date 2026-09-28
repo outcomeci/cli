@@ -1,6 +1,6 @@
 """Built-in OutcomeCI repository and Standup templates."""
 
-OUTCOME_YAML = """apiVersion: outcomeci.com/v1alpha1
+OUTCOME_YAML = """apiVersion: outcomeci.workflow/v1alpha1
 kind: OutcomeWorkflow
 metadata:
   name: default

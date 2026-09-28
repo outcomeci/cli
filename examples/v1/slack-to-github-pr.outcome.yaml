@@ -1,6 +1,6 @@
 # A feature request in Slack (an @mention or a DM) becomes a discussed plan,
 # then one pull request per repository it names.
-apiVersion: outcomeci.com/v1
+apiVersion: outcomeci.workflow/v1
 
 trigger: webhook   # the Slack relay forwards @mentions and DMs: channel, user, text
 

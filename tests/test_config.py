@@ -18,7 +18,7 @@ def _workflow(tmp_path: Path) -> Path:
     schemas.mkdir()
     (schemas / "packet.json").write_text(json.dumps({"type": "object", "required": ["intent"]}))
     value = {
-        "apiVersion": "outcomeci.com/v1alpha1",
+        "apiVersion": "outcomeci.workflow/v1alpha1",
         "kind": "OutcomeWorkflow",
         "metadata": {"name": "custom"},
         "spec": {
@@ -133,7 +133,7 @@ def test_compiler_registry_preserves_v1alpha1_contract(tmp_path: Path) -> None:
 
     compiled = compile_workflow(path)
 
-    assert compiled["api_version"] == "outcomeci.com/v1alpha1"
+    assert compiled["api_version"] == "outcomeci.workflow/v1alpha1"
     assert compiled["engine_version"] == "2"
 
 
