@@ -622,10 +622,18 @@ def _grantable(item: dict[str, Any], field: str) -> dict[str, Any]:
         grantable = _mapping(item["grantable"], f"{field}.grantable")
         for name, rule in grantable.items():
             rule = _mapping(rule, f"{field}.grantable.{name}")
-            if ("field" in rule) == ("path_prefix" in rule):
+            if sum(kind in rule for kind in ("field", "path_prefix", "response_in")) != 1:
                 raise ConfigError(
-                    f"{field}.grantable.{name} sets exactly one of field or path_prefix"
+                    f"{field}.grantable.{name} sets exactly one of field, path_prefix "
+                    "or response_in"
                 )
+            paths = rule.get("response_in", ["body"])
+            if (
+                not isinstance(paths, list)
+                or not paths
+                or not all(isinstance(path, str) and path.startswith("body") for path in paths)
+            ):
+                raise ConfigError(f"{field}.grantable.{name}.response_in must list body paths")
         result["grantable"] = grantable
     if item.get("deny"):
         deny = item["deny"]
@@ -641,6 +649,31 @@ def _grantable(item: dict[str, Any], field: str) -> dict[str, Any]:
     return result
 
 
+def _download(response: dict[str, Any], field: str) -> dict[str, Any]:
+    """A connector's download: an https host list, response paths and a limit."""
+    if "download" not in response:
+        return {}
+    download = _mapping(response["download"], f"{field}.response.download")
+    hosts = download.get("hosts")
+    if (
+        set(download) != {"url", "hosts", "name", "content_type", "max_bytes"}
+        or not all(
+            isinstance(download[key], str) and download[key].startswith("body")
+            for key in ("url", "name", "content_type")
+        )
+        or not isinstance(hosts, list)
+        or not hosts
+        or not all(isinstance(host, str) and host for host in hosts)
+        or not isinstance(download["max_bytes"], int)
+        or not 0 < download["max_bytes"] <= 100 * 1024 * 1024
+    ):
+        raise ConfigError(
+            f"{field}.response.download needs url, name and content_type paths, hosts "
+            "and max_bytes up to 100 MiB"
+        )
+    return {"download": dict(download)}
+
+
 LOWERED_ONLY = "is produced only by a newer API version's compiler"
 
 
@@ -653,6 +686,8 @@ def _reject_lowered_only(spec: dict[str, Any]) -> None:
                 continue
             if "grantable" in operation or "deny" in operation:
                 raise ConfigError(f"{field}: grantable and deny {LOWERED_ONLY}")
+            if isinstance(operation.get("response"), dict) and "download" in operation["response"]:
+                raise ConfigError(f"{field}.response.download {LOWERED_ONLY}")
             if isinstance(operation.get("request"), dict) and "methods" in operation["request"]:
                 raise ConfigError(f"{field}.request.methods {LOWERED_ONLY}")
     for name, phase in ((spec.get("agents") or {}).get("phases") or {}).items():
@@ -715,7 +750,7 @@ def _operation(value: Any, field: str) -> dict[str, Any]:
         "description": str(item.get("description", "")).strip(),
         "input": _schema(item.get("input"), f"{field}.input"),
         "request": normalized_request,
-        "response": {"expose": expose},
+        "response": {"expose": expose, **_download(response, field)},
         "policy": {
             "side_effect": side_effect,
             "approval": approval,

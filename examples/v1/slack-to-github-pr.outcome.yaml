@@ -31,6 +31,7 @@ steps:
       can:
         - github.read
         - slack.post: {channel: trigger.channel}
+        - slack.file: {channel: trigger.channel}   # open screenshots attached to the request
       returns:
         plan: {summary, repos: [{repo: {owner, name}, steps: [string]}]}
 

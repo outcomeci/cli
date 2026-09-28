@@ -56,7 +56,8 @@ def _payload() -> dict:
 class Slack:
     """One channel whose thread releases scripted human replies one at a time."""
 
-    def __init__(self, humans: list[str]):
+    def __init__(self, humans: list[str | dict]):
+        # A human reply is its text, or {"text", "files"} for one with attachments.
         self.humans = list(humans)
         self.root = REQUEST["ts"]
         self.thread: list[dict] = [{"ts": REQUEST["ts"], "text": REQUEST["text"], "user": "U1"}]
@@ -91,8 +92,26 @@ class Slack:
             # Slack returns the whole thread only for its root message.
             assert request.url.params["ts"] == self.root
             if self.humans and self.thread[-1].get("bot_id"):
-                self.thread.append({"ts": self._ts(), "text": self.humans.pop(0), "user": "U1"})
+                human = self.humans.pop(0)
+                human = human if isinstance(human, dict) else {"text": human}
+                self.thread.append({"ts": self._ts(), "user": "U1", **human})
             return httpx.Response(200, json={"ok": True, "messages": list(self.thread)})
+        if path == "/api/files.info":
+            return httpx.Response(
+                200,
+                json={
+                    "ok": True,
+                    "file": {
+                        "name": "error.png",
+                        "mimetype": "image/png",
+                        "size": 4,
+                        "channels": [REQUEST["channel"]],
+                        "url_private_download": "https://files.slack.com/files-pri/T-F/error.png",
+                    },
+                },
+            )
+        if request.url.host == "files.slack.com":
+            return httpx.Response(200, content=b"\x89PNG")
         return httpx.Response(404, json={"ok": False, "error": "not_found"})
 
 
@@ -113,6 +132,9 @@ class Agent:
     def __init__(self):
         self.steps: list[dict] = []
         self.turns: list[str] = []
+        self.files: list[dict] = []
+        self.opened: list[dict] = []
+        self.open_request_files = False
         self.denials: list[str] = []
 
     def __call__(self, runner, model, prompt, root, timeout, **kwargs):
@@ -124,6 +146,8 @@ class Agent:
         inputs = {item["name"]: item["value"] for item in context["inputs"]}
         step, outputs = context["step"], None
         if step == "draft":
+            if self.open_request_files:
+                self.opened.append(_call(env, "slack.file", {"file": "F0SHOT"})["output"])
             _call(env, "slack.post", {"text": "Plan: add --json", "thread_ts": REQUEST["ts"]})
             outputs = {"plan": PLAN}
         elif step == "implement":
@@ -157,6 +181,7 @@ class Agent:
         turns = json.loads(re.search(r"Discussion so far: (.+)\n", prompt).group(1))
         latest = turns[-1]["message"]
         self.turns.append(latest)
+        self.files.extend(turns[-1].get("files", []))
         if latest.startswith("also"):
             plan = {**plan, "summary": plan["summary"] + " and document it"}
             answer = {"status": "revised", "plan": plan, "message": "Updated: also document it."}
@@ -281,3 +306,39 @@ def test_a_discussion_nobody_answers_times_out(workflow, monkeypatch):
         (workflow / ".outcomeci/outcomes" / result["run_id"] / "discuss/outputs.json").read_text()
     )
     assert outputs == {"plan": PLAN, "status": "timed_out"}
+
+
+def test_a_screenshot_in_the_discussion_reaches_the_next_turn(workflow, monkeypatch):
+    screenshot = {
+        "text": "",
+        "subtype": "file_share",
+        "files": [{"id": "F0SHOT", "name": "error.png", "mimetype": "image/png"}],
+    }
+    slack = Slack([screenshot, "go ahead"])
+    agent = Agent()
+
+    result = _run(workflow, slack, agent, monkeypatch)
+
+    assert result["status"] == "completed"
+    (file,) = agent.files
+    assert file["name"] == "error.png" and file["content_type"] == "image/png"
+    assert Path(file["path"]).read_bytes() == b"\x89PNG"
+    assert Path(file["path"]).is_relative_to(
+        workflow / ".outcomeci/outcomes" / result["run_id"] / "attachments"
+    )
+
+
+def test_the_draft_step_opens_a_screenshot_attached_to_the_request(workflow, monkeypatch):
+    slack = Slack(["go ahead"])
+    agent = Agent()
+    agent.open_request_files = True
+
+    result = _run(workflow, slack, agent, monkeypatch)
+
+    assert result["status"] == "completed"
+    (opened,) = agent.opened
+    assert opened["mimetype"] == "image/png"
+    assert Path(opened["file"]["path"]).read_bytes() == b"\x89PNG"
+    assert Path(opened["file"]["path"]).is_relative_to(
+        workflow / ".outcomeci/outcomes" / result["run_id"] / "attachments"
+    )
