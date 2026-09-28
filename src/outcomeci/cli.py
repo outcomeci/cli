@@ -207,6 +207,11 @@ def parser() -> argparse.ArgumentParser:
         help="Continue automatically into each ready phase, including any real side "
         "effects (e.g. sending Slack messages) later phases perform",
     )
+    workflow_debug.add_argument(
+        "--image",
+        help="Run inside this runner image, leasing the workspace's cloud agent credential "
+        "(held exclusively for the run, as a cloud run holds it)",
+    )
     workflow_sync.add_argument("file", type=Path)
     workflow_sync.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     workflow_sync.add_argument("--name")
@@ -608,6 +613,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     agent=args.agent,
                     model=args.model,
                     auto_continue=args.auto_continue,
+                    image=args.image,
                 )
                 _print_json(result)
                 return 0

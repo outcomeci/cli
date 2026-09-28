@@ -19,6 +19,18 @@ from .process import ExecutionError
 from .security import private_path
 
 
+class CloudRequestError(ExecutionError):
+    """A cloud call that failed, with the HTTP status (None when unreachable)."""
+
+    def __init__(self, message: str, status: int | None):
+        super().__init__(message)
+        self.status = status
+
+    @property
+    def transient(self) -> bool:
+        return self.status is None or self.status == 429 or self.status >= 500
+
+
 def _raise_for_status(
     status: int, value: Any, expected: int | set[int], fallback: str, *, require_dict: bool = False
 ) -> None:
@@ -27,7 +39,7 @@ def _raise_for_status(
         ok = ok and isinstance(value, dict)
     if not ok:
         detail = value.get("detail") if isinstance(value, dict) else None
-        raise ExecutionError(str(detail or fallback))
+        raise CloudRequestError(str(detail or fallback), status)
 
 
 def credentials_path() -> Path:
@@ -56,7 +68,7 @@ def _request(
             follow_redirects=True,
         )
     except httpx.HTTPError as exc:
-        raise ExecutionError(f"could not reach OutcomeCI Cloud: {exc}") from exc
+        raise CloudRequestError(f"could not reach OutcomeCI Cloud: {exc}", None) from exc
     try:
         return response.status_code, json.loads(response.content) if response.content else {}
     except json.JSONDecodeError:
@@ -303,16 +315,63 @@ def sync_workflow(
 
 
 def issue_debug_lease(
-    workspace_id: str, workflow_id: str, *, invocation_id: str | None = None, ttl_seconds: int = 600
+    workspace_id: str,
+    workflow_id: str,
+    *,
+    invocation_id: str | None = None,
+    ttl_seconds: int = 600,
+    agent_provider: str | None = None,
 ) -> dict[str, Any]:
-    """Fetch a short-lived cloud vault lease for locally debugging one workflow."""
+    """Fetch a short-lived cloud vault lease for locally debugging one workflow.
+
+    With agent_provider, the lease also carries the workspace's agent credential
+    for that provider, held exclusively until complete_debug_agent_lease().
+    """
+    body: dict[str, Any] = {"invocation_id": invocation_id, "ttl_seconds": ttl_seconds}
+    if agent_provider is not None:
+        body["agent_provider"] = agent_provider
     status, value = _authorized_request(
         f"/workspaces/{workspace_id}/workflows/{workflow_id}/debug-lease",
         method="POST",
-        body={"invocation_id": invocation_id, "ttl_seconds": ttl_seconds},
+        body=body,
     )
     _raise_for_status(status, value, 200, "could not issue a debug lease", require_dict=True)
     return value
+
+
+def renew_debug_agent_lease(
+    workspace_id: str, workflow_id: str, job_id: str, token: str, ttl_seconds: int
+) -> None:
+    """Extend a debug run's agent lease so it stays exclusive while the run lasts."""
+    status, value = _authorized_request(
+        f"/workspaces/{workspace_id}/workflows/{workflow_id}/debug-lease/agent/{job_id}/renew",
+        method="POST",
+        body={"token": token, "ttl_seconds": ttl_seconds},
+    )
+    _raise_for_status(status, value, 200, "could not renew the debug agent lease")
+
+
+def complete_debug_agent_lease(
+    workspace_id: str,
+    workflow_id: str,
+    job_id: str,
+    token: str,
+    status_value: str,
+    *,
+    agent_credential: Any = None,
+    expected_credential_version: int | None = None,
+) -> None:
+    """Release a debug run's agent lease, writing back a rotated credential."""
+    body: dict[str, Any] = {"token": token, "status": status_value}
+    if agent_credential is not None:
+        body["agent_credential"] = agent_credential
+        body["expected_credential_version"] = expected_credential_version
+    status, value = _authorized_request(
+        f"/workspaces/{workspace_id}/workflows/{workflow_id}/debug-lease/agent/{job_id}/complete",
+        method="POST",
+        body=body,
+    )
+    _raise_for_status(status, value, 200, "could not release the debug agent lease")
 
 
 def complete_debug_lease(

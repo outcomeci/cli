@@ -276,3 +276,83 @@ def test_logout_revokes_before_removing_local_credentials(tmp_path: Path, monkey
     assert cloud.logout() == {"authenticated": False}
     assert calls[0][0][1] == "/auth/revoke"
     assert not cloud.credentials_path().exists()
+
+
+def _capture(monkeypatch, status=200, value=None):
+    calls = []
+
+    def request(path, *, method="GET", body=None):
+        calls.append({"path": path, "method": method, "body": body})
+        return status, {} if value is None else value
+
+    monkeypatch.setattr(cloud, "_authorized_request", request)
+    return calls
+
+
+def test_issue_debug_lease_asks_for_the_agent_credential(monkeypatch) -> None:
+    calls = _capture(monkeypatch, value={"lease_id": "l1"})
+
+    cloud.issue_debug_lease("w1", "wf1", ttl_seconds=3600, agent_provider="codex")
+
+    assert calls == [
+        {
+            "path": "/workspaces/w1/workflows/wf1/debug-lease",
+            "method": "POST",
+            "body": {"invocation_id": None, "ttl_seconds": 3600, "agent_provider": "codex"},
+        }
+    ]
+
+
+def test_renew_debug_agent_lease_sends_the_token_and_ttl(monkeypatch) -> None:
+    calls = _capture(monkeypatch, value={"expires_at": "2026-09-27T20:00:00+00:00"})
+
+    cloud.renew_debug_agent_lease("w1", "wf1", "job-1", "agent-token", 900)
+
+    assert calls[0]["path"] == "/workspaces/w1/workflows/wf1/debug-lease/agent/job-1/renew"
+    assert calls[0]["body"] == {"token": "agent-token", "ttl_seconds": 900}
+
+
+def test_complete_debug_agent_lease_sends_the_version_only_with_a_writeback(
+    monkeypatch,
+) -> None:
+    calls = _capture(monkeypatch, value={"completed": True})
+
+    cloud.complete_debug_agent_lease("w1", "wf1", "job-1", "agent-token", "failed")
+    cloud.complete_debug_agent_lease(
+        "w1",
+        "wf1",
+        "job-1",
+        "agent-token",
+        "completed",
+        agent_credential={"tokens": {}},
+        expected_credential_version=4,
+    )
+
+    assert calls[0]["path"] == "/workspaces/w1/workflows/wf1/debug-lease/agent/job-1/complete"
+    assert calls[0]["body"] == {"token": "agent-token", "status": "failed"}
+    assert calls[1]["body"] == {
+        "token": "agent-token",
+        "status": "completed",
+        "agent_credential": {"tokens": {}},
+        "expected_credential_version": 4,
+    }
+
+
+def test_cloud_errors_say_whether_they_are_worth_retrying(monkeypatch) -> None:
+    for status, transient in ((409, False), (404, False), (429, True), (503, True)):
+        _capture(monkeypatch, status=status, value={"detail": "nope"})
+        try:
+            cloud.renew_debug_agent_lease("w1", "wf1", "job-1", "t", 900)
+            raise AssertionError("expected CloudRequestError")
+        except cloud.CloudRequestError as exc:
+            assert (exc.status, exc.transient) == (status, transient)
+
+    def unreachable(method, url, **kwargs):
+        raise httpx.ConnectError("refused")
+
+    monkeypatch.setattr(cloud.httpx, "request", unreachable)
+    try:
+        cloud._request("https://api.outcomeci.test", "/x")
+        raise AssertionError("expected CloudRequestError")
+    except cloud.CloudRequestError as exc:
+        assert exc.status is None and exc.transient
