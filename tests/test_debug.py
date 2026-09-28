@@ -84,6 +84,14 @@ def test_unsynthesizable_trigger_type_requires_a_payload_file(monkeypatch, tmp_p
         )
 
 
+def test_missing_debug_lease_expiration_raises_a_clear_error(monkeypatch, tmp_path):
+    monkeypatch.setattr(debug, "compile_workflow", lambda config: COMPILED)
+    monkeypatch.setattr(debug, "issue_debug_lease", lambda *a, **k: _lease(expires_at=None))
+
+    with pytest.raises(ExecutionError, match="missing 'expires_at'"):
+        debug.run(tmp_path, tmp_path / "outcome.yml", "workspace_1", "workflow_1", trigger_name="go")
+
+
 def test_payload_file_overrides_synthesis(monkeypatch, tmp_path):
     monkeypatch.setattr(
         debug,
