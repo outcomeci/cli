@@ -1,0 +1,104 @@
+name: Tag release runner image
+
+# Gives a release's runner image its version tag, such as 0.41.3, in GHCR and
+# ECR. `oci workflow run` pulls ghcr.io/outcomeci/outcome-runner:<version>.
+#
+# The image itself is built once per commit by runner-container.yml on the
+# push to main and tagged sha-<commit>. This workflow adds the version tag to
+# that same image instead of building again: ECR tags are immutable, and a
+# second build of the commit could not push its sha tag. semantic-release
+# starts it after tagging (a tag pushed with GITHUB_TOKEN starts no workflow);
+# a hand-pushed v* tag starts it directly.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag, e.g. v0.41.3"
+        required: true
+        type: string
+
+concurrency:
+  group: runner-release-tag-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  GHCR_IMAGE: ghcr.io/outcomeci/outcome-runner
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 0
+
+      - name: Resolve the release
+        id: release
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::$TAG is not a vX.Y.Z release tag"
+            exit 1
+          fi
+          {
+            echo "version=${TAG#v}"
+            echo "sha=$(git rev-parse --short=7 "$TAG^{commit}")"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.RUNNER_IMAGE_AWS_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Add the version tag to the commit's image
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          SHA: ${{ steps.release.outputs.sha }}
+          ECR_IMAGE: ${{ steps.ecr.outputs.registry }}/outcomeci-outcome-runner
+        run: |
+          # The commit's image may still be building on the push to main.
+          for attempt in $(seq 1 40); do
+            if docker buildx imagetools inspect "$GHCR_IMAGE:sha-$SHA" >/dev/null 2>&1 \
+              && docker buildx imagetools inspect "$ECR_IMAGE:sha-$SHA" >/dev/null 2>&1; then
+              break
+            fi
+            if [ "$attempt" -eq 40 ]; then
+              echo "::error::no runner image tagged sha-$SHA after 20 minutes"
+              exit 1
+            fi
+            sleep 30
+          done
+          for image in "$GHCR_IMAGE" "$ECR_IMAGE"; do
+            if docker buildx imagetools inspect "$image:$VERSION" >/dev/null 2>&1; then
+              echo "$image:$VERSION already exists"
+              continue
+            fi
+            docker buildx imagetools create --tag "$image:$VERSION" "$image:sha-$SHA"
+            echo "tagged $image:$VERSION"
+          done

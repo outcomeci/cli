@@ -1,14 +1,16 @@
 name: Outcome runner container
 
+# Builds the runner image once per commit on main (tagged sha-<commit>, and
+# main in GHCR). runner-release-tag.yml adds a release's version tag to it.
+
 on:
   pull_request:
   push:
     branches: [main]
-    tags: ["v*"]
 
 concurrency:
   group: outcome-runner-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref_type != 'tag' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
@@ -72,7 +74,6 @@ jobs:
           images: ${{ env.IMAGE }}
           tags: |
             type=ref,event=branch
-            type=semver,pattern={{version}}
             type=sha
       - name: Generate immutable ECR image metadata
         if: github.event_name != 'pull_request'
@@ -81,7 +82,6 @@ jobs:
         with:
           images: ${{ steps.ecr.outputs.registry }}/outcomeci-outcome-runner
           tags: |
-            type=semver,pattern={{version}}
             type=sha
       - name: Publish immutable image
         if: github.event_name != 'pull_request'

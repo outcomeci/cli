@@ -46,8 +46,18 @@ def test_outcome_runner_uses_only_immutable_ecr_tags() -> None:
     )[0]
 
     assert "type=sha" in ecr_metadata
-    assert "type=semver" in ecr_metadata
     assert "type=ref,event=branch" not in ecr_metadata
+    assert 'tags: ["v*"]' not in source
+
+
+def test_a_release_tags_the_commits_runner_image_without_rebuilding() -> None:
+    semantic = (ROOT / ".github/workflows/semantic-release.yml").read_text()
+    tagging = (ROOT / ".github/workflows/runner-release-tag.yml").read_text()
+    assert "gh workflow run runner-release-tag.yml" in semantic
+    assert "docker buildx imagetools create" in tagging
+    assert "build-push-action" not in tagging
+    assert "ghcr.io/outcomeci/outcome-runner" in tagging
+    assert "outcomeci-outcome-runner" in tagging
 
 
 def test_homebrew_release_targets_outcomeci_package_and_tap() -> None:
