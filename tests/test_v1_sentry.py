@@ -17,7 +17,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from outcomeci import debug, integrations, local, v1_runtime
+from outcomeci import integrations, local, run_container, v1_runtime
 from outcomeci.capability import invoke_integration
 from outcomeci.config import compile_workflow
 from outcomeci.process import ExecutionError
@@ -203,7 +203,7 @@ def _run(root: Path, agent: Agent, monkeypatch, reviews: list | None = None) -> 
         credential_resolver=lambda reference: "xoxb-or-ghp-token",
         policy_reviewer=review,
     )
-    return debug.execute(
+    return run_container.execute(
         root, config, compile_workflow(config), "webhook", _payload(), options, auto_continue=True
     )
 

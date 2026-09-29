@@ -18,7 +18,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from outcomeci import debug, integrations, local, v1_runtime
+from outcomeci import integrations, local, run_container, v1_runtime
 from outcomeci.capability import invoke_integration
 from outcomeci.config import compile_workflow
 from outcomeci.process import ExecutionError
@@ -225,7 +225,7 @@ def _run(root: Path, slack: Slack, agent: Agent, monkeypatch, reviewed: list | N
             }
         ),
     )
-    return debug.execute(
+    return run_container.execute(
         root, config, compile_workflow(config), "webhook", _payload(), options, auto_continue=True
     )
 

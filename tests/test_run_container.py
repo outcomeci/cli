@@ -9,7 +9,7 @@ from unittest import mock
 
 import pytest
 
-from outcomeci import debug_container
+from outcomeci import run_container
 from outcomeci.process import ExecutionError
 
 
@@ -31,7 +31,7 @@ def _bundle(**overrides):
 
 @pytest.fixture
 def dirs(tmp_path, monkeypatch):
-    monkeypatch.setattr(debug_container, "compile_workflow", lambda config: {})
+    monkeypatch.setattr(run_container, "compile_workflow", lambda config: {})
     monkeypatch.setattr(os, "environ", dict(os.environ))
     source, output = tmp_path / "src", tmp_path / "out"
     source.mkdir()
@@ -54,9 +54,9 @@ def test_runs_on_a_private_copy_with_the_leased_credentials(monkeypatch, dirs, c
         (root_arg / "scratch.txt").write_text("agent output")
         return {"run_id": "run-1"}
 
-    monkeypatch.setattr(debug_container, "execute", execute)
+    monkeypatch.setattr(run_container, "execute", execute)
 
-    code = debug_container.run_bundle(_bundle(), source=source, output=output)
+    code = run_container.run_bundle(_bundle(), source=source, output=output)
 
     assert code == 0
     assert seen["root"] == output / "work"
@@ -77,9 +77,9 @@ def test_a_failed_run_leaves_the_codex_login_for_the_host(monkeypatch, dirs):
     def execute(*args, **kwargs):
         raise ExecutionError("phase failed")
 
-    monkeypatch.setattr(debug_container, "execute", execute)
+    monkeypatch.setattr(run_container, "execute", execute)
 
-    code = debug_container.run_bundle(_bundle(), source=source, output=output)
+    code = run_container.run_bundle(_bundle(), source=source, output=output)
 
     assert code == 1
     assert not (output / "result.json").exists()
@@ -94,10 +94,10 @@ def test_claude_gets_its_token(monkeypatch, dirs):
         seen["token"] = os.environ["CLAUDE_CODE_OAUTH_TOKEN"]
         return {"run_id": "run-1"}
 
-    monkeypatch.setattr(debug_container, "execute", execute)
+    monkeypatch.setattr(run_container, "execute", execute)
 
     bundle = _bundle(credentials=[{"provider": "claude", "credential": "claude-oauth-token"}])
-    assert debug_container.run_bundle(bundle, source=source, output=output) == 0
+    assert run_container.run_bundle(bundle, source=source, output=output) == 0
 
     assert seen["token"] == "claude-oauth-token"
     assert not (output / "home" / ".codex").exists()
@@ -105,10 +105,10 @@ def test_claude_gets_its_token(monkeypatch, dirs):
 
 def test_an_unsupported_provider_fails_cleanly(monkeypatch, dirs, capsys):
     source, output = dirs
-    monkeypatch.setattr(debug_container, "execute", mock.Mock())
+    monkeypatch.setattr(run_container, "execute", mock.Mock())
 
     assert (
-        debug_container.run_bundle(
+        run_container.run_bundle(
             _bundle(credentials=[{"provider": "gemini", "credential": "x"}]),
             source=source,
             output=output,
@@ -120,32 +120,32 @@ def test_an_unsupported_provider_fails_cleanly(monkeypatch, dirs, capsys):
 
 @pytest.mark.parametrize("stdin", ["", "not json", "[]", json.dumps({"provider": "codex"})])
 def test_main_rejects_a_malformed_bundle(monkeypatch, capsys, stdin):
-    monkeypatch.setattr(debug_container.sys, "stdin", io.StringIO(stdin))
+    monkeypatch.setattr(run_container.sys, "stdin", io.StringIO(stdin))
     run_bundle = mock.Mock()
-    monkeypatch.setattr(debug_container, "run_bundle", run_bundle)
+    monkeypatch.setattr(run_container, "run_bundle", run_bundle)
 
-    assert debug_container.main() == 2
-    assert "invalid debug bundle" in capsys.readouterr().err
+    assert run_container.main() == 2
+    assert "invalid run bundle" in capsys.readouterr().err
     run_bundle.assert_not_called()
 
 
 def test_main_runs_the_bundle_from_the_container_mounts(monkeypatch):
-    monkeypatch.setattr(debug_container.sys, "stdin", io.StringIO(json.dumps(_bundle())))
+    monkeypatch.setattr(run_container.sys, "stdin", io.StringIO(json.dumps(_bundle())))
     run_bundle = mock.Mock(return_value=0)
-    monkeypatch.setattr(debug_container, "run_bundle", run_bundle)
+    monkeypatch.setattr(run_container, "run_bundle", run_bundle)
 
-    assert debug_container.main() == 0
+    assert run_container.main() == 0
     assert run_bundle.call_args.kwargs == {
         "source": Path("/src"),
-        "output": Path("/debug-out"),
+        "output": Path("/oci-run"),
     }
 
 
 def test_main_exits_quietly_when_the_host_stops_the_run(monkeypatch, capsys):
-    monkeypatch.setattr(debug_container.sys, "stdin", io.StringIO(json.dumps(_bundle())))
-    monkeypatch.setattr(debug_container, "run_bundle", mock.Mock(side_effect=KeyboardInterrupt))
+    monkeypatch.setattr(run_container.sys, "stdin", io.StringIO(json.dumps(_bundle())))
+    monkeypatch.setattr(run_container, "run_bundle", mock.Mock(side_effect=KeyboardInterrupt))
 
-    assert debug_container.main() == 130
+    assert run_container.main() == 130
     assert "interrupted" in capsys.readouterr().err
 
 
@@ -158,22 +158,22 @@ def test_every_leased_login_is_installed(monkeypatch, dirs):
         seen["claude"] = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
         return {"run_id": "run-1"}
 
-    monkeypatch.setattr(debug_container, "execute", execute)
+    monkeypatch.setattr(run_container, "execute", execute)
     bundle = _bundle(
         credentials=[
             {"provider": "codex", "credential": {"tokens": {"refresh_token": "rt-1"}}},
             {"provider": "claude", "credential": "claude-oauth-token"},
         ]
     )
-    assert debug_container.run_bundle(bundle, source=source, output=output) == 0
+    assert run_container.run_bundle(bundle, source=source, output=output) == 0
     assert seen == {"codex": str(output / "home" / ".codex"), "claude": "claude-oauth-token"}
 
 
 def test_a_retry_bundle_resumes_the_recorded_run(monkeypatch, dirs):
     source, output = dirs
     resumed = mock.Mock(return_value={"run_id": "run-1", "status": "completed"})
-    monkeypatch.setattr(debug_container, "resume", resumed)
-    monkeypatch.setattr(debug_container, "execute", mock.Mock(side_effect=AssertionError))
+    monkeypatch.setattr(run_container, "resume", resumed)
+    monkeypatch.setattr(run_container, "execute", mock.Mock(side_effect=AssertionError))
 
-    assert debug_container.run_bundle(_bundle(retry="run-1"), source=source, output=output) == 0
+    assert run_container.run_bundle(_bundle(retry="run-1"), source=source, output=output) == 0
     assert resumed.call_args.args[3] == "run-1"

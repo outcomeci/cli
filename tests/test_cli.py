@@ -198,3 +198,17 @@ def test_validate_and_compile_read_the_workflow_in_a_directory(tmp_path: Path, c
     assert compiled["workflow_revision"] == revision
     assert compiled["instructions"]["phase"]["path"] == ".outcomeci/instructions/plan.md"
     assert main(["workflow", "compile", *config, "--step", "missing"]) == 2
+
+
+def test_cloud_run_flags_are_checked_before_anything_runs(capsys) -> None:
+    assert main(["workflow", "run", "--replay", "inv-1"]) == 2
+    assert "need --cloud" in capsys.readouterr().err
+    assert main(["workflow", "run", "--cloud", "wf-1"]) == 2
+    assert "--cloud needs --workspace-id" in capsys.readouterr().err
+
+
+def test_workflow_debug_is_gone() -> None:
+    import pytest
+
+    with pytest.raises(SystemExit):
+        main(["workflow", "debug", "--help"])

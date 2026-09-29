@@ -16,7 +16,7 @@ from outcomeci_connectors.providers.slack.setup import manifest as slack_manifes
 from outcomeci_connectors.providers.slack.setup import setup as setup_slack
 from outcomeci_connectors.providers.slack.setup import status as slack_status
 
-from . import __version__, debug, slack_vault
+from . import __version__, slack_vault, workflow_run
 from .capability import invoke_integration
 from .cloud import auth_status as cloud_auth_status
 from .cloud import get_workflow, sync_workflow, vault_request
@@ -106,79 +106,48 @@ def parser() -> argparse.ArgumentParser:
     )
     workflow_publish.add_argument("--model")
     workflow_publish.add_argument("--sensitive-term", action="append", default=[])
-    workflow_debug = workflow_commands.add_parser(
-        "debug",
-        help="Run a backend: outcomeci workflow locally against real cloud vault credentials",
-    )
-    workflow_debug.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
-    workflow_debug.add_argument("--workflow", required=True, help="Cloud workflow identifier")
-    workflow_debug.add_argument("--dir", type=Path, default=Path.cwd())
-    workflow_debug.add_argument("--config", type=Path, default=Path("outcome.yml"))
-    workflow_debug.add_argument(
-        "--trigger", help="Named trigger to synthesize a payload for; ignored with --run"
-    )
-    workflow_debug.add_argument(
-        "--run", dest="invocation_id", help="Claim and replay a real queued invocation by id"
-    )
-    workflow_debug.add_argument(
-        "--payload", type=Path, help="JSON file to use as the trigger payload"
-    )
-    workflow_debug.add_argument("--agent", choices=AGENT_CHOICES)
-    workflow_debug.add_argument("--model")
-    workflow_debug.add_argument(
-        "--auto-continue",
-        action="store_true",
-        help="Continue automatically into each ready phase, including any real side "
-        "effects (e.g. sending Slack messages) later phases perform",
-    )
-    workflow_debug.add_argument(
-        "--image",
-        help="Run inside this runner image, leasing the workspace's cloud agent credential "
-        "(held exclusively for the run, as a cloud run holds it)",
-    )
-    workflow_debug.add_argument(
-        "--retry",
-        metavar="RUN_ID",
-        help="Resume a run in --dir that stopped on an error, from its recorded state",
-    )
-    workflow_debug.add_argument(
-        "--network",
-        help="Docker network for the --image container, such as host when the default "
-        "bridge network cannot resolve DNS",
-    )
-    workflow_run = workflow_commands.add_parser(
+    run_command = workflow_commands.add_parser(
         "run",
-        help="Run a workflow in the runner container with the local Vault and this "
-        "machine's agent login",
+        help="Run a workflow in the runner container, with the local Vault and this "
+        "machine's agent login, or with --cloud the workspace's",
     )
-    workflow_run.add_argument("--dir", type=Path, default=Path.cwd())
-    workflow_run.add_argument("--config", type=Path, default=Path("outcome.yml"))
-    workflow_run.add_argument(
+    run_command.add_argument("--dir", type=Path, default=Path.cwd())
+    run_command.add_argument("--config", type=Path, default=Path("outcome.yml"))
+    run_command.add_argument(
         "--trigger", help="Trigger to run; defaults to the only trigger, or the manual one"
     )
-    workflow_run.add_argument(
-        "--payload", type=Path, help="JSON file to use as the trigger payload"
-    )
-    workflow_run.add_argument("--agent", choices=AGENT_CHOICES)
-    workflow_run.add_argument("--model")
-    workflow_run.add_argument(
+    run_command.add_argument("--payload", type=Path, help="JSON file to use as the trigger payload")
+    run_command.add_argument("--agent", choices=AGENT_CHOICES)
+    run_command.add_argument("--model")
+    run_command.add_argument(
         "--auto-continue",
         action="store_true",
         help="Continue automatically into each ready step, including any real side "
         "effects (e.g. sending Slack messages) later steps perform",
     )
-    workflow_run.add_argument(
+    run_command.add_argument(
         "--image", help="Runner image; defaults to the one released with this CLI"
     )
-    workflow_run.add_argument(
+    run_command.add_argument(
         "--retry",
         metavar="RUN_ID",
         help="Resume a run in --dir that stopped on an error, from its recorded state",
     )
-    workflow_run.add_argument(
+    run_command.add_argument(
         "--network",
         help="Docker network for the container, such as host when the default bridge "
         "network cannot resolve DNS",
+    )
+    run_command.add_argument(
+        "--cloud",
+        metavar="WORKFLOW_ID",
+        help="Use this cloud workflow's Vault grants and the workspace's connected agent",
+    )
+    run_command.add_argument("--workspace-id", help="Cloud workspace identifier (with --cloud)")
+    run_command.add_argument(
+        "--replay",
+        metavar="INVOCATION_ID",
+        help="Claim and run a real queued invocation of the --cloud workflow",
     )
     workflow_sync.add_argument("file", type=Path)
     workflow_sync.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
@@ -395,8 +364,31 @@ def main(argv: Sequence[str] | None = None) -> int:
                 return 0
             if args.workflow_command == "run":
                 root = args.dir.resolve()
+                if args.cloud:
+                    if not args.workspace_id:
+                        raise ExecutionError("--cloud needs --workspace-id")
+                    _print_json(
+                        workflow_run.run_cloud(
+                            root,
+                            root / args.config,
+                            args.workspace_id,
+                            args.cloud,
+                            trigger_name=args.trigger,
+                            replay=args.replay,
+                            payload_path=args.payload,
+                            agent=args.agent,
+                            model=args.model,
+                            auto_continue=args.auto_continue,
+                            image=args.image,
+                            network=args.network,
+                            retry_run=args.retry,
+                        )
+                    )
+                    return 0
+                if args.replay or args.workspace_id:
+                    raise ExecutionError("--replay and --workspace-id need --cloud")
                 _print_json(
-                    debug.run_local(
+                    workflow_run.run_local(
                         root,
                         root / args.config,
                         trigger_name=args.trigger,
@@ -409,26 +401,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                         retry_run=args.retry,
                     )
                 )
-                return 0
-            if args.workflow_command == "debug":
-                root = args.dir.resolve()
-                config = (root / args.config).resolve()
-                result = debug.run(
-                    root,
-                    config,
-                    args.workspace_id,
-                    args.workflow,
-                    trigger_name=args.trigger,
-                    invocation_id=args.invocation_id,
-                    payload_path=args.payload,
-                    agent=args.agent,
-                    model=args.model,
-                    auto_continue=args.auto_continue,
-                    image=args.image,
-                    network=args.network,
-                    retry_run=args.retry,
-                )
-                _print_json(result)
                 return 0
             result = sync_workflow(
                 args.file,

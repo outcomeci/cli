@@ -1,18 +1,12 @@
-"""Run a backend: outcomeci workflow locally against real cloud vault credentials.
+"""Run a workflow inside the runner container: `oci workflow run`.
 
-`run_local` runs a workflow the same way in the runner image with no cloud at
-all: secrets come from the checkout's local Vault and the agent login from
-this machine.
-
-For debugging a cloud run without waiting on a merge-build-deploy cycle: this
-issues a short-lived vault lease scoped to one workflow (gated server-side on
-the same permission as managing that workflow's vault grants) and executes it
-through the same local.trigger() path the ECS runner itself uses, with full,
-unredacted output in this terminal.
-
-With an image, the run executes inside that runner container instead of on
-this host, with the workspace's cloud agent credential leased the same way a
-cloud run receives it.
+Every run executes in the runner image through the same path a cloud run
+uses. By default its secrets come from the checkout's local Vault and its
+agent login from this machine. With `--cloud`, secrets come from a short-lived
+lease on the workspace's Vault (gated server-side on the same permission as
+managing that workflow's Vault grants) and the agent login is the workspace's
+connected agent, held exclusively for the run as a cloud run holds it.
+`--replay` claims a real queued invocation and runs it the same way.
 """
 
 from __future__ import annotations
@@ -45,17 +39,9 @@ from .cloud import (
 )
 from .config import compile_workflow
 from .process import ExecutionError
+from .run_container import CONTAINER_OUTPUT, CONTAINER_SOURCE, OUTPUT_HOME, OUTPUT_WORK
 from .security import atomic_write_json
 
-# Container layout. The checkout is mounted read-only at CONTAINER_SOURCE and
-# copied into the private output mount, where the run's work dir and HOME live:
-# the agent runs with its own sandbox off (the container is the boundary), so
-# it never gets write access to the host checkout, and the host can read the
-# run's state and a rotated Codex login back however the container ended.
-CONTAINER_SOURCE = "/src"
-CONTAINER_OUTPUT = "/debug-out"
-OUTPUT_WORK = "work"
-OUTPUT_HOME = "home"
 IMAGE_LEASE_TTL_SECONDS = 3600
 AGENT_RENEW_INTERVAL_SECONDS = 300
 AGENT_RENEW_TTL_SECONDS = 900
@@ -71,25 +57,6 @@ _RELEASE = re.compile(r"^\d+\.\d+\.\d+$")
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
-def _lease_resolver(values: dict[str, Any], expires_at: str):
-    expires = datetime.fromisoformat(expires_at)
-
-    def resolver(reference: str) -> Any:
-        if datetime.now(UTC) >= expires:
-            raise ExecutionError("debug credential lease expired; run the command again")
-        if not reference.startswith("vault:"):
-            raise ExecutionError("cloud credentials must use vault references")
-        path = reference.removeprefix("vault:")
-        if path not in values:
-            raise ExecutionError(
-                f"credential {path!r} is not granted to this workflow; "
-                "grant it with `oci vault grant`"
-            )
-        return values[path]
-
-    return resolver
-
-
 def _synthesize_payload(trigger_name: str, definition: dict[str, Any]) -> dict[str, Any]:
     trigger_type = definition["type"]
     if trigger_type == "manual":
@@ -100,9 +67,9 @@ def _synthesize_payload(trigger_name: str, definition: dict[str, Any]) -> dict[s
             "type": "cron",
             "schedule_id": str(uuid.uuid4()),
             "generation": 1,
-            "schedule_arn": "arn:debug:local:schedule",
+            "schedule_arn": "arn:oci:local:schedule",
             "scheduled_at": datetime.now(UTC).isoformat(),
-            "execution_id": f"debug-{uuid.uuid4()}",
+            "execution_id": f"local-{uuid.uuid4()}",
             "attempt_number": 1,
             "trigger_name": trigger_name,
         }
@@ -136,73 +103,9 @@ def _runners(compiled: dict[str, Any], agent: str | None) -> list[str]:
     return found
 
 
-def _continue(
-    root: Path,
-    config: Path,
-    compiled: dict[str, Any],
-    result: dict[str, Any],
-    options: Any,
-    *,
-    auto_continue: bool,
-) -> dict[str, Any]:
-    """With auto_continue, drive each ready phase in turn."""
-    from . import local
-
-    phase_count = len(compiled["instructions"]["phases"]) if auto_continue else 0
-    while auto_continue and len(result.get("completed_phases", [])) != phase_count:
-        if not result.get("ready_phases") or result.get("status") == "completed":
-            break
-        next_phase = result["ready_phases"][0]
-        print(f"Continuing into phase {next_phase!r}...", file=sys.stderr)
-        result = local.continue_run(root, config, result["run_id"], approve=True, options=options)
-    return result
-
-
-def resume(
-    root: Path,
-    config: Path,
-    compiled: dict[str, Any],
-    run_id: str,
-    options: Any,
-    *,
-    auto_continue: bool,
-) -> dict[str, Any]:
-    """Retry a run that stopped on an error or was interrupted, from its recorded state.
-
-    A debug run is owned by this one process, so a run still marked running
-    here was interrupted, and is recorded as such before the retry."""
-    from . import local
-
-    state = local._read(root, run_id)
-    if state.get("status") == "running":
-        state.update({"status": "error", "error": "the debug run was interrupted"})
-        local._write(root, state)
-    result = local.retry(root, config, run_id, options=options)
-    return _continue(root, config, compiled, result, options, auto_continue=auto_continue)
-
-
-def execute(
-    root: Path,
-    config: Path,
-    compiled: dict[str, Any],
-    name: str,
-    payload: dict[str, Any],
-    options: Any,
-    *,
-    auto_continue: bool,
-) -> dict[str, Any]:
-    """Trigger the run and, with auto_continue, drive each ready phase in turn."""
-    from . import local
-
-    result = local.trigger(root, config, name, payload, options=options)
-    return _continue(root, config, compiled, result, options, auto_continue=auto_continue)
-
-
 def _resolve_trigger(
     compiled: dict[str, Any], trigger_name: str | None, payload_path: Path | None
 ) -> tuple[str, dict[str, Any]]:
-    if not trigger_name:
-        raise ExecutionError("pass --trigger <name>, or --run <invocation-id> to replay one")
     definition = compiled["triggers"].get(trigger_name)
     if definition is None:
         raise ExecutionError(f"workflow does not declare trigger {trigger_name}")
@@ -214,14 +117,14 @@ def _resolve_trigger(
     return trigger_name, payload
 
 
-def run(
+def run_cloud(
     root: Path,
     config: Path,
     workspace_id: str,
     workflow_id: str,
     *,
     trigger_name: str | None = None,
-    invocation_id: str | None = None,
+    replay: str | None = None,
     payload_path: Path | None = None,
     agent: str | None = None,
     model: str | None = None,
@@ -230,97 +133,71 @@ def run(
     network: str | None = None,
     retry_run: str | None = None,
 ) -> dict[str, Any]:
-    from . import local
-
+    """Run in the runner image with the workspace's Vault and connected agent."""
+    root, config = root.resolve(), config.resolve()
+    if not config.is_relative_to(root):
+        raise ExecutionError("the workflow file must live inside --dir")
     compiled = compile_workflow(config)
     _check_agent(agent, model)
     # Everything that can fail on the user's input fails here, before a lease
     # takes the workspace's agent connection away from its cloud runs.
-    if network is not None and image is None:
-        raise ExecutionError("--network applies only to --image runs")
-    if retry_run is not None and invocation_id is not None:
-        raise ExecutionError("choose --retry or --run, not both")
-    if image is not None:
-        root, config = root.resolve(), config.resolve()
-        if not config.is_relative_to(root):
-            raise ExecutionError("the workflow file must live inside --dir to run in an image")
-        _check_image(image)
-        _flush_pending_releases()
+    if replay is not None and (retry_run or trigger_name or payload_path):
+        raise ExecutionError(
+            "--replay runs the recorded trigger; drop --trigger, --payload, --retry"
+        )
+    image = image or default_image()
+    _check_image(image)
+    _flush_pending_releases()
     if retry_run is not None:
         _retryable(root, retry_run)
         name, payload = None, None
-    else:
-        name, payload = (
-            _resolve_trigger(compiled, trigger_name, payload_path)
-            if invocation_id is None
-            else (None, None)
+    elif replay is None:
+        name, payload = _resolve_trigger(
+            compiled, trigger_name or _default_trigger(compiled), payload_path
         )
-    leases = (
-        _issue_leases(workspace_id, workflow_id, _runners(compiled, agent), invocation_id)
-        if image is not None
-        else [issue_debug_lease(workspace_id, workflow_id, invocation_id=invocation_id)]
-    )
+    else:
+        name, payload = None, None
+    leases = _issue_leases(workspace_id, workflow_id, _runners(compiled, agent), replay)
     lease = leases[0]
 
     with ExitStack() as held:
         try:
-            if image is not None:
-                held.enter_context(_termination_interrupts())
-            hold = (
-                held.enter_context(_hold_agent_lease(workspace_id, workflow_id, leases))
-                if image is not None
-                else None
-            )
-            if invocation_id is not None:
+            held.enter_context(_termination_interrupts())
+            hold = held.enter_context(_hold_agent_lease(workspace_id, workflow_id, leases))
+            if replay is not None:
                 name = lease.get("trigger_name")
                 if not name:
                     raise ExecutionError(
                         "this invocation has no recorded trigger; it may predate this contract"
                     )
                 payload = lease.get("input") or {}
-            where = f"inside {image}" if image is not None else "locally"
             what = f"run {retry_run}" if retry_run else f"trigger {name!r}"
             print(
-                f"Debugging {what} {where} against workspace {workspace_id}, "
-                f"workflow {workflow_id}, using real cloud vault credentials.",
+                f"Running {what} inside {image} with workspace {workspace_id}'s Vault "
+                f"for workflow {workflow_id}.",
                 file=sys.stderr,
             )
-            if hold is not None:
-                result = _run_in_image(
-                    image,
-                    root,
-                    config,
-                    lease,
-                    hold,
-                    name=name,
-                    payload=payload,
-                    agent=agent,
-                    model=model,
-                    auto_continue=auto_continue,
-                    network=network,
-                    retry_run=retry_run,
-                )
-            else:
-                options = local.ExecutionOptions(
-                    agent=agent,
-                    model=model,
-                    credential_resolver=_lease_resolver(lease["values"], lease["expires_at"]),
-                    _container_isolated=False,
-                )
-                result = (
-                    resume(root, config, compiled, retry_run, options, auto_continue=auto_continue)
-                    if retry_run
-                    else execute(
-                        root, config, compiled, name, payload, options, auto_continue=auto_continue
-                    )
-                )
+            result = _run_in_image(
+                image,
+                root,
+                config,
+                lease,
+                hold,
+                name=name,
+                payload=payload,
+                agent=agent,
+                model=model,
+                auto_continue=auto_continue,
+                network=network,
+                retry_run=retry_run,
+            )
         except BaseException:
-            if invocation_id is not None:
+            if replay is not None:
                 with suppress(ExecutionError):
-                    complete_debug_lease(workspace_id, workflow_id, invocation_id, "failed")
+                    complete_debug_lease(workspace_id, workflow_id, replay, "failed")
             raise
-    if invocation_id is not None:
-        complete_debug_lease(workspace_id, workflow_id, invocation_id, "completed")
+    if replay is not None:
+        complete_debug_lease(workspace_id, workflow_id, replay, "completed")
     return result
 
 
@@ -341,7 +218,7 @@ def _retryable(root: Path, run_id: str) -> None:
 def _issue_leases(
     workspace_id: str, workflow_id: str, runners: list[str], invocation_id: str | None
 ) -> list[dict[str, Any]]:
-    """One debug lease per runner the run needs, each holding that runner's login.
+    """One Vault lease per runner the run needs, each holding that runner's login.
 
     Only the first claims a replayed invocation. When a later one is refused,
     the logins already leased are released before the refusal is raised.
@@ -390,7 +267,7 @@ def _termination_interrupts() -> Iterator[None]:
 
 
 def _check_image(image: str) -> None:
-    """Fail before any lease when the image cannot run a debug job at all."""
+    """Fail before any lease when the image cannot run a workflow at all."""
     try:
         probe = subprocess.run(
             [
@@ -401,7 +278,7 @@ def _check_image(image: str) -> None:
                 "/opt/oci/bin/python",
                 image,
                 "-c",
-                "import outcomeci.debug_container",
+                "import outcomeci.run_container",
             ],
             capture_output=True,
             text=True,
@@ -411,8 +288,8 @@ def _check_image(image: str) -> None:
     if probe.returncode != 0:
         detail = (probe.stderr.strip().splitlines() or ["no output"])[-1]
         raise ExecutionError(
-            f"{image} cannot run debug jobs; it needs an OutcomeCI runner build "
-            f"that includes outcomeci.debug_container ({detail})"
+            f"{image} cannot run workflows; it needs an OutcomeCI runner build "
+            f"that includes outcomeci.run_container ({detail})"
         )
 
 
@@ -437,8 +314,8 @@ def _hold_agent_lease(
     """
     agent_leases = [lease.get("agent") for lease in leases]
     if not agent_leases or not all(isinstance(item, dict) for item in agent_leases):
-        raise ExecutionError("the debug lease carried no agent credential for the image")
-    with tempfile.TemporaryDirectory(prefix="oci-debug-") as output:
+        raise ExecutionError("the Vault lease carried no agent login for the run")
+    with tempfile.TemporaryDirectory(prefix="oci-run-") as output:
         os.chmod(output, 0o700)
         hold = _AgentHold(agent_leases, Path(output))
         try:
@@ -515,8 +392,8 @@ def _release_agent_lease(
     pending.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     atomic_write_json(pending, release, mode=0o600)
     print(
-        f"oci: warning: could not release the debug agent lease ({error}); saved it to "
-        f"{pending} and the next `oci workflow debug --image` run sends it again",
+        f"oci: warning: could not release the agent login lease ({error}); saved it to "
+        f"{pending} and the next `oci workflow run --cloud` sends it again",
         file=sys.stderr,
     )
 
@@ -636,7 +513,7 @@ def _run_in_image(
             for item in hold.agent_leases
         ],
     }
-    container = f"oci-debug-{uuid.uuid4().hex[:12]}"
+    container = f"oci-run-{uuid.uuid4().hex[:12]}"
     command = [
         "docker",
         "run",
@@ -665,7 +542,7 @@ def _run_in_image(
         "/opt/oci/bin/python",
         image,
         "-m",
-        "outcomeci.debug_container",
+        "outcomeci.run_container",
     ]
     try:
         returncode = _run_container(command, container, json.dumps(bundle))
@@ -673,7 +550,7 @@ def _run_in_image(
         _import_run_state(hold.output / OUTPUT_WORK, root)
     result_file = hold.output / "result.json"
     if returncode != 0 or not result_file.is_file():
-        raise ExecutionError(f"the debug run failed inside {image} (exit {returncode})")
+        raise ExecutionError(f"the run failed inside {image} (exit {returncode})")
     result = json.loads(result_file.read_text(encoding="utf-8"))
     hold.status = "failed" if result.get("status") == "error" else "completed"
     return result
