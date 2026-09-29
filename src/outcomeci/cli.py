@@ -16,7 +16,7 @@ from outcomeci_connectors.providers.slack.setup import manifest as slack_manifes
 from outcomeci_connectors.providers.slack.setup import setup as setup_slack
 from outcomeci_connectors.providers.slack.setup import status as slack_status
 
-from . import __version__, debug, slack_vault, tunnels
+from . import __version__, debug, slack_vault
 from .capability import invoke_integration
 from .cloud import auth_status as cloud_auth_status
 from .cloud import get_workflow, sync_workflow, vault_request
@@ -64,15 +64,6 @@ def parser() -> argparse.ArgumentParser:
     )
     root.add_argument("--version", action="version", version=f"oci {__version__}")
     commands = root.add_subparsers(dest="command", required=True)
-    tunnel = commands.add_parser("tunnel", help="Expose an approved local HTTP target")
-    tunnel_commands = tunnel.add_subparsers(dest="tunnel_command", required=True)
-    for name in ("start", "status", "stop"):
-        action = tunnel_commands.add_parser(name)
-        action.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
-        if name == "start":
-            action.add_argument("--target", required=True)
-            action.add_argument("--ttl-seconds", type=int, default=900)
-            action.add_argument("--public", action="store_true", help="Acknowledge public exposure")
     auth = commands.add_parser("auth", help="Authenticate with OutcomeCI Cloud")
     auth_commands = auth.add_subparsers(dest="auth_command", required=True)
     auth_login = auth_commands.add_parser("login")
@@ -335,21 +326,6 @@ def parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
-        if args.command == "tunnel":
-            if args.tunnel_command == "start":
-                tunnels.start(
-                    args.workspace_id,
-                    args.target,
-                    ttl_seconds=args.ttl_seconds,
-                    public=args.public,
-                )
-            else:
-                _print_json(
-                    tunnels.status(args.workspace_id)
-                    if args.tunnel_command == "status"
-                    else tunnels.stop(args.workspace_id)
-                )
-            return 0
         if args.command == "auth":
             if args.auth_command == "login":
                 if args.key_stdin:
