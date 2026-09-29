@@ -465,9 +465,11 @@ class PolicyExecutor:
                     if decision != "allow":
                         call["status"] = "denied"
                         self._save(state)
+                        # The reviewer's reason goes back to the agent, so it can
+                        # correct the proposal or report why its step stopped.
                         raise IntegrationError(
                             "integration.policy_denied",
-                            "policy did not approve this exact proposal",
+                            f"policy did not approve this exact proposal ({decision}): {reason}",
                             category="policy",
                         )
                 call["status"] = "pending"

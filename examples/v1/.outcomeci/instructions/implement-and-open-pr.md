@@ -21,3 +21,7 @@ for how your change fits the other repositories' changes.
 
 If the repository does not match what your steps assume, stop without opening
 a pull request and return the reason. Never open a partial or guessed change.
+
+If the policy reviewer refuses a change and you cannot make it within the
+approved plan, stop without opening a pull request. Return as `reason` what you
+tried and the reviewer's reason, so the requester learns why there is no PR.

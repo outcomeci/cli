@@ -216,15 +216,17 @@ class NoPR(sentry.Agent):
         return super().__call__(runner, model, prompt, root, timeout, **kwargs)
 
 
-def test_a_fix_without_a_pull_request_skips_the_announcement(workflow, monkeypatch):
+def test_a_fix_without_a_pull_request_announces_why(workflow, monkeypatch):
     services = sentry.Services()
     sentry._serve(monkeypatch, services)
+    agent = NoPR()
 
-    result = sentry._run(workflow, NoPR(), monkeypatch)
+    result = sentry._run(workflow, agent, monkeypatch)
 
     assert result["status"] == "completed"
-    assert result["skipped_phases"] == ["announce"]
-    assert result["skip_reasons"]["announce"] == "input fix.pr is absent"
+    assert "announce" in result["completed_phases"]
+    inputs = {item["name"]: item["value"] for item in agent.prompts["announce"]["inputs"]}
+    assert inputs["fix"] == {"reason": "unclear root cause"}
 
 
 class Scripted(slack_example.Agent):
@@ -518,4 +520,45 @@ def test_a_waiting_step_says_when_its_message_was_never_posted(tmp_path):
 
     assert missing_call(root, "run-1", "triage.calls.slack.post") == (
         "step triage never called slack.post"
+    )
+
+
+def test_a_denied_change_tells_the_agent_the_reviewers_reason(tmp_path, monkeypatch):
+    compiled = compile_workflow(sentry.EXAMPLES / sentry.WORKFLOW)
+    monkeypatch.setattr(sentry.integrations, "_safe_destination", lambda url, allow: None)
+    executor = IntegrationExecutor(
+        compiled,
+        resolver=lambda ref: "ghp-test-credential",
+        transport=httpx.MockTransport(lambda request: httpx.Response(200, json={})),
+        reviewed=True,
+    )
+    policy = PolicyExecutor(
+        executor,
+        tmp_path,
+        {},
+        reviewer=lambda proposal: {
+            "decision": "deny",
+            "proposal_sha256": proposal["proposal_sha256"],
+            "reason": "It logs a different message than the plan asks for.",
+        },
+        grants=[
+            {
+                "capability": "github.write",
+                "args": {"repo": {"owner": "outcomeci", "name": "cli"}},
+                "as": None,
+            }
+        ],
+        step_policy={"content": "One PR.", "policy": {}},
+    )
+
+    with pytest.raises(IntegrationError) as exc:
+        policy.execute(
+            "github.write",
+            {"method": "POST", "path": "/repos/outcomeci/cli/pulls"},
+            phase="fix",
+        )
+
+    assert str(exc.value) == (
+        "policy did not approve this exact proposal (deny): "
+        "It logs a different message than the plan asks for."
     )
