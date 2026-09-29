@@ -142,7 +142,7 @@ def list_entries(root: Path) -> dict[str, Any]:
     }
 
 
-def resolve(root: Path, reference: str) -> str | dict[str, str]:
+def resolve(root: Path, reference: str) -> str | dict[str, Any]:
     if not reference.startswith("vault:"):
         raise ExecutionError("local Vault references must start with vault:")
     _envelope_value, _key_value, payload = _load(root)
@@ -155,8 +155,24 @@ def resolve(root: Path, reference: str) -> str | dict[str, str]:
         structured = json.loads(value)
     except json.JSONDecodeError:
         return value
+    if (
+        isinstance(structured, dict)
+        and isinstance(structured.get("credential_type"), str)
+        and isinstance(structured.get("secrets"), dict)
+    ):
+        return structured
     if isinstance(structured, dict) and all(
         isinstance(key, str) and isinstance(item, str) for key, item in structured.items()
     ):
         return structured
     return value
+
+
+def rotate(root: Path, reference: str, secrets: dict[str, str]) -> None:
+    """Replace secret fields of a typed credential, such as a rotated refresh token."""
+    path = reference.removeprefix("vault:")
+    current = resolve(root, reference)
+    if not isinstance(current, dict) or not isinstance(current.get("secrets"), dict):
+        raise ExecutionError(f"local Vault entry {path} is not a typed credential")
+    updated = {**current, "secrets": {**current["secrets"], **secrets}}
+    put(root, path, json.dumps(updated))

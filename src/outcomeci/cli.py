@@ -16,7 +16,7 @@ from outcomeci_connectors.providers.slack.setup import manifest as slack_manifes
 from outcomeci_connectors.providers.slack.setup import setup as setup_slack
 from outcomeci_connectors.providers.slack.setup import status as slack_status
 
-from . import __version__, slack_vault, workflow_run
+from . import __version__, credentials, slack_vault, workflow_run
 from .capability import invoke_integration
 from .cloud import auth_status as cloud_auth_status
 from .cloud import get_workflow, sync_workflow, vault_request
@@ -38,6 +38,31 @@ from .publication import prepare_publication
 from .repository import initialize
 
 AGENT_CHOICES = ("codex", "claude", "opencode")
+
+
+def _secret_input(args: argparse.Namespace, *, prompt: bool) -> tuple[str | None, dict | None]:
+    """The secret a put stores: one value, or a JSON object of secret fields."""
+    if args.secrets_json_stdin:
+        try:
+            secrets = json.loads(sys.stdin.read())
+        except json.JSONDecodeError as exc:
+            raise ExecutionError("--secrets-json-stdin requires a JSON object") from exc
+        if not isinstance(secrets, dict) or not all(
+            isinstance(key, str) and isinstance(item, str) for key, item in secrets.items()
+        ):
+            raise ExecutionError("--secrets-json-stdin requires string fields")
+        return None, secrets
+    if args.value_stdin:
+        value = sys.stdin.read().rstrip("\n")
+    elif args.value is not None:
+        value = args.value
+    elif prompt:
+        value = getpass.getpass("Secret value: ")
+    else:
+        value = ""
+    if not value:
+        raise ExecutionError("secret value is required; use --value-stdin or --value")
+    return value, None
 
 
 def _add_dir_argument(command: argparse.ArgumentParser) -> None:
@@ -167,32 +192,9 @@ def parser() -> argparse.ArgumentParser:
     vault_put.add_argument("--name")
     vault_put.add_argument("--value")
     vault_put.add_argument("--value-stdin", action="store_true")
-    vault_put.add_argument(
-        "--secrets-json-stdin",
-        action="store_true",
-        help="Read a JSON object of secret fields from stdin",
-    )
     vault_put.add_argument("--workflow", action="append", default=[])
     vault_put.add_argument("--provider", help="Credential provider, for example slack")
-    vault_put.add_argument(
-        "--credential-type",
-        choices=("api_key", "auth_header", "oauth2", "oidc"),
-        help="Typed credential contract used by workflow brokers",
-    )
-    vault_put.add_argument("--header-name")
-    vault_put.add_argument("--prefix")
-    vault_put.add_argument("--scheme")
-    vault_put.add_argument("--token-url")
-    vault_put.add_argument("--issuer-url")
-    vault_put.add_argument("--client-id")
-    vault_put.add_argument("--grant-type", choices=("client_credentials", "refresh_token"))
-    vault_put.add_argument("--scope", action="append", default=[])
-    vault_put.add_argument("--audience")
-    vault_put.add_argument(
-        "--secret-name",
-        choices=("api_key", "value", "client_secret", "refresh_token"),
-        help="Field receiving --value/--value-stdin; inferred for common types",
-    )
+    credentials.add_arguments(vault_put)
     vault_rotate = vault_commands.add_parser("rotate")
     vault_rotate.add_argument("entry_id")
     vault_rotate.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
@@ -215,6 +217,7 @@ def parser() -> argparse.ArgumentParser:
     local_vault_put.add_argument("path")
     local_vault_put.add_argument("--value")
     local_vault_put.add_argument("--value-stdin", action="store_true")
+    credentials.add_arguments(local_vault_put)
     _add_dir_argument(local_vault_put)
     init = commands.add_parser("init", help="Write a starter workflow into a directory")
     init.add_argument("--dir", type=Path, default=Path.cwd())
@@ -418,68 +421,58 @@ def main(argv: Sequence[str] | None = None) -> int:
                 elif args.local_vault_command == "list":
                     _print_json(list_local_vault_entries(workspace), sort_keys=True)
                 else:
-                    value = (
-                        sys.stdin.read().rstrip("\n")
-                        if args.value_stdin
-                        else args.value
-                        if args.value is not None
-                        else getpass.getpass("Secret value: ")
-                    )
+                    if args.secrets_json_stdin and not args.credential_type:
+                        raise ExecutionError("--secrets-json-stdin needs --credential-type")
+                    value, secrets = _secret_input(args, prompt=True)
+                    if args.credential_type:
+                        value = json.dumps(
+                            credentials.build(
+                                args.credential_type, args, value=value, secrets=secrets
+                            )
+                        )
                     _print_json(put_local_vault_entry(workspace, args.path, value))
                 return 0
             if args.vault_command == "list":
                 result = vault_request(args.workspace_id, "list")
-            elif args.vault_command in {"put", "rotate"}:
-                reads_stdin = args.value_stdin or getattr(args, "secrets_json_stdin", False)
-                value = sys.stdin.read().rstrip("\n") if reads_stdin else args.value
-                if not value:
-                    raise ExecutionError("secret value is required; use --value-stdin or --value")
-                if args.vault_command == "put":
-                    typed = bool(args.provider or args.credential_type)
-                    if typed and not (args.provider and args.credential_type):
-                        raise ExecutionError(
-                            "--provider and --credential-type must be provided together"
-                        )
-                    if typed and not reads_stdin:
-                        raise ExecutionError("typed credentials must be supplied through stdin")
-                    secrets = None
-                    if args.secrets_json_stdin:
-                        try:
-                            secrets = json.loads(value)
-                        except json.JSONDecodeError as exc:
-                            raise ExecutionError(
-                                "--secrets-json-stdin requires a JSON object"
-                            ) from exc
-                        if not isinstance(secrets, dict) or not all(
-                            isinstance(key, str) and isinstance(item, str)
-                            for key, item in secrets.items()
-                        ):
-                            raise ExecutionError("--secrets-json-stdin requires string fields")
+            elif args.vault_command == "put":
+                typed = bool(args.provider or args.credential_type)
+                if typed and not (args.provider and args.credential_type):
+                    raise ExecutionError(
+                        "--provider and --credential-type must be provided together"
+                    )
+                if args.secrets_json_stdin and not typed:
+                    raise ExecutionError("--secrets-json-stdin needs --credential-type")
+                value, secrets = _secret_input(args, prompt=False)
+                if typed and args.value is not None:
+                    raise ExecutionError("typed credentials must be supplied through stdin")
+                if typed:
                     result = vault_request(
                         args.workspace_id,
-                        "put_credential" if typed else "put",
+                        "put_credential",
+                        path=args.path,
+                        display_name=args.name or args.path,
+                        provider=args.provider,
+                        credential=credentials.build(
+                            args.credential_type, args, value=value, secrets=secrets
+                        ),
+                        workflow_ids=args.workflow,
+                    )
+                else:
+                    result = vault_request(
+                        args.workspace_id,
+                        "put",
                         path=args.path,
                         display_name=args.name or args.path,
                         value=value,
                         workflow_ids=args.workflow,
-                        provider=args.provider,
-                        credential_type=args.credential_type,
-                        header_name=args.header_name,
-                        prefix=args.prefix,
-                        scheme=args.scheme,
-                        token_url=args.token_url,
-                        issuer_url=args.issuer_url,
-                        client_id=args.client_id,
-                        grant_type=args.grant_type,
-                        scopes=args.scope,
-                        audience=args.audience,
-                        secret_name=args.secret_name,
-                        secrets=secrets,
                     )
-                else:
-                    result = vault_request(
-                        args.workspace_id, "rotate", entry_id=args.entry_id, value=value
-                    )
+            elif args.vault_command == "rotate":
+                value = sys.stdin.read().rstrip("\n") if args.value_stdin else args.value
+                if not value:
+                    raise ExecutionError("secret value is required; use --value-stdin or --value")
+                result = vault_request(
+                    args.workspace_id, "rotate", entry_id=args.entry_id, value=value
+                )
             elif args.vault_command == "grant":
                 result = vault_request(
                     args.workspace_id, "grant", entry_id=args.entry_id, workflow_ids=args.workflow

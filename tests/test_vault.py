@@ -66,8 +66,11 @@ def test_vault_put_typed_credential_keeps_value_private(monkeypatch, capsys) -> 
     )
     assert seen["operation"] == "put_credential"
     assert seen["provider"] == "slack"
-    assert seen["credential_type"] == "auth_header"
-    assert seen["value"] == "xoxb-private"
+    assert seen["credential"] == {
+        "credential_type": "auth_header",
+        "configuration": {},
+        "secrets": {"value": "xoxb-private"},
+    }
     assert "xoxb-private" not in capsys.readouterr().out
 
 
@@ -91,7 +94,7 @@ def test_vault_put_rejects_incomplete_typed_contract(monkeypatch, capsys) -> Non
     assert "--provider and --credential-type" in capsys.readouterr().err
 
 
-def test_typed_auth_header_uses_credential_endpoint_and_safe_defaults(monkeypatch) -> None:
+def test_typed_credential_is_posted_to_the_credential_endpoint(monkeypatch) -> None:
     seen = {}
 
     def request(path, *, method="GET", body=None):
@@ -105,17 +108,149 @@ def test_typed_auth_header_uses_credential_endpoint_and_safe_defaults(monkeypatc
         path="slack/bot-token",
         display_name="Slack bot token",
         provider="slack",
-        credential_type="auth_header",
-        value="xoxb-private",
+        credential={
+            "credential_type": "auth_header",
+            "configuration": {},
+            "secrets": {"value": "xoxb-private"},
+        },
         workflow_ids=["workflow_1"],
     )
     assert seen["path"].endswith("/vault/credentials")
-    assert seen["body"]["service"] == "slack"
-    assert seen["body"]["configuration"] == {
-        "header_name": "Authorization",
-        "scheme": "Bearer",
+    assert seen["body"] == {
+        "path": "slack/bot-token",
+        "display_name": "Slack bot token",
+        "service": "slack",
+        "credential_type": "auth_header",
+        "configuration": {},
+        "secrets": {"value": "xoxb-private"},
+        "workflow_ids": ["workflow_1"],
     }
-    assert seen["body"]["secrets"] == {"value": "xoxb-private"}
+
+
+def _put(monkeypatch, stdin: str, *arguments: str) -> dict:
+    seen: dict = {}
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO(stdin))
+    monkeypatch.setattr(
+        cli,
+        "vault_request",
+        lambda workspace, operation, **values: seen.update(values) or {"id": "entry"},
+    )
+    assert cli.main(["vault", "put", *arguments, "--workspace-id", "workspace_1"]) == 0
+    return seen["credential"]
+
+
+def test_basic_and_app_installation_credentials(monkeypatch) -> None:
+    basic = _put(
+        monkeypatch,
+        '{"username": "izzy", "password": "pw"}',
+        "jira/login",
+        "--provider",
+        "jira",
+        "--credential-type",
+        "basic",
+        "--secrets-json-stdin",
+    )
+    assert basic == {
+        "credential_type": "basic",
+        "configuration": {},
+        "secrets": {"username": "izzy", "password": "pw"},
+    }
+    app = _put(
+        monkeypatch,
+        "-----BEGIN PRIVATE KEY-----\n",
+        "github/app",
+        "--provider",
+        "github",
+        "--credential-type",
+        "app_installation",
+        "--app-id",
+        "123",
+        "--installation-id",
+        "456",
+        "--value-stdin",
+    )
+    assert app["configuration"] == {"app_id": "123", "installation_id": "456"}
+    assert app["secrets"] == {"private_key": "-----BEGIN PRIVATE KEY-----"}
+
+
+def test_a_typed_credential_is_checked_before_it_is_sent(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO("key\n"))
+    arguments = ["github/app", "--provider", "github", "--credential-type", "app_installation"]
+    assert cli.main(["vault", "put", *arguments, "--workspace-id", "w", "--value-stdin"]) == 2
+    assert "--app-id, --installation-id" in capsys.readouterr().err
+    monkeypatch.setattr(cli.sys, "stdin", io.StringIO("key\n"))
+    arguments = ["slack/token", "--provider", "slack", "--credential-type", "auth_header"]
+    assert (
+        cli.main(
+            [
+                "vault",
+                "put",
+                *arguments,
+                "--token-url",
+                "https://x",
+                "--workspace-id",
+                "w",
+                "--value-stdin",
+            ]
+        )
+        == 2
+    )
+    assert "--token-url does not apply to a auth_header credential" in capsys.readouterr().err
+
+
+def test_the_local_vault_stores_typed_credentials_like_the_cloud(
+    monkeypatch, tmp_path, capsys
+) -> None:
+    from outcomeci.local_vault import resolve
+
+    monkeypatch.setenv("OUTCOMECI_CONFIG_HOME", str(tmp_path / "config"))
+    assert cli.main(["vault", "local", "init", "--dir", str(tmp_path)]) == 0
+    monkeypatch.setattr(
+        cli.sys, "stdin", io.StringIO('{"client_secret": "cs", "refresh_token": "rt"}')
+    )
+    arguments = [
+        "vault",
+        "local",
+        "put",
+        "slack/app",
+        "--credential-type",
+        "oauth2",
+        "--client-id",
+        "cid",
+        "--grant-type",
+        "refresh_token",
+        "--secrets-json-stdin",
+        "--dir",
+        str(tmp_path),
+    ]
+    assert cli.main(arguments) == 0
+    assert "rt" not in capsys.readouterr().out.replace('"stored"', "")
+    assert resolve(tmp_path, "vault:slack/app") == {
+        "credential_type": "oauth2",
+        "configuration": {"client_id": "cid", "grant_type": "refresh_token"},
+        "secrets": {"client_secret": "cs", "refresh_token": "rt"},
+    }
+
+
+def test_a_local_rotation_replaces_only_the_rotated_field(monkeypatch, tmp_path) -> None:
+    import json
+
+    from outcomeci.integrations import local_credential_resolver
+    from outcomeci.local_vault import initialize, put, resolve
+
+    monkeypatch.setenv("OUTCOMECI_CONFIG_HOME", str(tmp_path / "config"))
+    initialize(tmp_path)
+    stored = {
+        "credential_type": "oauth2",
+        "configuration": {"client_id": "cid"},
+        "secrets": {"client_secret": "cs", "refresh_token": "rt-1"},
+    }
+    put(tmp_path, "slack/app", json.dumps(stored))
+    local_credential_resolver(tmp_path).rotate("vault:slack/app", {"refresh_token": "rt-2"})
+    assert resolve(tmp_path, "vault:slack/app")["secrets"] == {
+        "client_secret": "cs",
+        "refresh_token": "rt-2",
+    }
 
 
 def test_typed_credential_rejects_secret_in_process_arguments(capsys) -> None:
@@ -175,4 +310,4 @@ def test_oauth_secret_object_is_read_from_stdin(monkeypatch) -> None:
         )
         == 0
     )
-    assert seen["secrets"] == {"client_secret": "one", "refresh_token": "two"}
+    assert seen["credential"]["secrets"] == {"client_secret": "one", "refresh_token": "two"}

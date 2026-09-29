@@ -78,15 +78,30 @@ def environment_resolver(reference: str) -> Mapping[str, str] | str:
     return value
 
 
-def local_credential_resolver(root: Path) -> CredentialResolver:
-    def resolve(reference: str) -> Mapping[str, str] | str:
+class LocalCredentialResolver:
+    """Resolve `vault:` references from the checkout's local Vault, else the
+    environment, and write a rotated secret back to the local Vault."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    def __call__(self, reference: str) -> Mapping[str, Any] | str:
         if reference.startswith("vault:"):
             from .local_vault import resolve as resolve_local_vault
 
-            return resolve_local_vault(root, reference)
+            return resolve_local_vault(self.root, reference)
         return environment_resolver(reference)
 
-    return resolve
+    def rotate(self, reference: str, secrets: dict[str, str]) -> None:
+        if not reference.startswith("vault:"):
+            raise ExecutionError("only a local Vault credential can store a rotated secret")
+        from .local_vault import rotate as rotate_local_vault
+
+        rotate_local_vault(self.root, reference, secrets)
+
+
+def local_credential_resolver(root: Path) -> CredentialResolver:
+    return LocalCredentialResolver(root)
 
 
 def _lookup(value: Any, path: str) -> Any:
