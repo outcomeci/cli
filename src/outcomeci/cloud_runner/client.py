@@ -8,7 +8,7 @@ from typing import Any
 
 import httpx
 
-from .models import AuthorizationClaim, ExecutionClaim
+from .models import AuthorizationClaim
 
 
 class CoreError(RuntimeError):
@@ -47,8 +47,6 @@ class CoreClient:
             else "workflow-invocations"
             if mode == "workflow"
             else "publication-jobs"
-            if mode == "publication"
-            else "outcome-jobs"
         )
         self._url = f"{base_url}/v1/internal/{resource}/{object_id}"
         self._base_url = base_url
@@ -111,9 +109,6 @@ class CoreClient:
     def claim_authorization(self) -> AuthorizationClaim:
         return AuthorizationClaim.parse(self._post("claim", {}))
 
-    def claim_execution(self) -> ExecutionClaim:
-        return ExecutionClaim.parse(self._post("claim", {}))
-
     def claim_workflow(self) -> dict[str, Any]:
         return self._post("claim", {})
 
@@ -158,7 +153,6 @@ class CoreClient:
         expected_credential_version: int | None = None,
         agent_credential: Any | None = None,
         retryable: bool = False,
-        pending_interaction: dict[str, str] | None = None,
     ) -> None:
         self._post(
             "complete",
@@ -172,19 +166,8 @@ class CoreClient:
                 "expected_credential_version": expected_credential_version,
                 "agent_credential": agent_credential,
                 "retryable": retryable,
-                "pending_interaction": pending_interaction,
             },
         )
-
-    def workflow_restore_artifacts(self, lease_token: str) -> list[dict[str, str]]:
-        """Fetch the artifact bundle a paused run stored -- the counterpart to
-        the artifacts workflow_complete(status="awaiting_input") sends. Kept
-        as a separate call rather than embedded in claim_workflow()'s
-        response, which is sized for content/files/vault, not a
-        base64-inflated 20MiB artifact bundle."""
-        result = self._post("artifacts/restore", {"lease_token": lease_token})
-        artifacts = result.get("artifacts")
-        return artifacts if isinstance(artifacts, list) else []
 
     def verification(
         self, session_token: str, url: str, code: str | None, expires_at: str | None
@@ -206,20 +189,6 @@ class CoreClient:
 
     def complete(self, session_token: str, payload: dict[str, Any]) -> None:
         self._post("complete", payload, session_token)
-
-    def heartbeat(
-        self, session_token: str, lease_id: str, phase: str, detail: str | None = None
-    ) -> dict[str, Any]:
-        payload: dict[str, Any] = {"lease_id": lease_id, "phase": phase}
-        if detail:
-            payload["detail"] = detail
-        result = self._post("heartbeat", payload, session_token)
-        if not isinstance(result.get("lease_expires_at"), str) or result.get("phase") != phase:
-            raise CoreError("invalid_core_response")
-        return result
-
-    def log(self, session_token: str, payload: dict[str, Any]) -> None:
-        self._post("logs", payload, session_token)
 
     def fail(
         self,

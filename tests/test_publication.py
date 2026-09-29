@@ -10,23 +10,22 @@ from outcomeci.repository import initialize
 
 def test_publication_agent_must_sanitize_and_compile(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "source"
-    initialize(source, "filesystem")
+    initialize(source)
     workflow = source / "outcome.yml"
-    content = workflow.read_text().replace("requester", "izzy")
-    workflow.write_text(content)
+    workflow.write_text(workflow.read_text().replace("vault:github", "vault:izzy/github"))
     destination = tmp_path / "public"
 
     def invoke(*_args, **_kwargs):
         config = destination / "outcome.yml"
-        config.write_text(config.read_text().replace("izzy", "requester"))
+        config.write_text(config.read_text().replace("vault:izzy/github", "vault:github"))
         (destination / ".outcomeci/publication-requirements.json").write_text(
             json.dumps(
                 [
                     {
-                        "id": "requester",
-                        "json_path": "$.spec.agents.phases.intake.humans.before[0].participant",
-                        "kind": "identity",
-                        "description": "Person requesting the outcome",
+                        "id": "github_token",
+                        "json_path": "$.secrets.github",
+                        "kind": "vault",
+                        "description": "GitHub token that can read the repository",
                         "required": True,
                     }
                 ]
@@ -36,9 +35,9 @@ def test_publication_agent_must_sanitize_and_compile(tmp_path: Path, monkeypatch
             json.dumps(
                 [
                     {
-                        "requirement": "requester",
+                        "requirement": "github_token",
                         "files": ["outcome.yml"],
-                        "reason": "Makes the requester portable",
+                        "reason": "Each consumer stores their own GitHub token",
                     }
                 ]
             )
@@ -50,16 +49,16 @@ def test_publication_agent_must_sanitize_and_compile(tmp_path: Path, monkeypatch
     )
     assert result["compiler_version"] == "1"
     assert len(result["package_digest"]) == 64
-    assert result["requirements"][0]["id"] == "requester"
+    assert result["requirements"][0]["id"] == "github_token"
 
 
 def test_publication_blocks_agent_that_leaves_pii(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "source"
-    initialize(source, "filesystem")
+    initialize(source)
     destination = tmp_path / "public"
 
     def invoke(*_args, **_kwargs):
-        (destination / ".outcomeci/instructions/standup.md").write_text("Contact izzy@example.com")
+        (destination / ".outcomeci/instructions/plan.md").write_text("Contact izzy@example.com")
         (destination / ".outcomeci/publication-requirements.json").write_text("[]")
         (destination / ".outcomeci/publication-report.json").write_text("[]")
 
@@ -70,12 +69,14 @@ def test_publication_blocks_agent_that_leaves_pii(tmp_path: Path, monkeypatch) -
 
 def test_publication_preserves_custom_workflow_filename(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "source"
-    initialize(source, "filesystem")
+    initialize(source)
     workflow = source / "custom-workflow.yml"
     (source / "outcome.yml").rename(workflow)
     destination = tmp_path / "public"
 
     def invoke(*_args, **_kwargs):
+        config = destination / "custom-workflow.yml"
+        config.write_text(config.read_text().replace("vault:github", "vault:shared/github"))
         (destination / ".outcomeci/publication-requirements.json").write_text("[]")
         (destination / ".outcomeci/publication-report.json").write_text("[]")
 
@@ -86,7 +87,7 @@ def test_publication_preserves_custom_workflow_filename(tmp_path: Path, monkeypa
 
 def test_publication_repairs_an_invalid_first_candidate(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "source"
-    initialize(source, "filesystem")
+    initialize(source)
     destination = tmp_path / "public"
     attempts = 0
 
@@ -94,6 +95,8 @@ def test_publication_repairs_an_invalid_first_candidate(tmp_path: Path, monkeypa
         nonlocal attempts
         attempts += 1
         manifest = "{}" if attempts == 1 else "[]"
+        config = destination / "outcome.yml"
+        config.write_text(config.read_text().replace("vault:github", "vault:shared/github"))
         (destination / ".outcomeci/publication-requirements.json").write_text(manifest)
         (destination / ".outcomeci/publication-report.json").write_text(manifest)
 
@@ -106,13 +109,9 @@ def test_publication_repairs_an_invalid_first_candidate(tmp_path: Path, monkeypa
 
 def test_publication_blocks_original_vault_path_left_by_agent(tmp_path: Path, monkeypatch) -> None:
     source = tmp_path / "source"
-    initialize(source, "filesystem")
+    initialize(source)
     workflow = source / "outcome.yml"
-    workflow.write_text(
-        workflow.read_text().replace(
-            "spec:\n", "spec:\n  credential_ref: vault://brickbuds/slack\n", 1
-        )
-    )
+    workflow.write_text(workflow.read_text().replace("vault:github", "vault:brickbuds/github"))
     destination = tmp_path / "public"
 
     def invoke(*_args, **_kwargs):
@@ -128,44 +127,26 @@ def test_publication_replaces_vault_path_with_consumer_requirement(
     tmp_path: Path, monkeypatch
 ) -> None:
     source = tmp_path / "source"
-    initialize(source, "filesystem")
+    initialize(source)
     workflow = source / "outcome.yml"
     workflow.write_text(
-        workflow.read_text().replace(
-            "  connections: []",
-            """  connections:
-    slack:
-      provider: http
-      base_url: https://slack.com
-      auth:
-        type: bearer
-        credential: vault:brickbuds/production/slack-token""",
-        )
+        workflow.read_text().replace("vault:github", "vault:brickbuds/production/github-token")
     )
     destination = tmp_path / "public"
 
     def invoke(*_args, **_kwargs):
         config = destination / "outcome.yml"
         config.write_text(
-            config.read_text()
-            .replace("vault:brickbuds/production/slack-token", "vault:slack/bot-token")
-            .replace("https://slack.com", "https://api.example.com")
+            config.read_text().replace("vault:brickbuds/production/github-token", "vault:github")
         )
         (destination / ".outcomeci/publication-requirements.json").write_text(
             json.dumps(
                 [
                     {
-                        "id": "slack_bot_token",
-                        "json_path": "$.spec.connections.slack.auth.credential",
+                        "id": "github_token",
+                        "json_path": "$.secrets.github",
                         "kind": "vault",
-                        "description": "Slack bot token credential",
-                        "required": True,
-                    },
-                    {
-                        "id": "slack_api_endpoint",
-                        "json_path": "$.spec.connections.slack.base_url",
-                        "kind": "endpoint",
-                        "description": "Slack-compatible API endpoint",
+                        "description": "GitHub token credential",
                         "required": True,
                     },
                 ]
@@ -175,14 +156,9 @@ def test_publication_replaces_vault_path_with_consumer_requirement(
             json.dumps(
                 [
                     {
-                        "requirement": "slack_bot_token",
+                        "requirement": "github_token",
                         "files": ["outcome.yml"],
-                        "reason": "Requires each consumer to provide their own Slack token",
-                    },
-                    {
-                        "requirement": "slack_api_endpoint",
-                        "files": ["outcome.yml"],
-                        "reason": "Makes the API endpoint explicit for each consumer",
+                        "reason": "Requires each consumer to provide their own GitHub token",
                     },
                 ]
             )
@@ -191,12 +167,26 @@ def test_publication_replaces_vault_path_with_consumer_requirement(
     monkeypatch.setattr(publication, "invoke", invoke)
     result = publication.prepare_publication(workflow, destination, agent="codex")
     assert result["requirements"][0] == {
-        "id": "slack_bot_token",
-        "json_path": "$.spec.connections.slack.auth.credential",
+        "id": "github_token",
+        "json_path": "$.secrets.github",
         "kind": "vault",
-        "description": "Slack bot token credential",
+        "description": "GitHub token credential",
         "required": True,
     }
     public_content = (destination / result["workflow_file"]).read_text()
-    assert "vault:brickbuds/production/slack-token" not in public_content
-    assert "vault:slack/bot-token" in public_content
+    assert "vault:brickbuds/production/github-token" not in public_content
+    assert "vault:github" in public_content
+
+
+def test_publication_flags_a_v1_secret_the_agent_left_in_place(tmp_path: Path, monkeypatch) -> None:
+    source = tmp_path / "source"
+    initialize(source)
+    destination = tmp_path / "public"
+
+    def invoke(*_args, **_kwargs):
+        (destination / ".outcomeci/publication-requirements.json").write_text("[]")
+        (destination / ".outcomeci/publication-report.json").write_text("[]")
+
+    monkeypatch.setattr(publication, "invoke", invoke)
+    with pytest.raises(ExecutionError, match="outcome.yml: configured sensitive term"):
+        publication.prepare_publication(source / "outcome.yml", destination, agent="codex")

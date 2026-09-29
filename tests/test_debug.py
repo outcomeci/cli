@@ -38,7 +38,6 @@ def test_synthesizes_a_cron_payload_and_runs_with_the_leased_resolver(monkeypatc
         assert options.credential_resolver("vault:slack/bot-token")["secrets"]["value"] == (
             "xoxb-secret"
         )
-        assert options.execution_backend == "outcomeci"
         assert options._container_isolated is False
         return {"run_id": "run-1"}
 
@@ -225,7 +224,6 @@ def test_auto_continue_drives_through_ready_phases(monkeypatch, tmp_path):
     assert result["completed_phases"] == ["resolve_analytics", "notify"]
     assert len(continue_calls) == 1
     assert continue_calls[0][0:2] == ("run-1", True)
-    assert continue_calls[0][2]["options"].execution_backend == "outcomeci"
     assert continue_calls[0][2]["options"]._container_isolated is False
 
 

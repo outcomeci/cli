@@ -53,7 +53,6 @@ def run_bundle(bundle: dict[str, Any], *, source: Path, output: Path) -> int:
             agent=bundle.get("agent"),
             model=bundle.get("model"),
             credential_resolver=_lease_resolver(bundle["values"], bundle["expires_at"]),
-            execution_backend="outcomeci",
             _container_isolated=True,
         )
         compiled = compile_workflow(config)

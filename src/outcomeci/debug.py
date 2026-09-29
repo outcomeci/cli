@@ -144,10 +144,7 @@ def _continue(
 
     phase_count = len(compiled["instructions"]["phases"]) if auto_continue else 0
     while auto_continue and len(result.get("completed_phases", [])) != phase_count:
-        if not result.get("ready_phases") or result.get("status") in {
-            "awaiting_input",
-            "completed",
-        }:
+        if not result.get("ready_phases") or result.get("status") == "completed":
             break
         next_phase = result["ready_phases"][0]
         print(f"Continuing into phase {next_phase!r}...", file=sys.stderr)
@@ -301,7 +298,6 @@ def run(
                     agent=agent,
                     model=model,
                     credential_resolver=_lease_resolver(lease["values"], lease["expires_at"]),
-                    execution_backend="outcomeci",
                     _container_isolated=False,
                 )
                 result = (

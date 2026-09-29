@@ -1,17 +1,12 @@
-"""Filesystem-backed execution of an OutcomeWorkflow with a local agent."""
+"""Execution of an outcomeci.workflow/v1 run, one step at a time."""
 
 from __future__ import annotations
 
-import fcntl
-import hashlib
 import json
-import os
 import re
 import shlex
 import subprocess
 import sys
-import time
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -28,26 +23,21 @@ from .contracts import FORMAT_CHECKER, ContractError, validate_trigger_payload
 from .execution_events import event, safe_text
 from .integrations import CredentialResolver, IntegrationExecutor
 from .manifest import build_manifest
-from .outcome import _validate_trajectory
 from .process import ExecutionError, invoke
 from .security import atomic_write_json
-from .transcripts import _select_sessions, _session_details, _transcripts
+from .transcripts import _transcripts
 
 
 @dataclass
 class ExecutionOptions:
-    """The agent/execution-context bundle every entry point that can reach
-    _execute() needs. _execute(), trigger(), continue_run(), retry(), and
-    respond() previously each redeclared and forwarded these same 7
-    keywords by hand; a new option added to _execute() only had to be
-    forgotten in one of the four public callers to silently not apply."""
+    """The agent and execution context every entry point that can reach
+    _execute() forwards: trigger(), continue_run() and retry()."""
 
     agent: str | None = None
     model: str | None = None
     credential_resolver: CredentialResolver | None = None
     event_sink: Callable[[dict[str, Any]], None] | None = None
     policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None
-    execution_backend: str = "filesystem"
     _container_isolated: bool = False
 
 
@@ -118,10 +108,7 @@ def _artifact_path(outcome_root: Path, contract: dict[str, Any]) -> Path:
 def _prepare_writable_artifacts(
     compiled: dict[str, Any], outcome_root: Path, phase: str
 ) -> list[Path]:
-    standup = outcome_root / "standup.md"
-    standup.parent.mkdir(parents=True, exist_ok=True)
-    standup.touch(exist_ok=True)
-    paths = [standup]
+    paths = []
     for contract in compiled["instructions"]["phases"][phase]["expects"]["outputs"]:
         path = _artifact_path(outcome_root, contract)
         if contract["media_type"] == "inode/directory":
@@ -293,79 +280,6 @@ def _repair_outputs(
     )
 
 
-def _input_context(
-    compiled: dict[str, Any], outcome_root: Path, phase: str, state: dict[str, Any]
-) -> list[dict[str, Any]]:
-    values = []
-    for contract in compiled["instructions"]["phases"][phase]["expects"]["inputs"]:
-        source = contract["from"]
-        value: dict[str, Any] = {**contract}
-        if source == "runtime.intent":
-            value["value"] = state["intent"]
-        elif source.startswith("trigger."):
-            trigger = state.get("trigger") or {}
-            name = source.removeprefix("trigger.")
-            if trigger.get("name") != name:
-                if contract["required"]:
-                    raise ExecutionError(
-                        f"required input {phase}.{contract['name']} is unavailable"
-                    )
-            else:
-                value["value"] = trigger["value"]
-        elif ".outputs." in source:
-            producer, output_name = source.split(".outputs.", 1)
-            output = next(
-                item
-                for item in compiled["instructions"]["phases"][producer]["expects"]["outputs"]
-                if item["name"] == output_name
-            )
-            path = _artifact_path(outcome_root, output)
-            if contract["required"] and not path.exists():
-                raise ExecutionError(f"required input {phase}.{contract['name']} is unavailable")
-            value["path"] = str(path)
-            if path.exists() and contract.get("schema"):
-                value["value"] = json.loads(path.read_text(encoding="utf-8"))
-        if "value" in value and contract.get("schema"):
-            try:
-                validate_json(
-                    value["value"],
-                    compiled["instructions"]["schemas"][contract["schema"]]["value"],
-                    format_checker=FORMAT_CHECKER,
-                )
-            except ValidationError as exc:
-                raise ExecutionError(
-                    f"input {phase}.{contract['name']} failed schema validation"
-                ) from exc
-        values.append(value)
-    return values
-
-
-def _human_context(state: dict[str, Any], outcome_root: Path) -> list[dict[str, Any]]:
-    context = []
-    paths = {
-        Path(item["path"])
-        for item in state.get("interaction_history", [])
-        if isinstance(item, dict) and isinstance(item.get("path"), str)
-    }
-    paths.update((outcome_root / "interactions").glob("*/*.json"))
-    for path in sorted(paths):
-        try:
-            value = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        context.append(
-            {
-                "phase": value.get("phase"),
-                "timing": value.get("timing"),
-                "interaction_id": value.get("id"),
-                "status": value.get("status"),
-                "response": value.get("response"),
-                "observed_responses": value.get("observed_responses", []),
-            }
-        )
-    return context
-
-
 def _interaction_path(root: Path, run_id: str, phase: str, interaction_id: str) -> Path:
     return (
         root
@@ -388,9 +302,7 @@ def _finish_interaction(
     status: str,
     message: str,
 ) -> None:
-    """Write an interaction as already-resolved, without ever passing through
-    the durable awaiting_input pause -- used by delivery modes ('reaction',
-    'reply') that the runtime itself resolves synchronously."""
+    """Record an await or converse interaction the runtime resolved itself."""
     request = {
         "schema_version": 1,
         "run_id": state["run_id"],
@@ -412,259 +324,6 @@ def _finish_interaction(
             "status": status,
             "path": str(path),
         }
-    )
-
-
-def _provider_value(
-    root: Path, run_id: str, integration: str, value: str, *, mode: str = "reaction"
-) -> str:
-    if not value.startswith("ref:"):
-        return value
-    journal = root / ".outcomeci" / ".broker" / run_id / "journal.json"
-    try:
-        state = json.loads(journal.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        state = {}
-    # The broker keeps one reference table per integration.
-    resolved = state.get("references", {}).get(integration, {}).get(value)
-    if not isinstance(resolved, str) or not resolved:
-        raise ExecutionError(f"{mode} delivery source holds an unresolvable reference: {value}")
-    return resolved
-
-
-def _resolve_reaction(
-    root: Path,
-    config: Path,
-    state: dict[str, Any],
-    phase: str,
-    timing: str,
-    definition: dict[str, Any],
-    credential_resolver: CredentialResolver | None,
-) -> None:
-    """Poll Slack for the configured reaction on a prior phase's message,
-    blocking the current call for up to wait.timeout_seconds. Runtime-driven,
-    not agent-driven -- IntegrationExecutor(reviewed=True) bypasses the
-    independent policy-review agent deliberately: this is a fixed,
-    non-agent-controllable action (check this exact message's reactions),
-    not an arbitrary agent-initiated request."""
-    if credential_resolver is None:
-        raise ExecutionError("reaction delivery requires a credential resolver")
-    delivery = definition["delivery"]
-    compiled = compile_workflow(config)
-    producer, _, output_name = delivery["source"].partition(".outputs.")
-    try:
-        output = next(
-            item
-            for item in compiled["instructions"]["phases"][producer]["expects"]["outputs"]
-            if item["name"] == output_name
-        )
-    except (KeyError, StopIteration) as exc:
-        raise ExecutionError(
-            f"reaction delivery source is unresolvable: {delivery['source']}"
-        ) from exc
-    source_file = root / ".outcomeci" / "outcomes" / state["run_id"] / output["path"]
-    try:
-        value = json.loads(source_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ExecutionError(
-            f"reaction delivery source could not be read: {output['path']}"
-        ) from exc
-    channel, ts = value.get("channel"), value.get("ts")
-    if not isinstance(channel, str) or not isinstance(ts, str):
-        raise ExecutionError(f"reaction delivery source is missing channel/ts: {output['path']}")
-    # With access.opaque_identifiers the producing agent only ever saw ref:
-    # tokens, so that is what it wrote. The broker journal holds the real values.
-    channel = _provider_value(root, state["run_id"], "slack", channel)
-    ts = _provider_value(root, state["run_id"], "slack", ts)
-    executor = IntegrationExecutor(compiled, resolver=credential_resolver, reviewed=True)
-    emoji = delivery["emoji"]
-    deadline = time.monotonic() + definition["wait"]["timeout_seconds"]
-    while True:
-        result = executor.execute(
-            "slack.get_reactions", {"channel": channel, "timestamp": ts}, phase=phase
-        )
-        reactions = (result.get("output") or {}).get("reactions") or []
-        if any(
-            isinstance(item, dict) and item.get("name") == emoji and item.get("count", 0) >= 1
-            for item in reactions
-        ):
-            _finish_interaction(
-                root,
-                state,
-                phase,
-                timing,
-                definition,
-                status="approved",
-                message=f"Approved via Slack :{emoji}: reaction",
-            )
-            return
-        if time.monotonic() >= deadline:
-            break
-        time.sleep(delivery["poll_interval_seconds"])
-    if definition.get("on_timeout") == "continue":
-        _finish_interaction(
-            root,
-            state,
-            phase,
-            timing,
-            definition,
-            status="answered",
-            message="Approval window expired",
-        )
-        return
-    raise ExecutionError(f"approval window expired for interaction {definition['id']}")
-
-
-def _resolve_reply(
-    root: Path,
-    config: Path,
-    state: dict[str, Any],
-    phase: str,
-    timing: str,
-    definition: dict[str, Any],
-    credential_resolver: CredentialResolver | None,
-) -> None:
-    """Poll Slack for a new reply on a prior phase's message, blocking the
-    current call for up to wait.timeout_seconds. Mirrors _resolve_reaction:
-    runtime-driven, not agent-driven -- IntegrationExecutor(reviewed=True)
-    bypasses the independent policy-review agent deliberately, since this is a
-    fixed, non-agent-controllable action (check this exact thread for a new
-    reply), not an arbitrary agent-initiated request. Unlike a reaction, a
-    reply's actual text is the point: it's carried in the finished
-    interaction's response.message for whichever phase declared this hook to
-    read back from its own context."""
-    if credential_resolver is None:
-        raise ExecutionError("reply delivery requires a credential resolver")
-    delivery = definition["delivery"]
-    compiled = compile_workflow(config)
-    producer, _, output_name = delivery["source"].partition(".outputs.")
-    try:
-        output = next(
-            item
-            for item in compiled["instructions"]["phases"][producer]["expects"]["outputs"]
-            if item["name"] == output_name
-        )
-    except (KeyError, StopIteration) as exc:
-        raise ExecutionError(
-            f"reply delivery source is unresolvable: {delivery['source']}"
-        ) from exc
-    source_file = root / ".outcomeci" / "outcomes" / state["run_id"] / output["path"]
-    try:
-        value = json.loads(source_file.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise ExecutionError(f"reply delivery source could not be read: {output['path']}") from exc
-    channel, ts = value.get("channel"), value.get("ts")
-    if not isinstance(channel, str) or not isinstance(ts, str):
-        raise ExecutionError(f"reply delivery source is missing channel/ts: {output['path']}")
-    channel = _provider_value(root, state["run_id"], "slack", channel, mode="reply")
-    ts = _provider_value(root, state["run_id"], "slack", ts, mode="reply")
-    executor = IntegrationExecutor(compiled, resolver=credential_resolver, reviewed=True)
-    deadline = time.monotonic() + definition["wait"]["timeout_seconds"]
-    while True:
-        result = executor.execute(
-            "slack.get_replies", {"channel": channel, "timestamp": ts}, phase=phase
-        )
-        messages = (result.get("output") or {}).get("messages") or []
-        reply = next(
-            (
-                item
-                for item in messages[1:]
-                if isinstance(item, dict) and not item.get("bot_id") and item.get("text")
-            ),
-            None,
-        )
-        if reply is not None:
-            _finish_interaction(
-                root,
-                state,
-                phase,
-                timing,
-                definition,
-                status="responded",
-                message=str(reply["text"]),
-            )
-            return
-        if time.monotonic() >= deadline:
-            break
-        time.sleep(delivery["poll_interval_seconds"])
-    if definition.get("on_timeout") == "continue":
-        _finish_interaction(
-            root,
-            state,
-            phase,
-            timing,
-            definition,
-            status="answered",
-            message="Consultation window expired with no reply",
-        )
-        return
-    raise ExecutionError(f"consultation window expired for interaction {definition['id']}")
-
-
-def _open_interaction(
-    root: Path,
-    state: dict[str, Any],
-    phase: str,
-    timing: str,
-    definition: dict[str, Any],
-    *,
-    config: Path | None = None,
-    credential_resolver: CredentialResolver | None = None,
-) -> dict[str, Any] | None:
-    delivery = definition.get("delivery", {})
-    if delivery.get("type") == "slack" and delivery.get("mode") == "reaction":
-        _resolve_reaction(root, config, state, phase, timing, definition, credential_resolver)
-        return None
-    if delivery.get("type") == "slack" and delivery.get("mode") == "reply":
-        _resolve_reply(root, config, state, phase, timing, definition, credential_resolver)
-        return None
-    request = {
-        "schema_version": 1,
-        "run_id": state["run_id"],
-        "phase": phase,
-        "timing": timing,
-        "status": "pending",
-        "requested_at": datetime.now(UTC).isoformat(),
-        **definition,
-    }
-    path = _interaction_path(root, state["run_id"], phase, definition["id"])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    state.update(
-        {
-            "status": "awaiting_input",
-            "pending_interaction": {
-                "phase": phase,
-                "timing": timing,
-                "id": definition["id"],
-                "path": str(path),
-            },
-        }
-    )
-    _write(root, state)
-    return state
-
-
-def _first_required_interaction(
-    compiled: dict[str, Any],
-    phase: str,
-    timing: str,
-    state: dict[str, Any] | None = None,
-) -> dict[str, Any] | None:
-    resolved = {
-        item["id"]
-        for item in (state or {}).get("interaction_history", [])
-        if item.get("phase") == phase
-        and item.get("timing") == timing
-        and item.get("status") in {"approved", "answered", "responded"}
-    }
-    return next(
-        (
-            item
-            for item in compiled["instructions"]["phases"][phase]["humans"][timing]
-            if item["required"] and item["id"] not in resolved
-        ),
-        None,
     )
 
 
@@ -699,28 +358,6 @@ def _local_revision(root: Path) -> str | None:
     return result.stdout.strip() if result.returncode == 0 else None
 
 
-def _interactive_session(root: Path, compiled: dict[str, Any]) -> dict[str, Any]:
-    codex_id = os.environ.get("CODEX_SESSION_ID") or os.environ.get("CODEX_THREAD_ID")
-    claude_id = os.environ.get("CLAUDE_CODE_SESSION_ID") or os.environ.get("CLAUDE_SESSION_ID")
-    if codex_id:
-        provider, session_id = "codex", codex_id
-    elif claude_id or os.environ.get("CLAUDECODE"):
-        provider, session_id = "claude", claude_id
-    else:
-        provider = (
-            compiled["workflow"]["spec"].get("agents", {}).get("default", {}).get("runner", "codex")
-        )
-        session_id = None
-    matches = _select_sessions(provider, session_id, root, None)
-    if matches and not session_id:
-        session_id = _session_details(matches[0], provider)[0]
-    return {
-        "provider": provider,
-        "session_id": session_id,
-        "byte_offset": matches[0].stat().st_size if matches else 0,
-    }
-
-
 def _connection_secrets(compiled: dict[str, Any]) -> set[str]:
     """Environment variables holding connection credentials, kept from every agent."""
     return {
@@ -749,67 +386,42 @@ def _execute(
     agent = options.agent
     model = options.model
     credential_resolver = options.credential_resolver
-    execution_backend = options.execution_backend
-    _container_isolated = options._container_isolated
     compiled = compile_workflow(config)
-    configured_backend = compiled["workflow"]["spec"]["backend"].get("provider")
-    if execution_backend not in {"filesystem", "outcomeci"}:
-        raise ExecutionError("unsupported execution backend")
-    if configured_backend != execution_backend:
-        raise ExecutionError(
-            f"{execution_backend} execution requires spec.backend.provider: {execution_backend}"
-        )
-    if execution_backend == "outcomeci" and credential_resolver is None:
+    if credential_resolver is None:
         raise ExecutionError("OutcomeCI execution requires a scoped credential resolver")
-    if _container_isolated and execution_backend != "outcomeci":
-        raise ExecutionError("container isolation is reserved for OutcomeCI execution")
     phase = state["phase"]
     step_block = compiled["instructions"]["phases"][phase].get("v1")
-    if step_block is not None and step_block["kind"] != "agent":
+    if step_block is None:
+        raise ExecutionError(f"step {phase} is not an outcomeci.workflow/v1 step")
+    if step_block["kind"] != "agent":
         raise ExecutionError(f"step {phase} is driven by the runtime, not an agent")
     runner, chosen_model = _policy(compiled, phase, agent, model)
     outcome_root = root / ".outcomeci" / "outcomes" / state["run_id"]
     writable_artifacts = _prepare_writable_artifacts(compiled, outcome_root, phase)
     connection_secrets = _connection_secrets(compiled)
-    context_revision = f"{execution_backend}:{compiled['workflow_revision']}"
+    context_revision = f"outcomeci:{compiled['workflow_revision']}"
     environment = (
-        f"This is an OutcomeCI Cloud execution in an isolated workspace at {root}. "
+        f"This is an OutcomeCI execution in an isolated workspace at {root}. "
         "Use only the supplied workflow context and scoped capabilities."
-        if execution_backend == "outcomeci"
-        else f"This is a filesystem-backed local Standup. Work in {root}. "
-        "There is no OutcomeCI Cloud or Digital Twin; inspect the local repository directly."
     )
     runtime_cli = shlex.join([sys.executable, "-m", "outcomeci.cli"])
-    if step_block is not None:
-        try:
-            invocations = _step_invocations(
-                root,
-                compiled,
-                state,
-                phase,
-                step_block,
-                outcome_root=outcome_root,
-                environment=environment,
-                runtime_cli=runtime_cli,
-                writable_artifacts=writable_artifacts,
-            )
-        except ExecutionError as exc:
-            state.update({"status": "error", "error": str(exc)})
-            state["phases"] = _phase_states(compiled, state)
-            _write(root, state)
-            raise
-    else:
-        prompt = _phase_prompt(
+    try:
+        invocations = _step_invocations(
             root,
             compiled,
             state,
             phase,
+            step_block,
             outcome_root=outcome_root,
             environment=environment,
             runtime_cli=runtime_cli,
-            context_revision=context_revision,
+            writable_artifacts=writable_artifacts,
         )
-        invocations = [(prompt, None)]
+    except ExecutionError as exc:
+        state.update({"status": "error", "error": str(exc)})
+        state["phases"] = _phase_states(compiled, state)
+        _write(root, state)
+        raise
     state.update(
         {
             "status": "running",
@@ -942,60 +554,6 @@ def _step_prompt(
     )
 
 
-def _phase_prompt(
-    root: Path,
-    compiled: dict[str, Any],
-    state: dict[str, Any],
-    phase: str,
-    *,
-    outcome_root: Path,
-    environment: str,
-    runtime_cli: str,
-    context_revision: str,
-) -> str:
-    repository = root.name
-    shared = compiled["instructions"]["orchestrator"]["content"]
-    instructions = compiled["instructions"]["phases"][phase]["content"]
-    context = {
-        "run_id": state["run_id"],
-        "phase": phase,
-        "intent": state["intent"],
-        "repository": {"name": repository, "checkout": str(root)},
-        "prior_phases": state.get("completed_phases", []),
-        "workflow_revision": compiled["workflow_revision"],
-        "context_files": compiled["context"]["files"],
-        "inputs": _input_context(compiled, outcome_root, phase, state),
-        "with": compiled["instructions"]["phases"][phase]["with"],
-        "outputs": compiled["instructions"]["phases"][phase]["expects"]["outputs"],
-        "capabilities": compiled["instructions"]["phases"][phase].get("capabilities", []),
-        "required_capabilities": compiled["instructions"]["phases"][phase].get(
-            "required_capabilities", []
-        ),
-        "human_context": _human_context(state, outcome_root),
-    }
-    intake_contract = ""
-    if phase == "intake":
-        intake_contract = f"""
-Write intake/trajectory.json with schema_version \"1\", ontology_revision_id
-\"{context_revision}\", and at least one target. The local target must use
-repository_id \"local:{repository}\", repository \"{repository}\", a non-empty
-rationale, and a candidates array following the stable role and disposition
-contract above. Use paths relative to this repository.
-"""
-    prompt = templates.EXECUTION_TASK.format(
-        shared=shared,
-        instructions=instructions,
-        environment=environment,
-        outcome_root=outcome_root,
-        phase=phase,
-        run_id=state["run_id"],
-        root=root,
-        intake_contract=intake_contract,
-        context_json=json.dumps(context, separators=(",", ":")),
-    )
-    return prompt + templates.EXECUTION_CLI_ADDENDUM.format(runtime_cli=runtime_cli, phase=phase)
-
-
 def _run_phase(
     root: Path,
     config: Path,
@@ -1011,12 +569,11 @@ def _run_phase(
     writable_artifacts: list[Path],
     connection_secrets: set[str],
     context_revision: str,
-    step_block: dict[str, Any] | None,
+    step_block: dict[str, Any],
 ) -> dict[str, Any]:
     credential_resolver = options.credential_resolver
     event_sink = options.event_sink
     policy_reviewer = options.policy_reviewer
-    execution_backend = options.execution_backend
     _container_isolated = options._container_isolated
     repository = root.name
     phase_started_at = datetime.now(UTC).isoformat()
@@ -1051,13 +608,10 @@ def _run_phase(
                     )
                 )
         summary = "\n".join(summaries)
-        if step_block is not None and "for_each" in step_block:
+        if "for_each" in step_block:
             from . import v1_runtime
 
             v1_runtime.gather(root, state["run_id"], step_block, len(invocations))
-        persisted = _read(root, state["run_id"])
-        if persisted.get("status") == "awaiting_input":
-            return persisted
         _write_effect_receipts(root, outcome_root, state["run_id"], phase)
         try:
             try:
@@ -1112,14 +666,6 @@ def _run_phase(
                     )
                 summary = f"{summary}\n{repair_summary}"
             _validate_required_effects(root, compiled, state["run_id"], phase)
-            if phase == "intake" and step_block is None:
-                trajectory = json.loads(
-                    (outcome_root / "intake" / "trajectory.json").read_text(encoding="utf-8")
-                )
-                _validate_trajectory(
-                    trajectory,
-                    {"intent_context": {"ontology_revision_id": context_revision}},
-                )
         finally:
             # Copy the agent's session transcript in regardless of whether the
             # validation above succeeded -- a phase that fails required-effects
@@ -1136,20 +682,13 @@ def _run_phase(
         if isinstance(exc, ExecutionError):
             raise
         raise ExecutionError(f"invalid local outcome artifacts: {exc}") from exc
-    after = _first_required_interaction(compiled, phase, "after", state)
-    if after:
-        state["phase_output_ready"] = True
-    else:
-        state["completed_phases"] = [*state.get("completed_phases", []), phase]
-        state["status"] = (
-            "awaiting_confirmation" if phase != "tasks" else "ready_for_implementation"
-        )
-        if step_block is not None and not _ready(compiled, state["completed_phases"]):
-            state["status"] = "completed"
+    state["completed_phases"] = [*state.get("completed_phases", []), phase]
+    state["status"] = (
+        "awaiting_confirmation" if _ready(compiled, state["completed_phases"]) else "completed"
+    )
     state["summary"] = summary[-1000:]
     state["usage_records"] = transcripts["usage_records"]
     state.pop("error", None)
-    constitution = root / ".outcomeci" / "constitution.md"
     manifest = build_manifest(
         outcome_root=outcome_root,
         artifact_base=root,
@@ -1158,13 +697,10 @@ def _run_phase(
         trajectory_version=None,
         phase=phase,
         workflow_revision=compiled["workflow_revision"],
-        backend_provider=execution_backend,
+        backend_provider="outcomeci",
         state_repository=None,
-        context_provider=compiled["workflow"]["spec"]["context"].get("provider", "filesystem"),
+        context_provider="outcomeci",
         context_revision_id=context_revision,
-        constitution_sha256=hashlib.sha256(
-            constitution.read_bytes() if constitution.exists() else b""
-        ).hexdigest(),
         repository_base_commits={repository: _local_revision(root)},
         runner=runner,
         model=chosen_model,
@@ -1174,8 +710,6 @@ def _run_phase(
     (outcome_root / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    if after:
-        return _open_interaction(root, state, phase, "after", after)
     state["ready_phases"] = _ready(compiled, state["completed_phases"])
     state["phases"] = _phase_states(compiled, state)
     _write(root, state)
@@ -1185,8 +719,7 @@ def _run_phase(
 def _new_run(
     compiled: dict[str, Any], intent: str, *, trigger: dict[str, Any] | None = None
 ) -> dict[str, Any]:
-    """The initial queued-run state start() (manual) and trigger() (every
-    other trigger type) both build before checking for a before-phase gate."""
+    """The initial queued-run state trigger() builds for every trigger type."""
     state = {
         "schema_version": 2,
         "run_id": _id(intent),
@@ -1268,55 +801,6 @@ def _settle(
                 _skip(state, name, f"{phase} expired")
 
 
-def _is_v1(compiled: dict[str, Any]) -> bool:
-    return compiled.get("api_version") == "outcomeci.workflow/v1"
-
-
-def _before_gate(
-    root: Path,
-    config: Path,
-    compiled: dict[str, Any],
-    state: dict[str, Any],
-    *,
-    credential_resolver: CredentialResolver | None = None,
-) -> dict[str, Any] | None:
-    """If the run's first phase has a required `before` interaction, open it
-    and return the paused state; None means the caller should proceed
-    straight to _execute()."""
-    before = _first_required_interaction(compiled, state["phase"], "before", state)
-    if not before:
-        return None
-    return _open_interaction(
-        root,
-        state,
-        state["phase"],
-        "before",
-        before,
-        config=config,
-        credential_resolver=credential_resolver,
-    )
-
-
-def start(
-    root: Path,
-    config: Path,
-    intent: str,
-    *,
-    agent: str | None = None,
-    model: str | None = None,
-) -> dict[str, Any]:
-    if not intent.strip():
-        raise ExecutionError("intent is required")
-    compiled = compile_workflow(config)
-    if not any(trigger["type"] == "manual" for trigger in compiled["triggers"].values()):
-        raise ExecutionError("workflow does not declare a manual trigger")
-    state = _new_run(compiled, intent.strip())
-    opened = _before_gate(root, config, compiled, state)
-    if opened is not None:
-        return opened
-    return _execute(root, config, state, options=ExecutionOptions(agent=agent, model=model))
-
-
 def trigger(
     root: Path,
     config: Path,
@@ -1356,209 +840,9 @@ def trigger(
     if on_created is not None:
         _write(root, state)
         on_created(state["run_id"])
-    if _is_v1(compiled) and not _settle(root, compiled, state, options):
+    if not _settle(root, compiled, state, options):
         return state
-    opened = _before_gate(
-        root, config, compiled, state, credential_resolver=options.credential_resolver
-    )
-    if opened is not None:
-        return opened
     return _execute(root, config, state, options=options)
-
-
-def begin(root: Path, config: Path, intent: str) -> dict[str, Any]:
-    """Create an interactive run without launching a child agent."""
-    if not intent.strip():
-        raise ExecutionError("intent is required")
-    compiled = compile_workflow(config)
-    if not any(trigger["type"] == "manual" for trigger in compiled["triggers"].values()):
-        raise ExecutionError("workflow does not declare a manual trigger")
-    if compiled["workflow"]["spec"]["backend"].get("provider") != "filesystem":
-        raise ExecutionError(
-            "interactive local execution requires spec.backend.provider: filesystem"
-        )
-    session = _interactive_session(root, compiled)
-    state = {
-        "schema_version": 2,
-        "run_id": _id(intent),
-        "intent": intent.strip(),
-        "phase": _ready(compiled, [])[0],
-        "status": "awaiting_agent",
-        "completed_phases": [],
-        "workflow_revision": compiled["workflow_revision"],
-        "interactive_session": session,
-        "created_at": datetime.now(UTC).isoformat(),
-    }
-    state["ready_phases"] = _ready(compiled, [])
-    state["phases"] = _phase_states(compiled, state)
-    before = _first_required_interaction(compiled, state["phase"], "before", state)
-    if before:
-        opened = _open_interaction(root, state, state["phase"], "before", before, config=config)
-        if opened is not None:
-            return {**opened, "outcome_root": str(_record(root, state["run_id"]).parent)}
-    _write(root, state)
-    return {**state, "outcome_root": str(_record(root, state["run_id"]).parent)}
-
-
-def compile_context(root: Path, config: Path, run_id: str | None) -> dict[str, Any]:
-    state = _read(root, run_id) if run_id else status(root, None)
-    if state.get("status") == "no_runs":
-        raise ExecutionError("no local outcome exists; run `oci outcome begin` first")
-    compiled = compile_workflow(config)
-    phase = state["phase"]
-    if phase not in compiled["instructions"]["phases"]:
-        raise ExecutionError(f"workflow has no instructions for {phase}")
-    runner, model = _policy(
-        compiled, phase, state.get("interactive_session", {}).get("provider"), None
-    )
-    context_revision = f"filesystem:{compiled['workflow_revision']}"
-    phase_contract: dict[str, Any] | None = None
-    if phase == "intake":
-        phase_contract = {
-            "artifact": "intake/trajectory.json",
-            "schema_version": "1",
-            "ontology_revision_id": context_revision,
-            "target": {
-                "repository_id": f"local:{root.name}",
-                "repository": root.name,
-                "required": ["rationale", "candidates"],
-            },
-        }
-    return {
-        "schema_version": "outcomeci.interactive-context/v1alpha1",
-        "run": state,
-        "outcome_root": str(_record(root, state["run_id"]).parent),
-        "runner": {"provider": runner, "model": model or "provider-default"},
-        "context": compiled["context"],
-        "phase_contract": phase_contract,
-        "instructions": {
-            "standup": compiled["instructions"]["orchestrator"],
-            "phase": compiled["instructions"]["phases"][phase],
-        },
-        "workflow_revision": compiled["workflow_revision"],
-    }
-
-
-def validate_artifacts(root: Path, config: Path, run_id: str | None) -> dict[str, Any]:
-    state = _read(root, run_id) if run_id else status(root, None)
-    if state.get("status") == "no_runs":
-        raise ExecutionError("no local outcome exists")
-    compiled = compile_workflow(config)
-    phase = state["phase"]
-    repository = root.name
-    outcome_root = _record(root, state["run_id"]).parent
-    _validate_outputs(compiled, outcome_root, phase)
-    standup = (outcome_root / "standup.md").read_text(encoding="utf-8")
-    if "# Standup:" not in standup or "**Status**: active" not in standup:
-        raise ExecutionError("agent did not produce a valid active Standup")
-    context_revision = f"filesystem:{compiled['workflow_revision']}"
-    if phase == "intake":
-        try:
-            trajectory = json.loads(
-                (outcome_root / "intake" / "trajectory.json").read_text(encoding="utf-8")
-            )
-        except json.JSONDecodeError as exc:
-            raise ExecutionError("intake trajectory is not valid JSON") from exc
-        _validate_trajectory(
-            trajectory, {"intent_context": {"ontology_revision_id": context_revision}}
-        )
-    session = state.get("interactive_session", {})
-    runner, model = _policy(compiled, phase, session.get("provider"), None)
-    transcript = _transcripts(
-        runner,
-        outcome_root,
-        phase,
-        session_id=session.get("session_id"),
-        byte_offset=int(session.get("byte_offset") or 0),
-        workspace=root,
-        since=state.get("created_at"),
-    )
-    matches = _select_sessions(runner, session.get("session_id"), root, state.get("created_at"))
-    if matches:
-        session["session_id"] = session.get("session_id") or _session_details(matches[0], runner)[0]
-        session["byte_offset"] = matches[0].stat().st_size
-        state["interactive_session"] = session
-    constitution = root / ".outcomeci" / "constitution.md"
-    manifest = build_manifest(
-        outcome_root=outcome_root,
-        artifact_base=root,
-        run_id=state["run_id"],
-        workflow_run_id=None,
-        trajectory_version=None,
-        phase=phase,
-        workflow_revision=compiled["workflow_revision"],
-        backend_provider="filesystem",
-        state_repository=None,
-        context_provider="filesystem",
-        context_revision_id=context_revision,
-        constitution_sha256=hashlib.sha256(
-            constitution.read_bytes() if constitution.exists() else b""
-        ).hexdigest(),
-        repository_base_commits={repository: _local_revision(root)},
-        runner=runner,
-        model=model,
-        transcript=transcript,
-        phase_contract=compiled["instructions"]["phases"][phase]["expects"],
-    )
-    (outcome_root / "manifest.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    after = _first_required_interaction(compiled, phase, "after", state)
-    if after:
-        state.update(
-            {
-                "phase_output_ready": True,
-                "workflow_revision": compiled["workflow_revision"],
-            }
-        )
-        _open_interaction(root, state, phase, "after", after)
-        return {
-            "valid": True,
-            "run_id": state["run_id"],
-            "phase": phase,
-            "status": state["status"],
-            "interaction": state["pending_interaction"],
-            "manifest": manifest,
-        }
-    completed = list(state.get("completed_phases", []))
-    if phase not in completed:
-        completed.append(phase)
-    state.update(
-        {
-            "completed_phases": completed,
-            "status": ("ready_for_implementation" if phase == "tasks" else "awaiting_confirmation"),
-            "workflow_revision": compiled["workflow_revision"],
-        }
-    )
-    state["ready_phases"] = _ready(compiled, completed)
-    state["phases"] = _phase_states(compiled, state)
-    _write(root, state)
-    return {
-        "valid": True,
-        "run_id": state["run_id"],
-        "phase": phase,
-        "status": state["status"],
-        "manifest": manifest,
-    }
-
-
-def advance(root: Path, config: Path, run_id: str | None, approve: bool) -> dict[str, Any]:
-    state = _read(root, run_id) if run_id else status(root, None)
-    if not approve:
-        raise ExecutionError("advancing requires explicit --approve")
-    if state.get("status") != "awaiting_confirmation":
-        raise ExecutionError(f"outcome cannot advance from {state.get('status')}")
-    compiled = compile_workflow(config)
-    ready = _ready(compiled, state.get("completed_phases", []))
-    if not ready:
-        raise ExecutionError("outcome workflow is complete")
-    state["phase"] = ready[0]
-    state["status"] = "awaiting_agent"
-    state["workflow_revision"] = compiled["workflow_revision"]
-    state["ready_phases"] = ready
-    state["phases"] = _phase_states(compiled, state)
-    _write(root, state)
-    return {**state, "outcome_root": str(_record(root, state["run_id"]).parent)}
 
 
 def continue_run(
@@ -1570,43 +854,15 @@ def continue_run(
     options: ExecutionOptions = _DEFAULT_EXECUTION_OPTIONS,
 ) -> dict[str, Any]:
     state = _read(root, run_id)
-    if state.get("status") == "awaiting_input" and approve:
-        pending = state.get("pending_interaction", {})
-        state = respond(
-            root,
-            config,
-            run_id,
-            pending.get("id", ""),
-            "Approved",
-            approve=True,
-            options=options,
-        )
     if state.get("status") != "awaiting_confirmation":
         raise ExecutionError(f"outcome cannot continue from {state.get('status')}")
     if not approve:
         raise ExecutionError("continuation requires explicit --approve")
     compiled = compile_workflow(config)
-    if _is_v1(compiled) and not _settle(root, compiled, state, options):
+    if not _settle(root, compiled, state, options):
         return state
-    ready = _ready(compiled, state.get("completed_phases", []))
-    if not ready:
-        raise ExecutionError("outcome workflow is complete")
-    state["phase"] = ready[0]
     state["status"] = "queued"
     _write(root, state)
-    before = _first_required_interaction(compiled, state["phase"], "before", state)
-    if before:
-        opened = _open_interaction(
-            root,
-            state,
-            state["phase"],
-            "before",
-            before,
-            config=config,
-            credential_resolver=options.credential_resolver,
-        )
-        if opened is not None:
-            return opened
     return _execute(root, config, state, options=options)
 
 
@@ -1625,130 +881,9 @@ def retry(
     state.pop("error", None)
     _write(root, state)
     compiled = compile_workflow(config)
-    if _is_v1(compiled) and not _settle(root, compiled, state, options):
+    if not _settle(root, compiled, state, options):
         return state
     return _execute(root, config, state, options=options)
-
-
-def _worker_live(outcome_root: Path) -> bool:
-    try:
-        worker = json.loads((outcome_root / "worker.json").read_text(encoding="utf-8"))
-        if worker.get("status") == "queued" and not worker.get("pid"):
-            started = datetime.fromisoformat(worker["started_at"])
-            return (datetime.now(UTC) - started).total_seconds() < 30
-        os.kill(int(worker["pid"]), 0)
-        return True
-    except (OSError, ValueError, KeyError, json.JSONDecodeError):
-        return False
-
-
-def launch_worker(
-    root: Path,
-    config: Path,
-    run_id: str,
-    operation: str,
-    *,
-    interaction_id: str | None = None,
-    message: str | None = None,
-    approve: bool = False,
-    reject: bool = False,
-) -> dict[str, Any]:
-    """Launch an outcome transition outside the Slack listener process tree."""
-    outcome_root = _record(root, run_id).parent
-    lock_path = outcome_root / "worker.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock = lock_path.open("a+")
-    try:
-        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError as exc:
-        lock.close()
-        raise ExecutionError("an outcome worker launch is already in progress") from exc
-    if _worker_live(outcome_root):
-        lock.close()
-        raise ExecutionError("an outcome worker is already active")
-    if operation == "respond" and (not interaction_id or message is None):
-        raise ExecutionError("respond workers require an interaction and message")
-    if operation not in {"continue", "retry", "respond"}:
-        raise ExecutionError(f"unsupported worker operation: {operation}")
-    worker_id = str(uuid.uuid4())
-    argv = [
-        sys.executable,
-        "-m",
-        "outcomeci.worker",
-        operation,
-        run_id,
-        "--workspace",
-        str(root),
-        "--config",
-        str(config),
-        "--worker-id",
-        worker_id,
-    ]
-    if interaction_id:
-        argv.extend(["--interaction-id", interaction_id])
-    if message is not None:
-        argv.extend(["--message", message])
-    if approve:
-        argv.append("--approve")
-    if reject:
-        argv.append("--reject")
-    log_path = outcome_root / "worker.log"
-    worker_path = outcome_root / "worker.json"
-    try:
-        previous_worker = json.loads(worker_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        previous_worker = {}
-    worker = {
-        "schema_version": 1,
-        "worker_id": worker_id,
-        "attempt": int(previous_worker.get("attempt", 0)) + 1,
-        "pid": None,
-        "operation": operation,
-        "status": "queued",
-        "started_at": datetime.now(UTC).isoformat(),
-        "log": str(log_path),
-    }
-    try:
-        worker_path.write_text(
-            json.dumps(worker, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-        log = log_path.open("a", encoding="utf-8")
-        try:
-            process = subprocess.Popen(
-                argv,
-                cwd=root,
-                stdout=log,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-                close_fds=True,
-                env=os.environ.copy(),
-            )
-        finally:
-            log.close()
-        worker["pid"] = process.pid
-        worker_path.write_text(
-            json.dumps(worker, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-        )
-    finally:
-        lock.close()
-    return {"status": "queued", "run_id": run_id, "worker": worker}
-
-
-def recover(root: Path, config: Path, run_id: str) -> dict[str, Any]:
-    state = _read(root, run_id)
-    outcome_root = _record(root, run_id).parent
-    if state.get("status") != "running":
-        raise ExecutionError(f"outcome cannot recover from {state.get('status')}")
-    if _worker_live(outcome_root):
-        raise ExecutionError("outcome worker is still active")
-    state.update(
-        {
-            "status": "error",
-            "error": "previous outcome worker exited before recording completion",
-        }
-    )
-    _write(root, state)
-    return launch_worker(root, config, run_id, "retry")
 
 
 def status(root: Path, run_id: str | None) -> dict[str, Any]:
@@ -1756,120 +891,3 @@ def status(root: Path, run_id: str | None) -> dict[str, Any]:
         return _read(root, run_id)
     records = sorted((root / ".outcomeci" / "outcomes").glob("*/run.json"), reverse=True)
     return _read(root, records[0].parent.name) if records else {"status": "no_runs"}
-
-
-def request_input(root: Path, config: Path, run_id: str, interaction_id: str) -> dict[str, Any]:
-    state = _read(root, run_id)
-    compiled = compile_workflow(config)
-    phase = state["phase"]
-    definition = next(
-        (
-            item
-            for item in compiled["instructions"]["phases"][phase]["humans"]["during"]
-            if item["id"] == interaction_id
-        ),
-        None,
-    )
-    if definition is None:
-        raise ExecutionError(f"phase {phase} has no during interaction {interaction_id}")
-    if state.get("status") not in {"running", "awaiting_agent"}:
-        raise ExecutionError(f"cannot request human input while outcome is {state.get('status')}")
-    return _open_interaction(root, state, phase, "during", definition)
-
-
-def respond(
-    root: Path,
-    config: Path,
-    run_id: str,
-    interaction_id: str,
-    message: str,
-    *,
-    approve: bool = False,
-    reject: bool = False,
-    execute: bool = True,
-    options: ExecutionOptions = _DEFAULT_EXECUTION_OPTIONS,
-) -> dict[str, Any]:
-    state = _read(root, run_id)
-    if approve and reject:
-        raise ExecutionError("choose either --approve or --reject")
-    pending = state.get("pending_interaction")
-    if (
-        state.get("status") != "awaiting_input"
-        or not isinstance(pending, dict)
-        or pending.get("id") != interaction_id
-    ):
-        raise ExecutionError(f"interaction {interaction_id} is not awaiting input")
-    if not message.strip():
-        raise ExecutionError("a response message is required")
-    path = Path(pending["path"])
-    request = json.loads(path.read_text(encoding="utf-8"))
-    if request["interaction"] == "approval" and not (approve or reject):
-        raise ExecutionError("approval interactions require --approve or --reject")
-    request.update(
-        {
-            "status": "approved" if approve else "rejected" if reject else "answered",
-            "response": {
-                "message": message.strip(),
-                "responded_at": datetime.now(UTC).isoformat(),
-            },
-        }
-    )
-    path.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    timing, phase = pending["timing"], pending["phase"]
-    state.pop("pending_interaction", None)
-    state.setdefault("interaction_history", []).append(
-        {
-            "phase": phase,
-            "timing": timing,
-            "id": interaction_id,
-            "status": request["status"],
-            "path": str(path),
-        }
-    )
-    if reject or (timing == "after" and request["interaction"] == "review" and not approve):
-        state.update({"status": "awaiting_agent", "phase_output_ready": False})
-        _write(root, state)
-        return state
-    if timing == "after":
-        completed = list(state.get("completed_phases", []))
-        if phase not in completed:
-            completed.append(phase)
-        compiled = compile_workflow(config)
-        next_interaction = _first_required_interaction(compiled, phase, "after", state)
-        if next_interaction:
-            return _open_interaction(root, state, phase, "after", next_interaction)
-        state.update(
-            {
-                "completed_phases": completed,
-                "phase_output_ready": False,
-                "status": (
-                    "ready_for_implementation" if phase == "tasks" else "awaiting_confirmation"
-                ),
-            }
-        )
-        state["ready_phases"] = _ready(compiled, completed)
-        state["phases"] = _phase_states(compiled, state)
-        _write(root, state)
-        return state
-    compiled = compile_workflow(config)
-    if timing == "before":
-        next_interaction = _first_required_interaction(compiled, phase, "before", state)
-        if next_interaction:
-            opened = _open_interaction(
-                root,
-                state,
-                phase,
-                "before",
-                next_interaction,
-                config=config,
-                credential_resolver=options.credential_resolver,
-            )
-            if opened is not None:
-                return opened
-    if not execute:
-        state["status"] = "running"
-        _write(root, state)
-        return state
-    state["status"] = "queued"
-    _write(root, state)
-    return _execute(root, config, state, options=options)

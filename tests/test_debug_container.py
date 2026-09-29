@@ -63,7 +63,6 @@ def test_runs_on_a_private_copy_with_the_leased_credentials(monkeypatch, dirs, c
     assert not (source / "scratch.txt").exists()
     assert not (output / "work" / ".git").exists()
     assert seen["options"]._container_isolated is True
-    assert seen["options"].execution_backend == "outcomeci"
     assert seen["options"].credential_resolver("vault:slack/bot-token") == "xoxb-secret"
     assert seen["codex_home"] == str(output / "home" / ".codex")
     result = output / "result.json"

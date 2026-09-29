@@ -165,7 +165,6 @@ def test_a_failed_await_is_retried_by_the_runtime_never_by_an_agent(workflow, mo
 
     options = local.ExecutionOptions(
         credential_resolver=lambda ref: "xoxb-test-credential",
-        execution_backend="outcomeci",
         policy_reviewer=lambda proposal: {
             "decision": "allow",
             "proposal_sha256": proposal["proposal_sha256"],
@@ -198,7 +197,6 @@ def test_an_agent_is_never_run_for_a_runtime_step(workflow, monkeypatch):
             state,
             options=local.ExecutionOptions(
                 credential_resolver=lambda ref: "xoxb-test-credential",
-                execution_backend="outcomeci",
             ),
         )
 
@@ -272,7 +270,6 @@ def test_a_reply_left_unanswered_by_a_crash_is_answered_on_retry(tmp_path, monke
     monkeypatch.setattr(local, "invoke", agent)
     options = local.ExecutionOptions(
         credential_resolver=lambda ref: "xoxb-test-credential",
-        execution_backend="outcomeci",
         policy_reviewer=lambda proposal: {
             "decision": "allow",
             "proposal_sha256": proposal["proposal_sha256"],

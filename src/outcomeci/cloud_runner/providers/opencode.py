@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..models import ContractError, ExecutionClaim
+from ..models import AgentLogin, ContractError
 
 
 class OpenCodeAdapter:
-    def hydrate(self, claim: ExecutionClaim, root: Path, env: dict[str, str]) -> dict[str, str]:
+    def hydrate(self, claim: AgentLogin, root: Path, env: dict[str, str]) -> dict[str, str]:
         if not claim.api_key:
             raise ContractError("missing OpenRouter API key")
         home = root / "opencode"
@@ -18,6 +18,3 @@ class OpenCodeAdapter:
             "XDG_CONFIG_HOME": str(home / ".config"),
             "OPENROUTER_API_KEY": claim.api_key,
         }
-
-    def credential_update(self, claim: ExecutionClaim, root: Path) -> dict[str, object] | None:
-        return None

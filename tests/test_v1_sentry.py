@@ -201,7 +201,6 @@ def _run(root: Path, agent: Agent, monkeypatch, reviews: list | None = None) -> 
 
     options = local.ExecutionOptions(
         credential_resolver=lambda reference: "xoxb-or-ghp-token",
-        execution_backend="outcomeci",
         policy_reviewer=review,
     )
     return debug.execute(

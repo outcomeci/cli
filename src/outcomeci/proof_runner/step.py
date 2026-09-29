@@ -301,7 +301,7 @@ def execute(action: str, root: Path, request: dict[str, Any], fault: bool) -> di
         _write(root, context)
         return result
     if action == "workspace.initialize":
-        created = initialize(root, template="workflow")
+        created = initialize(root)
         _write(root, {"created": created})
         return {"status": "initialized", "files_created": len(created)}
     if action == "vault.initialize":

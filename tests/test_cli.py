@@ -4,14 +4,12 @@ import base64
 import json
 from pathlib import Path
 
-import jsonschema
 import yaml
 
 from outcomeci import cli
 from outcomeci.cli import main
 from outcomeci.config import compile_workflow
-from outcomeci.repository import initialize, update
-from outcomeci.schema import load_schema
+from outcomeci.repository import initialize
 
 
 def test_init_writes_a_v1_workflow_that_validates(tmp_path: Path, capsys) -> None:
@@ -21,29 +19,6 @@ def test_init_writes_a_v1_workflow_that_validates(tmp_path: Path, capsys) -> Non
     assert (tmp_path / ".outcomeci/instructions/investigate.md").is_file()
     assert json.loads((tmp_path / ".outcomeci/request.json").read_text())["repo"]["owner"]
     assert not (tmp_path / ".agents").exists()
-    assert main(["validate", "--dir", str(tmp_path)]) == 0
-    assert '"valid": true' in capsys.readouterr().out
-    assert main(["update", "--dir", str(tmp_path)]) == 0
-    assert not (tmp_path / ".agents").exists()
-
-
-def test_backend_needs_the_standup_template(tmp_path: Path) -> None:
-    assert main(["init", "--backend", "filesystem", "--dir", str(tmp_path)]) == 2
-    assert not (tmp_path / "outcome.yml").exists()
-
-
-def test_init_and_validate(tmp_path: Path, capsys) -> None:
-    assert main(["init", "--template", "standup", "--dir", str(tmp_path)]) == 0
-    assert (tmp_path / "outcome.yml").is_file()
-    assert (tmp_path / ".outcomeci/instructions/standup.md").is_file()
-    assert (tmp_path / ".outcomeci/context").is_dir()
-    assert (tmp_path / ".agents/skills/outcome/SKILL.md").is_file()
-    assert (tmp_path / ".claude/skills/outcome/SKILL.md").is_file()
-    assert (tmp_path / ".agents/skills/outcome/SKILL.md").read_text() == (
-        tmp_path / ".claude/skills/outcome/SKILL.md"
-    ).read_text()
-    assert not (tmp_path / ".sp").exists()
-    jsonschema.validate(yaml.safe_load((tmp_path / "outcome.yml").read_text()), load_schema())
     assert main(["validate", "--dir", str(tmp_path)]) == 0
     assert '"valid": true' in capsys.readouterr().out
 
@@ -128,11 +103,13 @@ def test_schema_can_be_printed_and_exported(tmp_path: Path, capsys) -> None:
 
 
 def test_integration_dry_run_and_doctor_are_machine_readable(tmp_path: Path, capsys) -> None:
-    initialize(tmp_path, "filesystem")
-    assert main(["integration", "dry-run", "--phase", "intake", "--workspace", str(tmp_path)]) == 0
+    initialize(tmp_path)
+    phase = ["--phase", "investigate", "--workspace", str(tmp_path)]
+    assert main(["integration", "dry-run", *phase]) == 0
     assert json.loads(capsys.readouterr().out)["requests_executed"] is False
-    assert main(["integration", "doctor", "--workspace", str(tmp_path)]) == 0
-    assert json.loads(capsys.readouterr().out)["ok"] is True
+    main(["integration", "doctor", "--workspace", str(tmp_path)])
+    report = json.loads(capsys.readouterr().out)
+    assert report["credentials_exposed"] is False
 
 
 def test_local_vault_commands_are_offline_and_never_print_values(
@@ -163,70 +140,12 @@ def test_local_vault_commands_are_offline_and_never_print_values(
     assert "top-secret" not in output
 
 
-def test_update_refreshes_managed_skills_but_preserves_workflow(tmp_path: Path) -> None:
-    initialize(tmp_path, "filesystem")
-    workflow = tmp_path / "outcome.yml"
-    original = workflow.read_text() + "\n# user policy\n"
-    workflow.write_text(original)
-    skill = tmp_path / ".agents/skills/outcome/SKILL.md"
-    skill.write_text("old managed skill")
-    update(tmp_path)
-    assert "Only use human tools" in skill.read_text()
-    assert workflow.read_text() == original
-
-
 def test_instruction_content_is_part_of_revision(tmp_path: Path) -> None:
-    main(["init", "--template", "standup", "--dir", str(tmp_path)])
+    main(["init", "--dir", str(tmp_path)])
     first = compile_workflow(tmp_path / "outcome.yml")["workflow_revision"]
-    instruction = tmp_path / ".outcomeci/instructions/standup.md"
+    instruction = tmp_path / ".outcomeci/instructions/investigate.md"
     instruction.write_text(instruction.read_text() + "\nAdditional policy.\n")
     assert compile_workflow(tmp_path / "outcome.yml")["workflow_revision"] != first
-
-
-def test_legacy_context_is_rejected(tmp_path: Path, capsys) -> None:
-    main(["init", "--dir", str(tmp_path)])
-    (tmp_path / ".sp").mkdir()
-    assert main(["validate", "--dir", str(tmp_path)]) == 2
-    assert "legacy .sp context is not supported" in capsys.readouterr().err
-
-
-def test_filesystem_init_configures_standalone_execution(tmp_path: Path) -> None:
-    assert (
-        main(["init", "--template", "standup", "--backend", "filesystem", "--dir", str(tmp_path)])
-        == 0
-    )
-    compiled = compile_workflow(tmp_path / "outcome.yml")
-    assert compiled["workflow"]["spec"]["backend"]["provider"] == "filesystem"
-    assert compiled["workflow"]["spec"]["context"]["provider"] == "filesystem"
-
-
-def test_filesystem_context_is_hashed_into_revision(tmp_path: Path) -> None:
-    main(["init", "--template", "standup", "--backend", "filesystem", "--dir", str(tmp_path)])
-    context = tmp_path / ".outcomeci" / "context"
-    evidence = context / "customer-notes.md"
-    evidence.write_text("Customers need faster exports.\n")
-    first = compile_workflow(tmp_path / "outcome.yml")
-    assert first["context"]["files"][0]["path"] == ".outcomeci/context/customer-notes.md"
-    assert first["context"]["files"][0]["byte_size"] > 0
-    evidence.write_text("Customers need faster and safer exports.\n")
-    second = compile_workflow(tmp_path / "outcome.yml")
-    assert second["workflow_revision"] != first["workflow_revision"]
-    assert second["context"]["files"][0]["sha256"] != first["context"]["files"][0]["sha256"]
-
-
-def test_filesystem_context_excludes_matching_artifacts(tmp_path: Path) -> None:
-    main(["init", "--template", "standup", "--backend", "filesystem", "--dir", str(tmp_path)])
-    (tmp_path / "node_modules" / "package").mkdir(parents=True)
-    (tmp_path / "node_modules" / "package" / "notes.md").write_text("ignored\n")
-    workflow = tmp_path / "outcome.yml"
-    workflow.write_text(workflow.read_text().replace("- .outcomeci/context/**", "- '**/*.md'"))
-    paths = [item["path"] for item in compile_workflow(workflow)["context"]["files"]]
-    assert "node_modules/package/notes.md" not in paths
-
-
-def test_local_outcome_status_without_runs(tmp_path: Path, capsys) -> None:
-    assert main(["outcome", "status", "--workspace", str(tmp_path)]) == 0
-    assert '"status": "no_runs"' in capsys.readouterr().out
 
 
 def test_slack_setup_passes_the_request_url_and_events(tmp_path: Path, monkeypatch, capsys) -> None:

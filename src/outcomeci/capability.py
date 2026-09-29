@@ -1,4 +1,4 @@
-"""Run-scoped broker for human hooks across the agent security boundary."""
+"""Run-scoped broker for API capabilities across the agent security boundary."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 from .config import compile_workflow
-from .humans import accept, poll, request, transport_responses
 from .integrations import (
     CredentialResolver,
     IntegrationExecutor,
@@ -58,14 +57,6 @@ class Broker:
         inputs=None,
     ):
         compiled = compiled if compiled is not None else compile_workflow(config)
-        hooks = compiled["instructions"]["phases"][phase]["humans"]
-        self.hooks = {
-            hook["id"]: hook
-            for timing in ("before", "during", "after")
-            for hook in hooks[timing]
-            if hook.get("delivery", {}).get("type") == "custom"
-            and hook.get("delivery", {}).get("targets")
-        }
         self.root, self.config, self.run_id, self.phase = root, config, run_id, phase
         run_directory = root / ".outcomeci" / "outcomes" / run_id
         state_path = run_directory / "run.json"
@@ -132,50 +123,6 @@ class Broker:
             return self.integrations.execute(
                 str(payload.get("capability", "")), inputs, phase=self.phase
             )
-        if payload.get("interaction_id") not in self.hooks:
-            raise ExecutionError("human hook is not authorized for the current phase")
-        operation = payload.get("operation")
-        hook = str(payload["interaction_id"])
-        if operation == "request":
-            return request(
-                self.root,
-                self.config,
-                self.run_id,
-                hook,
-                bool(payload.get("continue_while_waiting")),
-                self.hooks[hook],
-            )
-        if operation == "poll":
-            return poll(
-                self.root,
-                self.config,
-                self.run_id,
-                hook,
-                int(payload.get("wait_seconds", 0)),
-                float(payload.get("interval_seconds", 2)),
-            )
-        if operation == "accept":
-            message = str(payload.get("message", ""))
-            matches = list(
-                (self.root / ".outcomeci" / "outcomes" / self.run_id / "interactions").glob(
-                    f"*/{hook}.json"
-                )
-            )
-            if len(matches) != 1:
-                raise ExecutionError(f"interaction {hook} was not found for outcome {self.run_id}")
-            interaction = json.loads(matches[0].read_text(encoding="utf-8"))
-            replies = transport_responses(self.root, self.config, interaction)
-            if not any(reply.get("message") == message for reply in replies):
-                raise ExecutionError("response was not verified by the configured transport")
-            return accept(
-                self.root,
-                self.config,
-                self.run_id,
-                hook,
-                message,
-                bool(payload.get("approve")),
-                bool(payload.get("reject")),
-            )
         raise ExecutionError("operation is not allowed by this outcome capability")
 
 
@@ -196,7 +143,7 @@ def serve(
 ) -> Iterator[dict[str, str]]:
     temporary = tempfile.TemporaryDirectory(prefix="oci-cap-")
     directory = Path(temporary.name)
-    socket_path = directory / "human.sock"
+    socket_path = directory / "capability.sock"
     socket_path.unlink(missing_ok=True)
     broker = Broker(
         root,
@@ -237,21 +184,6 @@ def _call_broker(
     if not response.get("ok"):
         raise ExecutionError(str(response.get("error", error_fallback)))
     return response["result"]
-
-
-def invoke(operation: str, run_id: str, interaction_id: str, **arguments: Any) -> dict[str, Any]:
-    socket_path = os.environ.get("OUTCOMECI_CAPABILITY_SOCKET")
-    token = os.environ.get("OUTCOMECI_CAPABILITY_TOKEN")
-    if not socket_path or not token:
-        raise ExecutionError("no run-scoped human capability is available")
-    payload = {
-        "token": token,
-        "operation": operation,
-        "run_id": run_id,
-        "interaction_id": interaction_id,
-        **arguments,
-    }
-    return _call_broker(socket_path, payload, error_fallback="capability request failed")
 
 
 def invoke_integration(capability: str, inputs: dict[str, Any]) -> dict[str, Any]:

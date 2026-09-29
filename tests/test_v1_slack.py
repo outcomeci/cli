@@ -216,7 +216,6 @@ def _run(root: Path, slack: Slack, agent: Agent, monkeypatch, reviewed: list | N
     config = root / WORKFLOW
     options = local.ExecutionOptions(
         credential_resolver=lambda reference: "xoxb-test-credential",
-        execution_backend="outcomeci",
         policy_reviewer=lambda proposal: (
             (reviewed.append(proposal) if reviewed is not None else None)
             or {

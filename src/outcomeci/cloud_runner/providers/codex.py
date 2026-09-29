@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-from ..models import ContractError, ExecutionClaim
+from ..models import AgentLogin, ContractError
 
 # Every Codex credential-file writer in cloud_runner (this adapter and the
 # other two claim protocols in main.py) needs this same one-line config
@@ -13,7 +13,7 @@ FILE_AUTH_CONFIG = 'cli_auth_credentials_store = "file"\n'
 
 
 class CodexAdapter:
-    def hydrate(self, claim: ExecutionClaim, root: Path, env: dict[str, str]) -> dict[str, str]:
+    def hydrate(self, claim: AgentLogin, root: Path, env: dict[str, str]) -> dict[str, str]:
         if claim.auth_json is None:
             raise ContractError("missing Codex credential")
         home = root / "codex"
@@ -27,17 +27,3 @@ class CodexAdapter:
         with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
             stream.write(FILE_AUTH_CONFIG)
         return {**env, "CODEX_HOME": str(home)}
-
-    def credential_update(self, claim: ExecutionClaim, root: Path) -> dict[str, object] | None:
-        auth = root / "codex" / "auth.json"
-        raw = auth.read_bytes()
-        if len(raw) > 1_048_576:
-            raise ContractError("invalid Codex credential")
-        parsed = json.loads(raw)
-        if not isinstance(parsed, dict):
-            raise ContractError("invalid Codex credential")
-        return {
-            "provider": "codex",
-            "auth_json": parsed,
-            "expected_credential_version": claim.lease_version,
-        }

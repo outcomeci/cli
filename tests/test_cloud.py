@@ -129,7 +129,7 @@ def test_revoked_workspace_key_is_not_sent_to_refresh_endpoint(tmp_path: Path, m
 
 
 def test_sync_validates_and_sends_explicit_create_mode(tmp_path: Path, monkeypatch) -> None:
-    initialize(tmp_path, "filesystem")
+    initialize(tmp_path)
     workflow = tmp_path / "outcome.yml"
     (tmp_path / ".outcomeci/vault.enc").write_text("encrypted-local-vault")
     captured = {}
@@ -148,8 +148,8 @@ def test_sync_validates_and_sends_explicit_create_mode(tmp_path: Path, monkeypat
     assert captured["path"] == "/workspaces/workspace_1/workflow-revisions"
     assert captured["body"]["mode"] == "create"
     assert captured["body"]["content_type"] == "yaml"
-    assert captured["body"]["content"].startswith("apiVersion:")
-    assert ".outcomeci/constitution.md" in captured["body"]["files"]
+    assert "apiVersion: outcomeci.workflow/v1" in captured["body"]["content"]
+    assert ".outcomeci/instructions/investigate.md" in captured["body"]["files"]
     assert ".outcomeci/vault.enc" not in captured["body"]["files"]
 
 

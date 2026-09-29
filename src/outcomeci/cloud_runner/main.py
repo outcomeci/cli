@@ -261,7 +261,6 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 credential_resolver=resolver,
                 event_sink=policy_event,
                 policy_reviewer=policy_review,
-                execution_backend="outcomeci",
                 _container_isolated=True,
             )
 
@@ -281,19 +280,6 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 config,
                 run_id,
                 approve=True,
-                options=execution_options(agent_override, model_override),
-            )
-
-        def call_respond(agent_override: str | None, model_override: str | None):
-            resume = dict(claim["resume"])
-            return local.respond(
-                root,
-                config,
-                str(resume["run_id"]),
-                str(resume["interaction_id"]),
-                str(resume.get("message") or ""),
-                approve=bool(resume.get("approve")),
-                reject=bool(resume.get("reject")),
                 options=execution_options(agent_override, model_override),
             )
 
@@ -323,43 +309,14 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                     options=execution_options(active_agent, active_model),
                 )
 
-        resume = claim.get("resume")
-        if resume:
-            run_id = str(resume["run_id"])
-            for artifact in client.workflow_restore_artifacts(lease):
-                target = (root / str(artifact["path"])).resolve()
-                if not target.is_relative_to(root.resolve()):
-                    raise ContractError("workflow restored artifact escaped its root")
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(base64.b64decode(artifact["content_base64"], validate=True))
-            result = execute_call(call_respond)
-        else:
-            result = execute_call(call_trigger)
-            run_id = str(result["run_id"])
+        result = execute_call(call_trigger)
+        run_id = str(result["run_id"])
         phase_count = len(compile_workflow(config)["instructions"]["phases"])
         while len(result.get("completed_phases", [])) != phase_count:
             if heartbeat_failure:
                 raise CoreError("policy_evidence_upload_failed", True)
             if result.get("status") == "error":
                 raise ContractError("workflow recorded an error")
-            if result.get("status") == "awaiting_input":
-                if provider == "codex":
-                    agent_update = json.loads((root / ".codex" / "auth.json").read_text())
-                pending = result.get("pending_interaction") or {}
-                client.workflow_complete(
-                    lease,
-                    "awaiting_input",
-                    run_id=run_id,
-                    artifacts=workflow_artifacts(root, run_id),
-                    pending_interaction={
-                        "phase": pending.get("phase"),
-                        "timing": pending.get("timing"),
-                        "id": pending.get("id"),
-                    },
-                    expected_credential_version=credential_version,
-                    agent_credential=agent_update,
-                )
-                return 0
             if not result.get("ready_phases"):
                 raise ContractError("workflow requires a durable continuation")
             result = execute_call(call_continue)
@@ -600,180 +557,6 @@ def authorize(launch: Launch, client: CoreClient) -> int:
         shutil.rmtree(root, ignore_errors=True)
 
 
-def execute(launch: Launch, client: CoreClient) -> int:
-    claim = _claim_or_skip(client.claim_execution)
-    if claim is None:
-        return 0
-    adapter = ADAPTERS[claim.provider]
-    workflow_phase = str(claim.outcome.get("phase") or "unknown")
-    log_sequence = 0
-
-    def lifecycle(
-        event_type: str,
-        message: str,
-        *,
-        level: str = "info",
-        metadata: dict[str, str | int | float | bool | None] | None = None,
-    ) -> None:
-        nonlocal log_sequence
-        log_sequence += 1
-        with suppress(CoreError):
-            client.log(
-                claim.completion_token,
-                {
-                    "sequence": log_sequence,
-                    "phase": workflow_phase,
-                    "level": level,
-                    "event_type": event_type,
-                    "message": message,
-                    "metadata": metadata or {},
-                    "occurred_at": datetime.now(UTC).isoformat(),
-                },
-            )
-
-    lifecycle("runner.claimed", "Runner claimed the workflow phase.")
-    root = Path(
-        tempfile.mkdtemp(
-            prefix="oci-outcome-",
-            dir=os.environ.get("AGENT_PRIVATE_ROOT", "/home/runner"),
-        )
-    )
-    os.chmod(root, 0o700)
-    try:
-        (root / "tmp").mkdir(mode=0o700)
-        env = adapter.hydrate(claim, root, safe_env(root, claim.github_token, claim.core_job_token))
-        env.update(
-            {
-                "OUTCOMECI_API_URL": launch.core_url,
-                "OUTCOMECI_JOB_ID": claim.job["job_id"],
-                "OUTCOMECI_JOB_TOKEN": claim.core_job_token,
-            }
-        )
-        workspace = Path(os.environ.get("AGENT_WORK_ROOT", "/workspace"))
-        if not workspace.is_dir():
-            raise ContractError("runner workspace is unavailable")
-        (workspace / "outcome-claim.json").write_text(
-            json.dumps(claim.outcome, separators=(",", ":")), encoding="utf-8"
-        )
-        phase = "preparing"
-        detail: str | None = "Preparing the Outcome workspace"
-        last_heartbeat = 0.0
-        heartbeat_error: CoreError | None = None
-        heartbeat_stop = threading.Event()
-        heartbeat_lock = threading.Lock()
-
-        def heartbeat() -> None:
-            nonlocal heartbeat_error, last_heartbeat
-            with heartbeat_lock:
-                now = time.monotonic()
-                if now - last_heartbeat < HEARTBEAT_INTERVAL_SECONDS:
-                    return
-                try:
-                    client.heartbeat(claim.completion_token, claim.lease_id, phase, detail)
-                except CoreError as error:
-                    if not error.retryable:
-                        heartbeat_error = error
-                        raise
-                    return
-                last_heartbeat = now
-
-        def tick() -> None:
-            if heartbeat_error is not None:
-                raise heartbeat_error
-            heartbeat()
-
-        heartbeat()
-
-        def heartbeat_loop() -> None:
-            while not heartbeat_stop.wait(HEARTBEAT_INTERVAL_SECONDS):
-                try:
-                    heartbeat()
-                except CoreError:
-                    return
-
-        heartbeat_thread = threading.Thread(
-            target=heartbeat_loop,
-            name="outcomeci-execution-heartbeat",
-            daemon=True,
-        )
-        heartbeat_thread.start()
-        lifecycle(
-            "agent.started",
-            "Coding agent started.",
-            metadata={"provider": claim.provider},
-        )
-        try:
-            result = run(
-                claim.command,
-                cwd=workspace,
-                env=env,
-                timeout=claim.timeout_seconds,
-                on_tick=tick,
-            )
-        finally:
-            heartbeat_stop.set()
-            heartbeat_thread.join(timeout=HEARTBEAT_INTERVAL_SECONDS)
-        if heartbeat_error is not None:
-            raise heartbeat_error
-        # Fence completion with one last renewal so successful external effects
-        # cannot be followed by a false failed run at the lease boundary.
-        last_heartbeat = 0.0
-        heartbeat()
-        try:
-            lines = [line for line in result.stdout.splitlines() if line.strip()]
-            outcome_result = json.loads(lines[-1]) if lines else None
-            if not isinstance(outcome_result, dict) or outcome_result.get("status") not in {
-                "awaiting_confirmation",
-                "ready_for_implementation",
-                "completed",
-            }:
-                raise ContractError("invalid outcome result")
-            lifecycle(
-                "agent.completed",
-                "Coding agent completed the workflow phase.",
-                metadata={"status": str(outcome_result["status"])},
-            )
-            client.complete(claim.completion_token, {"result": outcome_result})
-            return 0
-        except (ContractError, json.JSONDecodeError):
-            category, retryable = classify_failure(
-                result.stdout + result.stderr,
-                authorization=False,
-                cancelled=result.returncode < 0,
-            )
-            lifecycle(
-                "agent.failed",
-                "Coding agent did not complete the workflow phase.",
-                level="error",
-                metadata={"category": category, "retryable": retryable},
-            )
-            client.fail(claim.completion_token, category, retryable, claim.lease_id)
-            return result.returncode or 1
-    except TimeoutError:
-        lifecycle("runner.timed_out", "Workflow phase timed out.", level="error")
-        reconcile_failure(client, claim, "agent_timeout", True)
-        raise
-    except CoreError as error:
-        lifecycle(
-            "runner.failed",
-            "Runner could not communicate with the control plane.",
-            level="error",
-            metadata={"category": error.category, "retryable": error.retryable},
-        )
-        reconcile_failure(client, claim, error.category, error.retryable)
-        raise
-    except (ContractError, KeyError, json.JSONDecodeError):
-        lifecycle("runner.invalid_job", "Runner rejected the workflow job.", level="error")
-        reconcile_failure(client, claim, "invalid_job", False)
-        raise
-    except Exception:
-        lifecycle("runner.failed", "Runner encountered an internal failure.", level="error")
-        reconcile_failure(client, claim, "internal_failure", True)
-        raise
-    finally:
-        shutil.rmtree(root, ignore_errors=True)
-
-
 def execute_publication(launch: Launch, client: CoreClient) -> int:
     """Sanitize and compiler-attest one private workflow package."""
     claim = _claim_or_skip(client.claim_publication)
@@ -897,9 +680,7 @@ def main(argv: list[str] | None = None) -> int:
             return authorize(launch, client)
         if launch.mode == "workflow":
             return execute_workflow(launch, client)
-        if launch.mode == "publication":
-            return execute_publication(launch, client)
-        return execute(launch, client)
+        return execute_publication(launch, client)
     except TimeoutError as error:
         category, retryable = "agent_timeout", True
         capture_exception(error, category=category)

@@ -16,8 +16,7 @@ from outcomeci_connectors.providers.slack.setup import manifest as slack_manifes
 from outcomeci_connectors.providers.slack.setup import setup as setup_slack
 from outcomeci_connectors.providers.slack.setup import status as slack_status
 
-from . import __version__, debug, slack_vault, tunnels, webhooks
-from .capability import invoke as invoke_capability
+from . import __version__, debug, slack_vault, tunnels
 from .capability import invoke_integration
 from .cloud import auth_status as cloud_auth_status
 from .cloud import get_workflow, sync_workflow, vault_request
@@ -26,36 +25,20 @@ from .cloud import login_with_key as cloud_login_with_key
 from .cloud import logout as cloud_logout
 from .config import ConfigError, compile_workflow
 from .contracts import ContractError, render_reference, validate_contract
-from .humans import accept as accept_human_input
-from .humans import assign as assign_human_hook
-from .humans import poll as poll_human_input
-from .humans import request as request_human_input
 from .integrations import (
     IntegrationError,
     IntegrationExecutor,
     doctor,
     local_credential_resolver,
 )
-from .local import ExecutionOptions, compile_context, validate_artifacts
-from .local import advance as advance_local_outcome
-from .local import begin as begin_local_outcome
-from .local import continue_run as continue_local_outcome
-from .local import recover as recover_local_outcome
-from .local import request_input as request_local_input
-from .local import respond as respond_local_outcome
-from .local import retry as retry_local_outcome
-from .local import start as start_local_outcome
-from .local import status as local_outcome_status
-from .local import trigger as trigger_local_outcome
 from .local_vault import initialize as initialize_local_vault
 from .local_vault import list_entries as list_local_vault_entries
 from .local_vault import put as put_local_vault_entry
-from .outcome import run as run_outcome
 from .process import ExecutionError
 from .proof_runner import bundled_definition, bundled_proof_names
 from .proof_runner import run as run_simulation
 from .publication import prepare_publication
-from .repository import RepositoryError, initialize, update, validate
+from .repository import RepositoryError, initialize, validate
 from .schema import export_schema, load_schema, schema_path
 
 AGENT_CHOICES = ("codex", "claude")
@@ -65,14 +48,9 @@ def _add_workspace_argument(command: argparse.ArgumentParser) -> None:
     command.add_argument("--workspace", type=Path, default=Path.cwd())
 
 
-def _add_workflow_arguments(
-    command: argparse.ArgumentParser, *, agent_overrides: bool = False
-) -> None:
+def _add_workflow_arguments(command: argparse.ArgumentParser) -> None:
     _add_workspace_argument(command)
     command.add_argument("--config", type=Path)
-    if agent_overrides:
-        command.add_argument("--agent", choices=AGENT_CHOICES)
-        command.add_argument("--model")
 
 
 def _workflow_path(args: argparse.Namespace) -> Path:
@@ -86,7 +64,7 @@ def _print_json(value: object, *, compact: bool = False, sort_keys: bool = False
 
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
-        prog="oci", description="Standup and outcome workflows for OutcomeCI"
+        prog="oci", description="Write, run and publish OutcomeCI workflows"
     )
     root.add_argument("--version", action="version", version=f"oci {__version__}")
     commands = root.add_subparsers(dest="command", required=True)
@@ -157,19 +135,6 @@ def parser() -> argparse.ArgumentParser:
     )
     workflow_publish.add_argument("--model")
     workflow_publish.add_argument("--sensitive-term", action="append", default=[])
-    workflow_listen = workflow_commands.add_parser(
-        "listen", help="Execute queued workflow triggers locally"
-    )
-    workflow_listen.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
-    workflow_listen.add_argument("--workflow", required=True, help="Cloud workflow identifier")
-    workflow_listen.add_argument("--dir", type=Path, default=Path.cwd())
-    workflow_listen.add_argument("--config", type=Path, default=Path("outcome.yml"))
-    workflow_listen.add_argument(
-        "--auto-continue",
-        action="store_true",
-        help="Continue configured phases automatically, without bypassing human hooks",
-    )
-    workflow_listen.add_argument("--once", action="store_true")
     workflow_debug = workflow_commands.add_parser(
         "debug",
         help="Run a backend: outcomeci workflow locally against real cloud vault credentials",
@@ -311,22 +276,9 @@ def parser() -> argparse.ArgumentParser:
     local_vault_put.add_argument("--value")
     local_vault_put.add_argument("--value-stdin", action="store_true")
     _add_workspace_argument(local_vault_put)
-    for name in ("init", "update", "validate", "status"):
+    for name in ("init", "validate", "status"):
         item = commands.add_parser(name)
         item.add_argument("--dir", type=Path, default=Path.cwd())
-        if name == "init":
-            item.add_argument(
-                "--template",
-                choices=("workflow", "standup"),
-                default="workflow",
-                help="workflow: an outcomeci.workflow/v1 file for `oci workflow run`; "
-                "standup: the interactive Standup the outcome skill drives",
-            )
-            item.add_argument(
-                "--backend",
-                choices=("outcomeci", "filesystem"),
-                help="Standup backend (standup template only; default outcomeci)",
-            )
     proof = commands.add_parser("proof", help="Run ecosystem persona durability proofs")
     proof_commands = proof.add_subparsers(dest="proof_command", required=True)
     proof_run = proof_commands.add_parser("run")
@@ -341,92 +293,7 @@ def parser() -> argparse.ArgumentParser:
         item = outcome_commands.add_parser(name)
         item.add_argument("config", nargs="?", type=Path, default=Path("outcome.yml"))
         if name == "compile":
-            item.add_argument("--phase")
-            item.add_argument("--run")
-            item.add_argument("--workspace", type=Path, default=Path.cwd())
-    run = outcome_commands.add_parser("run")
-    run.add_argument("--claim", required=True, type=Path)
-    run.add_argument("--workspace", type=Path, default=Path("/workspace"))
-    start = outcome_commands.add_parser("start")
-    start.add_argument("intent")
-    _add_workflow_arguments(start, agent_overrides=True)
-    trigger_command = outcome_commands.add_parser(
-        "trigger", help="Execute a named typed trigger locally"
-    )
-    trigger_command.add_argument("trigger_name")
-    trigger_command.add_argument("--input", type=Path, required=True)
-    _add_workflow_arguments(trigger_command, agent_overrides=True)
-    continuation = outcome_commands.add_parser("continue")
-    continuation.add_argument("run_id")
-    continuation.add_argument("--approve", action="store_true")
-    _add_workflow_arguments(continuation, agent_overrides=True)
-    retry_command = outcome_commands.add_parser("retry")
-    retry_command.add_argument("run_id")
-    _add_workflow_arguments(retry_command, agent_overrides=True)
-    recover_command = outcome_commands.add_parser("recover")
-    recover_command.add_argument("run_id")
-    _add_workflow_arguments(recover_command)
-    outcome_status = outcome_commands.add_parser("status")
-    outcome_status.add_argument("run_id", nargs="?")
-    _add_workspace_argument(outcome_status)
-    begin_command = outcome_commands.add_parser("begin")
-    begin_command.add_argument("intent")
-    _add_workflow_arguments(begin_command)
-    validate_command = outcome_commands.add_parser("validate-artifacts")
-    validate_command.add_argument("--run")
-    _add_workflow_arguments(validate_command)
-    advance_command = outcome_commands.add_parser("advance")
-    advance_command.add_argument("--run")
-    advance_command.add_argument("--approve", action="store_true")
-    _add_workflow_arguments(advance_command)
-    request_command = outcome_commands.add_parser("request-input")
-    request_command.add_argument("interaction_id")
-    request_command.add_argument("--run", required=True)
-    _add_workflow_arguments(request_command)
-    respond_command = outcome_commands.add_parser("respond")
-    respond_command.add_argument("interaction_id")
-    respond_command.add_argument("message")
-    respond_command.add_argument("--run", required=True)
-    respond_command.add_argument("--approve", action="store_true")
-    respond_command.add_argument("--reject", action="store_true")
-    _add_workflow_arguments(respond_command, agent_overrides=True)
-    human = commands.add_parser("human")
-    human_commands = human.add_subparsers(dest="human_command", required=True)
-    human_assign = human_commands.add_parser(
-        "assign", help="Assign readable targets to a custom-transport workflow hook"
-    )
-    human_assign.add_argument("phase")
-    human_assign.add_argument("timing", choices=("before", "during", "after"))
-    human_assign.add_argument("interaction_id")
-    human_assign.add_argument("--user", action="append", default=[])
-    human_assign.add_argument("--channel", action="append", default=[])
-    human_assign.add_argument("--group", action="append", default=[])
-    human_assign.add_argument("--wait", choices=("ask", "block", "continue"), default="ask")
-    human_assign.add_argument("--timeout", type=int)
-    human_assign.add_argument("--connection", required=True)
-    _add_workflow_arguments(human_assign)
-    human_request = human_commands.add_parser("request", help="Deliver a configured human hook")
-    human_request.add_argument("interaction_id")
-    human_request.add_argument("--run", required=True)
-    _add_workflow_arguments(human_request)
-    human_request.add_argument("--continue", dest="continue_while_waiting", action="store_true")
-    human_poll = human_commands.add_parser(
-        "poll", help="Poll a custom-transport human hook for responses"
-    )
-    human_poll.add_argument("interaction_id")
-    human_poll.add_argument("--run", required=True)
-    human_poll.add_argument("--wait", type=int, default=0)
-    human_poll.add_argument("--interval", type=float, default=2)
-    _add_workflow_arguments(human_poll)
-    human_accept = human_commands.add_parser(
-        "accept", help="Persist a polled response without launching another agent"
-    )
-    human_accept.add_argument("interaction_id")
-    human_accept.add_argument("message")
-    human_accept.add_argument("--run", required=True)
-    human_accept.add_argument("--approve", action="store_true")
-    human_accept.add_argument("--reject", action="store_true")
-    _add_workflow_arguments(human_accept)
+            item.add_argument("--step", dest="phase", help="Print only this step's instructions")
     integration = commands.add_parser("integration")
     integration_commands = integration.add_subparsers(dest="integration_command", required=True)
     integration_list = integration_commands.add_parser(
@@ -448,7 +315,7 @@ def parser() -> argparse.ArgumentParser:
     integration_execute.add_argument("--input-stdin", action="store_true")
     _add_workflow_arguments(integration_execute)
     integration_dry_run = integration_commands.add_parser(
-        "dry-run", help="Show authorized API and human effects without executing them"
+        "dry-run", help="Show authorized API effects without executing them"
     )
     integration_dry_run.add_argument("--phase", required=True)
     _add_workflow_arguments(integration_dry_run)
@@ -591,18 +458,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 _print_json(result, sort_keys=True)
                 return 0
-            if args.workflow_command == "listen":
-                root = args.dir.resolve()
-                config = (root / args.config).resolve()
-                webhooks.listen(
-                    args.workspace_id,
-                    args.workflow,
-                    root,
-                    config,
-                    auto_continue=args.auto_continue,
-                    once=args.once,
-                )
-                return 0
             if args.workflow_command == "run":
                 root = args.dir.resolve()
                 _print_json(
@@ -727,13 +582,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_json(result or {"ok": True})
             return 0
         if args.command == "init":
-            if args.backend and args.template != "standup":
-                raise ExecutionError("--backend applies only to --template standup")
-            _print_json(
-                {"created": initialize(args.dir, args.backend or "outcomeci", args.template)}
-            )
-        elif args.command == "update":
-            _print_json({"created": update(args.dir)})
+            _print_json({"created": initialize(args.dir)})
         elif args.command == "validate":
             result = validate(args.dir)
             _print_json({"valid": True, "workflow_revision": result["workflow_revision"]})
@@ -752,209 +601,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 {"valid": True, "workflow_revision": result["workflow_revision"]}, sort_keys=True
             )
         elif args.command == "outcome" and args.outcome_command == "compile":
-            if args.run:
-                result = compile_context(args.workspace.resolve(), args.config.resolve(), args.run)
-            else:
-                result = compile_workflow(args.config)
-                if args.phase:
-                    phase = result["instructions"]["phases"].get(args.phase)
-                    if phase is None:
-                        raise ExecutionError(f"workflow has no instructions for {args.phase}")
-                    result = {
-                        **result,
-                        "instructions": {
-                            "orchestrator": result["instructions"]["orchestrator"],
-                            "phase": phase,
-                        },
-                    }
+            result = compile_workflow(args.config)
+            if args.phase:
+                phase = result["instructions"]["phases"].get(args.phase)
+                if phase is None:
+                    raise ExecutionError(f"workflow has no step {args.phase}")
+                result = {
+                    **result,
+                    "instructions": {
+                        "orchestrator": result["instructions"]["orchestrator"],
+                        "phase": phase,
+                    },
+                }
             _print_json(result, sort_keys=True)
-        elif args.command == "outcome" and args.outcome_command == "run":
-            _print_json(run_outcome(args.claim, args.workspace), compact=True)
-        elif args.command == "outcome" and args.outcome_command == "start":
-            config = _workflow_path(args)
-            _print_json(
-                start_local_outcome(
-                    args.workspace.resolve(),
-                    config,
-                    args.intent,
-                    agent=args.agent,
-                    model=args.model,
-                ),
-                sort_keys=True,
-            )
-        elif args.command == "outcome" and args.outcome_command == "trigger":
-            try:
-                payload = json.loads(args.input.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError) as exc:
-                raise ExecutionError("trigger input must be a readable JSON file") from exc
-            if not isinstance(payload, dict):
-                raise ExecutionError("trigger input must be a JSON object")
-            _print_json(
-                trigger_local_outcome(
-                    args.workspace.resolve(),
-                    _workflow_path(args),
-                    args.trigger_name,
-                    payload,
-                    options=ExecutionOptions(agent=args.agent, model=args.model),
-                ),
-                sort_keys=True,
-            )
-        elif args.command == "outcome" and args.outcome_command == "continue":
-            config = _workflow_path(args)
-            _print_json(
-                continue_local_outcome(
-                    args.workspace.resolve(),
-                    config,
-                    args.run_id,
-                    args.approve,
-                    options=ExecutionOptions(agent=args.agent, model=args.model),
-                ),
-                sort_keys=True,
-            )
-        elif args.command == "outcome" and args.outcome_command == "retry":
-            config = _workflow_path(args)
-            _print_json(
-                retry_local_outcome(
-                    args.workspace.resolve(),
-                    config,
-                    args.run_id,
-                    options=ExecutionOptions(agent=args.agent, model=args.model),
-                ),
-                sort_keys=True,
-            )
-        elif args.command == "outcome" and args.outcome_command == "recover":
-            config = _workflow_path(args)
-            _print_json(
-                recover_local_outcome(args.workspace.resolve(), config, args.run_id),
-                sort_keys=True,
-            )
-        elif args.command == "outcome" and args.outcome_command == "status":
-            _print_json(local_outcome_status(args.workspace.resolve(), args.run_id), sort_keys=True)
-        elif args.command == "outcome" and args.outcome_command == "begin":
-            config = _workflow_path(args)
-            _print_json(
-                begin_local_outcome(args.workspace.resolve(), config, args.intent),
-                sort_keys=True,
-            )
-        elif args.command == "outcome" and args.outcome_command == "validate-artifacts":
-            config = _workflow_path(args)
-            _print_json(
-                validate_artifacts(args.workspace.resolve(), config, args.run),
-                sort_keys=True,
-            )
-        elif args.command == "outcome" and args.outcome_command == "advance":
-            config = _workflow_path(args)
-            _print_json(
-                advance_local_outcome(args.workspace.resolve(), config, args.run, args.approve),
-                sort_keys=True,
-            )
-        elif args.command == "outcome" and args.outcome_command == "request-input":
-            config = _workflow_path(args)
-            _print_json(
-                request_local_input(
-                    args.workspace.resolve(), config, args.run, args.interaction_id
-                ),
-                sort_keys=True,
-            )
-        elif args.command == "outcome" and args.outcome_command == "respond":
-            config = _workflow_path(args)
-            _print_json(
-                respond_local_outcome(
-                    args.workspace.resolve(),
-                    config,
-                    args.run,
-                    args.interaction_id,
-                    args.message,
-                    approve=args.approve,
-                    reject=args.reject,
-                    options=ExecutionOptions(agent=args.agent, model=args.model),
-                ),
-                sort_keys=True,
-            )
-        elif args.command == "human":
-            workspace = args.workspace.resolve()
-            scoped = bool(os.environ.get("OUTCOMECI_CAPABILITY_SOCKET"))
-            if args.human_command == "assign":
-                if scoped:
-                    raise ExecutionError("hook assignment is not allowed during outcome execution")
-                config = _workflow_path(args)
-                selected = (
-                    [("user", value) for value in args.user]
-                    + [("channel", value) for value in args.channel]
-                    + [("group", value) for value in args.group]
-                )
-                if not selected:
-                    raise ExecutionError("assign at least one --user, --channel, or --group")
-                _print_json(
-                    assign_human_hook(
-                        workspace,
-                        config,
-                        args.phase,
-                        args.timing,
-                        args.interaction_id,
-                        selected,
-                        args.wait,
-                        args.timeout,
-                        args.connection,
-                    ),
-                    sort_keys=True,
-                )
-            elif args.human_command == "request":
-                result = (
-                    invoke_capability(
-                        "request",
-                        args.run,
-                        args.interaction_id,
-                        continue_while_waiting=args.continue_while_waiting,
-                    )
-                    if scoped
-                    else request_human_input(
-                        workspace,
-                        _workflow_path(args),
-                        args.run,
-                        args.interaction_id,
-                        args.continue_while_waiting,
-                    )
-                )
-                _print_json(result, sort_keys=True)
-            elif args.human_command == "poll":
-                config = _workflow_path(args)
-                result = (
-                    invoke_capability(
-                        "poll",
-                        args.run,
-                        args.interaction_id,
-                        wait_seconds=args.wait,
-                        interval_seconds=args.interval,
-                    )
-                    if scoped
-                    else poll_human_input(
-                        workspace, config, args.run, args.interaction_id, args.wait, args.interval
-                    )
-                )
-                _print_json(result, sort_keys=True)
-            elif args.human_command == "accept":
-                result = (
-                    invoke_capability(
-                        "accept",
-                        args.run,
-                        args.interaction_id,
-                        message=args.message,
-                        approve=args.approve,
-                        reject=args.reject,
-                    )
-                    if scoped
-                    else accept_human_input(
-                        workspace,
-                        _workflow_path(args),
-                        args.run,
-                        args.interaction_id,
-                        args.message,
-                        args.approve,
-                        args.reject,
-                    )
-                )
-                _print_json(result, sort_keys=True)
         elif args.command == "integration" and args.integration_command in {
             "list",
             "describe",
