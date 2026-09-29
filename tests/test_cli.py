@@ -14,8 +14,26 @@ from outcomeci.repository import initialize, update
 from outcomeci.schema import load_schema
 
 
-def test_init_and_validate(tmp_path: Path, capsys) -> None:
+def test_init_writes_a_v1_workflow_that_validates(tmp_path: Path, capsys) -> None:
     assert main(["init", "--dir", str(tmp_path)]) == 0
+    document = yaml.safe_load((tmp_path / "outcome.yml").read_text())
+    assert document["apiVersion"] == "outcomeci.workflow/v1"
+    assert (tmp_path / ".outcomeci/instructions/investigate.md").is_file()
+    assert json.loads((tmp_path / ".outcomeci/request.json").read_text())["repo"]["owner"]
+    assert not (tmp_path / ".agents").exists()
+    assert main(["validate", "--dir", str(tmp_path)]) == 0
+    assert '"valid": true' in capsys.readouterr().out
+    assert main(["update", "--dir", str(tmp_path)]) == 0
+    assert not (tmp_path / ".agents").exists()
+
+
+def test_backend_needs_the_standup_template(tmp_path: Path) -> None:
+    assert main(["init", "--backend", "filesystem", "--dir", str(tmp_path)]) == 2
+    assert not (tmp_path / "outcome.yml").exists()
+
+
+def test_init_and_validate(tmp_path: Path, capsys) -> None:
+    assert main(["init", "--template", "standup", "--dir", str(tmp_path)]) == 0
     assert (tmp_path / "outcome.yml").is_file()
     assert (tmp_path / ".outcomeci/instructions/standup.md").is_file()
     assert (tmp_path / ".outcomeci/context").is_dir()
@@ -167,7 +185,7 @@ def test_update_refreshes_managed_skills_but_preserves_workflow(tmp_path: Path) 
 
 
 def test_instruction_content_is_part_of_revision(tmp_path: Path) -> None:
-    main(["init", "--dir", str(tmp_path)])
+    main(["init", "--template", "standup", "--dir", str(tmp_path)])
     first = compile_workflow(tmp_path / "outcome.yml")["workflow_revision"]
     instruction = tmp_path / ".outcomeci/instructions/standup.md"
     instruction.write_text(instruction.read_text() + "\nAdditional policy.\n")
@@ -182,14 +200,17 @@ def test_legacy_context_is_rejected(tmp_path: Path, capsys) -> None:
 
 
 def test_filesystem_init_configures_standalone_execution(tmp_path: Path) -> None:
-    assert main(["init", "--backend", "filesystem", "--dir", str(tmp_path)]) == 0
+    assert (
+        main(["init", "--template", "standup", "--backend", "filesystem", "--dir", str(tmp_path)])
+        == 0
+    )
     compiled = compile_workflow(tmp_path / "outcome.yml")
     assert compiled["workflow"]["spec"]["backend"]["provider"] == "filesystem"
     assert compiled["workflow"]["spec"]["context"]["provider"] == "filesystem"
 
 
 def test_filesystem_context_is_hashed_into_revision(tmp_path: Path) -> None:
-    main(["init", "--backend", "filesystem", "--dir", str(tmp_path)])
+    main(["init", "--template", "standup", "--backend", "filesystem", "--dir", str(tmp_path)])
     context = tmp_path / ".outcomeci" / "context"
     evidence = context / "customer-notes.md"
     evidence.write_text("Customers need faster exports.\n")
@@ -203,7 +224,7 @@ def test_filesystem_context_is_hashed_into_revision(tmp_path: Path) -> None:
 
 
 def test_filesystem_context_excludes_matching_artifacts(tmp_path: Path) -> None:
-    main(["init", "--backend", "filesystem", "--dir", str(tmp_path)])
+    main(["init", "--template", "standup", "--backend", "filesystem", "--dir", str(tmp_path)])
     (tmp_path / "node_modules" / "package").mkdir(parents=True)
     (tmp_path / "node_modules" / "package" / "notes.md").write_text("ignored\n")
     workflow = tmp_path / "outcome.yml"
@@ -235,3 +256,18 @@ def test_slack_setup_passes_the_request_url_and_events(tmp_path: Path, monkeypat
         (None, ["mention", "dm"]),
         (url, ["mention"]),
     ]
+
+
+def test_local_vault_put_drops_the_newline_a_pipe_adds(tmp_path: Path, monkeypatch) -> None:
+    import io
+
+    from outcomeci import local_vault
+
+    monkeypatch.setenv("OUTCOMECI_CONFIG_HOME", str(tmp_path / "config"))
+    assert main(["vault", "local", "init", "--workspace", str(tmp_path)]) == 0
+    monkeypatch.setattr("sys.stdin", io.StringIO("ghp-token\n"))
+    assert (
+        main(["vault", "local", "put", "github", "--value-stdin", "--workspace", str(tmp_path)])
+        == 0
+    )
+    assert local_vault.resolve(tmp_path, "vault:github") == "ghp-token"

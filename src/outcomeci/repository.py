@@ -4,8 +4,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import yaml
+
 from .config import ConfigError, compile_workflow
-from .templates import CONSTITUTION, INSTRUCTIONS, OUTCOME_SKILL, OUTCOME_YAML
+from .templates import (
+    CONSTITUTION,
+    INSTRUCTIONS,
+    OUTCOME_SKILL,
+    OUTCOME_YAML,
+    WORKFLOW_INSTRUCTIONS,
+    WORKFLOW_REQUEST,
+    WORKFLOW_YAML,
+)
+
+TEMPLATES = ("workflow", "standup")
 
 
 class RepositoryError(RuntimeError):
@@ -33,7 +45,44 @@ def _files(root: Path) -> dict[Path, str]:
     return values
 
 
-def initialize(root: Path, backend: str = "outcomeci") -> list[str]:
+def _workflow_files(root: Path) -> dict[Path, str]:
+    base = root / ".outcomeci"
+    values = {root / "outcome.yml": WORKFLOW_YAML, base / "request.json": WORKFLOW_REQUEST}
+    values.update(
+        {base / "instructions" / name: body for name, body in WORKFLOW_INSTRUCTIONS.items()}
+    )
+    return values
+
+
+def _write_missing(root: Path, files: dict[Path, str]) -> list[str]:
+    created = []
+    for path, content in files.items():
+        if path.exists():
+            continue
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+        created.append(str(path.relative_to(root)))
+    return created
+
+
+def _is_v1(root: Path) -> bool:
+    try:
+        document = yaml.safe_load((root / "outcome.yml").read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return False
+    return isinstance(document, dict) and document.get("apiVersion") == "outcomeci.workflow/v1"
+
+
+def initialize(root: Path, backend: str = "outcomeci", template: str = "standup") -> list[str]:
+    """Write the files a template needs that do not exist yet.
+
+    `workflow` is an outcomeci.workflow/v1 file run with `oci workflow run`;
+    `standup` is the interactive v1alpha1 Standup the outcome skill drives.
+    """
+    if template not in TEMPLATES:
+        raise RepositoryError(f"unknown template {template!r}")
+    if template == "workflow":
+        return _write_missing(root, _workflow_files(root))
     created = []
     (root / ".outcomeci" / "context").mkdir(parents=True, exist_ok=True)
     for path, content in _files(root).items():
@@ -49,6 +98,8 @@ def initialize(root: Path, backend: str = "outcomeci") -> list[str]:
 
 def update(root: Path) -> list[str]:
     """Refresh managed agent skills without replacing user-owned workflow policy."""
+    if _is_v1(root):
+        return _write_missing(root, _workflow_files(root))
     changed = initialize(root)
     for path in _skill_mirror_paths(root):
         if path.read_text(encoding="utf-8") != OUTCOME_SKILL:

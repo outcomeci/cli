@@ -222,6 +222,40 @@ def parser() -> argparse.ArgumentParser:
         help="Docker network for the --image container, such as host when the default "
         "bridge network cannot resolve DNS",
     )
+    workflow_run = workflow_commands.add_parser(
+        "run",
+        help="Run a workflow in the runner container with the local Vault and this "
+        "machine's agent login",
+    )
+    workflow_run.add_argument("--dir", type=Path, default=Path.cwd())
+    workflow_run.add_argument("--config", type=Path, default=Path("outcome.yml"))
+    workflow_run.add_argument(
+        "--trigger", help="Trigger to run; defaults to the only trigger, or the manual one"
+    )
+    workflow_run.add_argument(
+        "--payload", type=Path, help="JSON file to use as the trigger payload"
+    )
+    workflow_run.add_argument("--agent", choices=AGENT_CHOICES)
+    workflow_run.add_argument("--model")
+    workflow_run.add_argument(
+        "--auto-continue",
+        action="store_true",
+        help="Continue automatically into each ready step, including any real side "
+        "effects (e.g. sending Slack messages) later steps perform",
+    )
+    workflow_run.add_argument(
+        "--image", help="Runner image; defaults to the one released with this CLI"
+    )
+    workflow_run.add_argument(
+        "--retry",
+        metavar="RUN_ID",
+        help="Resume a run in --dir that stopped on an error, from its recorded state",
+    )
+    workflow_run.add_argument(
+        "--network",
+        help="Docker network for the container, such as host when the default bridge "
+        "network cannot resolve DNS",
+    )
     workflow_sync.add_argument("file", type=Path)
     workflow_sync.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     workflow_sync.add_argument("--name")
@@ -296,7 +330,18 @@ def parser() -> argparse.ArgumentParser:
         item = commands.add_parser(name)
         item.add_argument("--dir", type=Path, default=Path.cwd())
         if name == "init":
-            item.add_argument("--backend", choices=("outcomeci", "filesystem"), default="outcomeci")
+            item.add_argument(
+                "--template",
+                choices=("workflow", "standup"),
+                default="workflow",
+                help="workflow: an outcomeci.workflow/v1 file for `oci workflow run`; "
+                "standup: the interactive Standup the outcome skill drives",
+            )
+            item.add_argument(
+                "--backend",
+                choices=("outcomeci", "filesystem"),
+                help="Standup backend (standup template only; default outcomeci)",
+            )
     proof = commands.add_parser("proof", help="Run ecosystem persona durability proofs")
     proof_commands = proof.add_subparsers(dest="proof_command", required=True)
     proof_run = proof_commands.add_parser("run")
@@ -620,6 +665,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                     once=args.once,
                 )
                 return 0
+            if args.workflow_command == "run":
+                root = args.dir.resolve()
+                _print_json(
+                    debug.run_local(
+                        root,
+                        root / args.config,
+                        trigger_name=args.trigger,
+                        payload_path=args.payload,
+                        agent=args.agent,
+                        model=args.model,
+                        auto_continue=args.auto_continue,
+                        image=args.image,
+                        network=args.network,
+                        retry_run=args.retry,
+                    )
+                )
+                return 0
             if args.workflow_command == "debug":
                 root = args.dir.resolve()
                 config = (root / args.config).resolve()
@@ -658,7 +720,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     _print_json(list_local_vault_entries(workspace), sort_keys=True)
                 else:
                     value = (
-                        sys.stdin.read()
+                        sys.stdin.read().rstrip("\n")
                         if args.value_stdin
                         else args.value
                         if args.value is not None
@@ -728,7 +790,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_json(result or {"ok": True})
             return 0
         if args.command == "init":
-            _print_json({"created": initialize(args.dir, args.backend)})
+            if args.backend and args.template != "standup":
+                raise ExecutionError("--backend applies only to --template standup")
+            _print_json(
+                {"created": initialize(args.dir, args.backend or "outcomeci", args.template)}
+            )
         elif args.command == "update":
             _print_json({"created": update(args.dir)})
         elif args.command == "validate":

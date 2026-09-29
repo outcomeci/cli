@@ -763,3 +763,133 @@ def test_resume_records_an_interrupted_run_before_retrying(monkeypatch, tmp_path
 
     assert local._read(tmp_path, "run-1")["error"] == "the debug run was interrupted"
     retried.assert_called_once()
+
+
+LOCAL_COMPILED = {
+    **IMAGE_COMPILED,
+    "workflow": {
+        "spec": {
+            "agents": {"default": {"runner": "codex"}},
+            "connections": [{"name": "github", "auth": {"credential": "vault:github"}}],
+        }
+    },
+}
+
+
+@pytest.fixture
+def local_env(monkeypatch, image_env, tmp_path):
+    from outcomeci import local_vault
+
+    root, docker = image_env
+    monkeypatch.setattr(debug, "compile_workflow", lambda config: LOCAL_COMPILED)
+    local_vault.initialize(root)
+    local_vault.put(root, "github", "ghp-secret")
+    codex_home = tmp_path / "codex"
+    codex_home.mkdir()
+    (codex_home / "auth.json").write_text(json.dumps(CODEX_LOGIN))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    return root, codex_home
+
+
+def _local_run(root, **kwargs):
+    kwargs.setdefault("image", "outcomeci-runner:dev")
+    return debug.run_local(root, root / "outcome.yml", **kwargs)
+
+
+def test_local_run_sends_local_vault_values_and_the_local_login(monkeypatch, local_env):
+    root, _ = local_env
+    container = _container(monkeypatch, result={"run_id": "run-1"})
+
+    assert _local_run(root) == {"run_id": "run-1"}
+
+    bundle = container.seen["bundle"]
+    assert bundle["values"] == {"github": "ghp-secret"}
+    assert bundle["credentials"] == [{"provider": "codex", "credential": CODEX_LOGIN}]
+    assert bundle["trigger"] == "go"
+    assert bundle["payload"] == {}
+    assert "ghp-secret" not in " ".join(container.seen["command"])
+    assert (root / ".outcomeci" / "outcomes" / "run-1" / "run.json").is_file()
+    debug.issue_debug_lease.assert_not_called()
+
+
+def test_local_run_writes_a_rotated_codex_login_back(monkeypatch, local_env):
+    root, codex_home = local_env
+    _container(monkeypatch, result={"run_id": "run-1"}, rotated=ROTATED)
+
+    _local_run(root)
+
+    assert json.loads((codex_home / "auth.json").read_text()) == ROTATED
+
+
+def test_local_run_writes_back_a_rotation_even_when_the_run_fails(monkeypatch, local_env):
+    root, codex_home = local_env
+    _container(monkeypatch, returncode=1, rotated=ROTATED)
+
+    with pytest.raises(ExecutionError):
+        _local_run(root)
+
+    assert json.loads((codex_home / "auth.json").read_text()) == ROTATED
+
+
+def test_local_run_names_the_missing_vault_entry(monkeypatch, local_env):
+    root, _ = local_env
+    missing = {
+        **LOCAL_COMPILED,
+        "workflow": {
+            "spec": {
+                **LOCAL_COMPILED["workflow"]["spec"],
+                "connections": [{"auth": {"credential": "vault:slack/bot-token"}}],
+            }
+        },
+    }
+    monkeypatch.setattr(debug, "compile_workflow", lambda config: missing)
+
+    with pytest.raises(ExecutionError, match="oci vault local put slack/bot-token"):
+        _local_run(root)
+
+
+def test_local_run_needs_a_codex_login(monkeypatch, local_env, tmp_path):
+    root, _ = local_env
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "nowhere"))
+
+    with pytest.raises(ExecutionError, match="codex login"):
+        _local_run(root)
+
+
+def test_local_run_reads_a_claude_token_from_the_environment_or_the_vault(monkeypatch, local_env):
+    from outcomeci import local_vault
+
+    root, _ = local_env
+    container = _container(monkeypatch, result={"run_id": "run-1"})
+    monkeypatch.delenv("CLAUDE_CODE_OAUTH_TOKEN", raising=False)
+    with pytest.raises(ExecutionError, match="agents/claude"):
+        _local_run(root, agent="claude")
+
+    local_vault.put(root, "agents/claude", "vault-token")
+    _local_run(root, agent="claude")
+    assert container.seen["bundle"]["credentials"] == [
+        {"provider": "claude", "credential": "vault-token"}
+    ]
+
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "env-token")
+    _local_run(root, agent="claude")
+    assert container.seen["bundle"]["credentials"][0]["credential"] == "env-token"
+
+
+def test_local_run_defaults_to_the_manual_trigger_and_the_released_image(monkeypatch, local_env):
+    root, _ = local_env
+    container = _container(monkeypatch, result={"run_id": "run-1"})
+    monkeypatch.setattr("outcomeci.__version__", "1.2.3")
+
+    debug.run_local(root, root / "outcome.yml")
+
+    assert container.seen["bundle"]["trigger"] == "go"
+    assert "ghcr.io/outcomeci/outcome-runner:1.2.3" in container.seen["command"]
+
+
+def test_local_run_refuses_to_guess_an_image_for_a_development_build(monkeypatch, local_env):
+    root, _ = local_env
+    monkeypatch.setattr("outcomeci.__version__", "1.2.4.dev3+gabc")
+
+    with pytest.raises(ExecutionError, match="pass --image"):
+        debug.run_local(root, root / "outcome.yml")

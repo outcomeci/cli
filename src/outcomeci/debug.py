@@ -1,5 +1,9 @@
 """Run a backend: outcomeci workflow locally against real cloud vault credentials.
 
+`run_local` runs a workflow the same way in the runner image with no cloud at
+all: secrets come from the checkout's local Vault and the agent login from
+this machine.
+
 For debugging a cloud run without waiting on a merge-build-deploy cycle: this
 issues a short-lived vault lease scoped to one workflow (gated server-side on
 the same permission as managing that workflow's vault grants) and executes it
@@ -27,7 +31,7 @@ import uuid
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +62,12 @@ AGENT_RENEW_TTL_SECONDS = 900
 CONTAINER_STOP_GRACE_SECONDS = 30
 RELEASE_ATTEMPTS = 3
 RUN_STATE_DIRS = ("outcomes", ".broker")
+RUNNER_IMAGE = "ghcr.io/outcomeci/outcome-runner"
+LOCAL_RUN_TTL_SECONDS = 12 * 3600
+# Agent logins a local run reads from the environment, or else from the local
+# Vault at agents/<provider>. Codex keeps its own login file instead.
+AGENT_ENV = {"claude": "CLAUDE_CODE_OAUTH_TOKEN", "opencode": "OPENROUTER_API_KEY"}
+_RELEASE = re.compile(r"^\d+\.\d+\.\d+$")
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
 
@@ -723,3 +733,152 @@ def _import_run_state(work: Path, root: Path) -> None:
                     destination = target / file.relative_to(run_dir)
                     destination.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copyfile(file, destination)
+
+
+def default_image() -> str:
+    """The runner image published with this CLI release."""
+    from . import __version__
+
+    if not _RELEASE.match(__version__):
+        raise ExecutionError(f"oci {__version__} is not a release build; pass --image")
+    return f"{RUNNER_IMAGE}:{__version__}"
+
+
+def _default_trigger(compiled: dict[str, Any]) -> str:
+    triggers = compiled["triggers"]
+    if len(triggers) == 1:
+        return next(iter(triggers))
+    manual = [name for name, item in triggers.items() if item["type"] == "manual"]
+    if len(manual) == 1:
+        return manual[0]
+    raise ExecutionError(f"pass --trigger; the workflow declares {', '.join(sorted(triggers))}")
+
+
+def _vault_references(compiled: dict[str, Any]) -> list[str]:
+    """The vault: references a run's API calls resolve."""
+    spec = compiled["workflow"]["spec"]
+    found: set[str] = set()
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+        elif isinstance(value, str) and value.startswith("vault:"):
+            found.add(value)
+
+    walk(spec.get("connections") or [])
+    walk(spec.get("integrations") or {})
+    return sorted(found)
+
+
+def _local_values(root: Path, compiled: dict[str, Any]) -> dict[str, Any]:
+    from . import local_vault
+
+    values = {}
+    for reference in _vault_references(compiled):
+        path = reference.removeprefix("vault:")
+        try:
+            values[path] = local_vault.resolve(root, reference)
+        except ExecutionError as exc:
+            raise ExecutionError(
+                f"{exc}; store it with `oci vault local put {path} --value-stdin`"
+            ) from exc
+    return values
+
+
+def _codex_auth_path() -> Path:
+    configured = os.environ.get("CODEX_HOME")
+    return (Path(configured).expanduser() if configured else Path.home() / ".codex") / "auth.json"
+
+
+def _local_login(root: Path, provider: str) -> dict[str, Any]:
+    """This machine's login for one agent provider, as a cloud lease would carry it."""
+    if provider == "codex":
+        path = _codex_auth_path()
+        try:
+            credential = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ExecutionError(f"no Codex login at {path}; run `codex login` first") from exc
+        return {"provider": provider, "credential": credential}
+    variable = AGENT_ENV.get(provider)
+    if variable is None:
+        raise ExecutionError(f"unsupported agent {provider!r}")
+    value = os.environ.get(variable)
+    if not value:
+        from . import local_vault
+
+        try:
+            value = local_vault.resolve(root, f"vault:agents/{provider}")
+        except ExecutionError as exc:
+            raise ExecutionError(
+                f"no {provider} login: set {variable}, or store it with "
+                f"`oci vault local put agents/{provider} --value-stdin`"
+            ) from exc
+    return {"provider": provider, "credential": value}
+
+
+def _write_back_codex(hold: _AgentHold) -> None:
+    """Keep a Codex login the run rotated: the old refresh token is spent."""
+    for login in hold.agent_leases:
+        rotated = _codex_rotation(hold.output / OUTPUT_HOME, login)
+        if rotated is not None:
+            atomic_write_json(_codex_auth_path(), rotated, mode=0o600)
+
+
+def run_local(
+    root: Path,
+    config: Path,
+    *,
+    trigger_name: str | None = None,
+    payload_path: Path | None = None,
+    agent: str | None = None,
+    model: str | None = None,
+    auto_continue: bool = False,
+    image: str | None = None,
+    network: str | None = None,
+    retry_run: str | None = None,
+) -> dict[str, Any]:
+    """Run the workflow in the runner image with local Vault values and local logins."""
+    root, config = root.resolve(), config.resolve()
+    if not config.is_relative_to(root):
+        raise ExecutionError("the workflow file must live inside --dir")
+    compiled = compile_workflow(config)
+    image = image or default_image()
+    if retry_run is not None:
+        _retryable(root, retry_run)
+        name, payload = None, None
+    else:
+        name, payload = _resolve_trigger(
+            compiled, trigger_name or _default_trigger(compiled), payload_path
+        )
+    values = _local_values(root, compiled)
+    logins = [_local_login(root, provider) for provider in _runners(compiled, agent)]
+    _check_image(image)
+    expires_at = (datetime.now(UTC) + timedelta(seconds=LOCAL_RUN_TTL_SECONDS)).isoformat()
+    with ExitStack() as held:
+        held.enter_context(_termination_interrupts())
+        output = Path(held.enter_context(tempfile.TemporaryDirectory(prefix="oci-run-")))
+        os.chmod(output, 0o700)
+        hold = _AgentHold(logins, output)
+        what = f"run {retry_run}" if retry_run else f"trigger {name!r}"
+        print(f"Running {what} inside {image} with the local Vault.", file=sys.stderr)
+        try:
+            return _run_in_image(
+                image,
+                root,
+                config,
+                {"values": values, "expires_at": expires_at},
+                hold,
+                name=name,
+                payload=payload,
+                agent=agent,
+                model=model,
+                auto_continue=auto_continue,
+                network=network,
+                retry_run=retry_run,
+            )
+        finally:
+            _write_back_codex(hold)
