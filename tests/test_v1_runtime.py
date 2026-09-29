@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from pathlib import Path
 
@@ -491,6 +492,95 @@ def test_a_failed_read_can_run_again(tmp_path, monkeypatch):
     with pytest.raises(IntegrationError):
         broker.execute("github.write", read, phase="fix")
     assert broker.execute("github.write", read, phase="fix")["ok"] is True
+
+
+def _github(tmp_path, monkeypatch, handler):
+    """A reviewed broker over github.write whose reviewer allows every call."""
+    compiled = compile_workflow(sentry.EXAMPLES / sentry.WORKFLOW)
+    monkeypatch.setattr(sentry.integrations, "_safe_destination", lambda url, allow: None)
+    executor = IntegrationExecutor(
+        compiled,
+        resolver=lambda ref: "ghp-test-credential",
+        transport=httpx.MockTransport(handler),
+        reviewed=True,
+    )
+    proposals: list = []
+
+    def allow(proposal):
+        proposals.append(proposal)
+        return {"decision": "allow", "proposal_sha256": proposal["proposal_sha256"], "reason": "ok"}
+
+    grants = [{"capability": "github.write", "args": {"repo": "outcomeci/cli"}, "as": None}]
+    broker = PolicyExecutor(
+        executor,
+        tmp_path,
+        {},
+        reviewer=allow,
+        grants=grants,
+        step_policy={"content": "p", "policy": {"runner": "codex"}},
+    )
+    return broker, proposals
+
+
+def _commit(text: str) -> dict:
+    return {
+        "method": "PUT",
+        "path": "/repos/outcomeci/cli/contents/app/main.py",
+        "body": {
+            "message": "log at startup",
+            "branch": "slack-feature/log",
+            "content": base64.b64encode(text.encode()).decode(),
+        },
+    }
+
+
+def test_a_file_commit_is_reviewed_as_a_diff_against_its_branch(tmp_path, monkeypatch):
+    current = "import app\n\napp.run()\n# Wed Mar 11 11:36:52 PM CDT 2026\n"
+    reads: list = []
+
+    def github(request):
+        if request.method == "GET":
+            reads.append(request)
+            # GitHub wraps a file's base64 content at 60 characters.
+            encoded = base64.b64encode(current.encode()).decode()
+            wrapped = "\n".join(encoded[i : i + 60] for i in range(0, len(encoded), 60))
+            return httpx.Response(200, json={"content": wrapped, "encoding": "base64"})
+        return httpx.Response(200, json={"content": {"path": "app/main.py"}})
+
+    broker, proposals = _github(tmp_path, monkeypatch, github)
+    proposed = current.replace("app.run()\n", "print('bear down')\napp.run()\n")
+    broker.execute("github.write", _commit(proposed), phase="fix")
+
+    (read,) = reads
+    assert read.url.path == "/repos/outcomeci/cli/contents/app/main.py"
+    assert read.url.params["ref"] == "slack-feature/log"
+    diff = proposals[0]["compared"]["diff"]
+    assert "+print('bear down')" in diff
+    # A line already on the branch is context, not a change.
+    assert "# Wed Mar 11" in diff and "+# Wed Mar 11" not in diff
+    assert "compared" not in proposals[0]["receipts"][0]
+
+
+def test_a_new_file_is_reviewed_as_all_added(tmp_path, monkeypatch):
+    def github(request):
+        if request.method == "GET":
+            return httpx.Response(404, json={"message": "Not Found"})
+        return httpx.Response(201, json={"content": {"path": "app/main.py"}})
+
+    broker, proposals = _github(tmp_path, monkeypatch, github)
+    broker.execute("github.write", _commit("print('hi')\n"), phase="fix")
+
+    assert "--- (a new file)" in proposals[0]["compared"]["diff"]
+    assert "+print('hi')" in proposals[0]["compared"]["diff"]
+
+
+def test_a_write_that_replaces_no_file_carries_no_diff(tmp_path, monkeypatch):
+    broker, proposals = _github(
+        tmp_path, monkeypatch, lambda request: httpx.Response(201, json={"ref": "x"})
+    )
+    broker.execute("github.write", BRANCH, phase="fix")
+
+    assert "compared" not in proposals[0]
 
 
 def _journal_with(tmp_path: Path, calls: dict, events: list) -> Path:

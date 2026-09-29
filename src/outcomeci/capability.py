@@ -82,10 +82,11 @@ class Broker:
                         f"Step policy for {phase}: {step['v1']['policy']}\n"
                         "Grant arguments such as the channel or repository are enforced "
                         "separately; judge the proposal against this policy only.\n"
-                        "context.inputs is what this step was given by the steps before "
-                        "it, such as a plan its requester approved in discussion. Where "
-                        "it differs from the original trigger, the inputs are what the "
-                        "step must do; do not hold it to the trigger's first wording."
+                        "context.inputs is everything this step was given, such as a plan "
+                        "its requester approved in discussion, and is what it must do.\n"
+                        "Where the proposal replaces a file, `compared` is its diff "
+                        "against the current copy: judge the lines it changes, not the "
+                        "whole file."
                     ),
                     "policy": step["policy"],
                 }
@@ -97,12 +98,18 @@ class Broker:
                 downloads=attachments_path(root, run_id),
             ),
             root / ".outcomeci" / ".broker" / run_id,
-            {
-                "intent": state.get("intent"),
-                "trigger": state.get("trigger"),
-                **({"inputs": inputs} if inputs is not None else {}),
-                "phase": compiled["instructions"]["phases"][phase],
-            },
+            # A v1 step is reviewed against what it was given, which holds the
+            # trigger only when the step takes it (`from: trigger`).
+            (
+                {"inputs": inputs or [], "phase": step}
+                if "v1" in step
+                else {
+                    "intent": state.get("intent"),
+                    "trigger": state.get("trigger"),
+                    **({"inputs": inputs} if inputs is not None else {}),
+                    "phase": step,
+                }
+            ),
             reviewer=policy_reviewer,
             event_sink=event_sink,
             grants=grants,

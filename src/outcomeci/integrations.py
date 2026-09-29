@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import difflib
 import hashlib
 import ipaddress
 import json
@@ -289,6 +290,21 @@ def same(actual: Any, granted: Any) -> bool:
     if isinstance(actual, str) and isinstance(granted, str):
         return actual.strip().lstrip("#") == granted.strip().lstrip("#")
     return actual == granted
+
+
+DIFF_LIMIT = 40_000
+
+
+def _decoded(value: Any, encoding: str) -> str | None:
+    """A compared file's text, or None when it is not UTF-8 text."""
+    if not isinstance(value, str):
+        return None
+    if encoding == "text":
+        return value
+    try:
+        return base64.b64decode("".join(value.split()), validate=True).decode("utf-8")
+    except (ValueError, UnicodeDecodeError):
+        return None
 
 
 def _found(body: Any, source: str) -> Any:
@@ -584,6 +600,69 @@ class IntegrationExecutor:
             ],
             "credentials_resolved": False,
             "requests_executed": False,
+        }
+
+    def compared(
+        self, capability: str, inputs: Mapping[str, Any], *, phase: str
+    ) -> dict[str, Any] | None:
+        """A write that replaces a file, as a policy reviewer sees it: a unified
+        diff against the file's current copy, which this reads with a GET to the
+        same path. None when the operation declares no comparison for the call."""
+        integration_name, operation_name = capability.split(".", 1)
+        integration = self.compiled["workflow"]["spec"]["integrations"][integration_name]
+        operation = integration["operations"].get(operation_name) or {}
+        method = str(inputs.get("method", "")).upper()
+        path = str(inputs.get("path", "")).split("?", 1)[0]
+        rule = next(
+            (
+                item
+                for item in operation.get("compare", [])
+                if method in item["methods"] and re.search(item["path"], path)
+            ),
+            None,
+        )
+        if rule is None:
+            return None
+        proposed = _decoded(_found(inputs.get("body"), rule["proposed"]), rule["encoding"])
+        if proposed is None:
+            return {"path": path, "note": "the proposed content is not readable text"}
+        ref = _found(inputs.get("body"), rule["ref"]) if rule.get("ref") else None
+        try:
+            result = self.execute(
+                capability,
+                {
+                    "method": "GET",
+                    "path": path,
+                    **({"query": {"ref": ref}} if isinstance(ref, str) and ref else {}),
+                },
+                phase=phase,
+            )
+            current = _decoded(
+                _found(result["output"].get("result"), rule["current"]), rule["encoding"]
+            )
+            label = f"{path} at {ref}" if ref else path
+        except IntegrationError as exc:
+            if "HTTP 404" not in str(exc):
+                return {
+                    "path": path,
+                    "note": "the current file could not be read; showing the proposed content",
+                    "proposed": proposed[:DIFF_LIMIT],
+                }
+            current, label = "", "(a new file)"
+        if current is None:
+            return {"path": path, "note": "the current file is not readable text"}
+        diff = "".join(
+            difflib.unified_diff(
+                current.splitlines(keepends=True),
+                proposed.splitlines(keepends=True),
+                fromfile=label,
+                tofile=f"{path} proposed",
+            )
+        )
+        return {
+            "path": path,
+            "diff": diff[:DIFF_LIMIT] or "(no change)",
+            **({"truncated": True} if len(diff) > DIFF_LIMIT else {}),
         }
 
     def execute(

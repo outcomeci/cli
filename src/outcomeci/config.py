@@ -611,7 +611,36 @@ def _request_operation(item: dict[str, Any], request: dict[str, Any], field: str
             "idempotency": "none",
         },
         **_grantable(item, field),
+        **_compare(item, field),
     }
+
+
+def _compare(item: dict[str, Any], field: str) -> dict[str, Any]:
+    """Which writes replace a file, reviewed as a diff against its current copy."""
+    if not item.get("compare"):
+        return {}
+    compare = item["compare"]
+    if not isinstance(compare, list):
+        raise ConfigError(f"{field}.compare must be a list")
+    for index, rule in enumerate(compare):
+        rule = _mapping(rule, f"{field}.compare[{index}]")
+        paths = [rule.get("proposed"), rule.get("current")]
+        if rule.get("ref") is not None:
+            paths.append(rule["ref"])
+        if (
+            not all(isinstance(path, str) and path.startswith("body") for path in paths)
+            or rule.get("encoding") not in {"base64", "text"}
+            or not isinstance(rule.get("methods"), list)
+        ):
+            raise ConfigError(
+                f"{field}.compare[{index}] needs methods, proposed, current and optional ref "
+                "body paths, and a base64 or text encoding"
+            )
+        try:
+            re.compile(str(rule.get("path")))
+        except re.error as exc:
+            raise ConfigError(f"{field}.compare[{index}].path is not a pattern") from exc
+    return {"compare": compare}
 
 
 def _grantable(item: dict[str, Any], field: str) -> dict[str, Any]:
@@ -684,8 +713,8 @@ def _reject_lowered_only(spec: dict[str, Any]) -> None:
             field = f"spec.integrations.{name}.operations.{operation_name}"
             if not isinstance(operation, dict):
                 continue
-            if "grantable" in operation or "deny" in operation:
-                raise ConfigError(f"{field}: grantable and deny {LOWERED_ONLY}")
+            if "grantable" in operation or "deny" in operation or "compare" in operation:
+                raise ConfigError(f"{field}: grantable, deny and compare {LOWERED_ONLY}")
             if isinstance(operation.get("response"), dict) and "download" in operation["response"]:
                 raise ConfigError(f"{field}.response.download {LOWERED_ONLY}")
             if isinstance(operation.get("request"), dict) and "methods" in operation["request"]:
