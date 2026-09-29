@@ -83,6 +83,107 @@ def _print_json(value: object, *, compact: bool = False, sort_keys: bool = False
     print(json.dumps(value, default=str, **options))
 
 
+# Help for arguments, by command path; the "" entry applies to every command.
+ARGUMENT_HELP: dict[str, dict[str, str]] = {
+    "": {
+        "--dir": "Directory that holds the workflow (default: the current directory)",
+        "--config": "Workflow file, relative to --dir (default: outcome.yml)",
+        "--agent": "Run every step with this agent instead of the workflow's",
+        "--model": "Model for --agent",
+        "--value": "Secret value; prefer --value-stdin, which keeps it out of shell history",
+        "--value-stdin": "Read the secret value from stdin",
+        "--workflow": "Grant this workflow ID access to the entry (repeatable)",
+        "--phase": "Step whose grants the call runs under",
+        "--team": "Slack workspace, when the app is installed in several",
+        "entry_id": "Vault entry ID, as oci vault list prints it",
+        "capability": "Capability name, such as github.read",
+    },
+    "auth login": {
+        "--api-url": "OutcomeCI API to sign in to",
+        "--no-open": "Print the sign-in link instead of opening a browser",
+    },
+    "workflow get": {"workflow_id": "Cloud workflow ID"},
+    "workflow sync": {
+        "file": "Workflow file to upload with its .outcomeci/ support files",
+        "--name": "Display name (default: the workflow's name)",
+        "--create": "Create a new cloud workflow",
+        "--version": "Add a version to the existing workflow with this name",
+    },
+    "workflow prepare-publication": {
+        "file": "Workflow file to package for public reuse",
+        "--output": "Directory to write the sanitized package to",
+        "--agent": "Agent that reviews the package for private details",
+        "--sensitive-term": "Term that must not appear in the package (repeatable)",
+    },
+    "vault put": {
+        "path": "Vault path the workflow references as vault:<path>",
+        "--name": "Display name (default: the path)",
+    },
+    "vault local put": {"path": "Vault path the workflow references as vault:<path>"},
+    "integration execute": {
+        "--input": "Call input as a JSON object",
+        "--input-stdin": "Read the call input as JSON from stdin",
+    },
+    "integration slack setup": {"--name": "Slack app name"},
+    "integration slack sync-credentials": {
+        "--local": "Copy the bot token into the local Vault",
+        "--cloud": "Copy the bot token into this cloud workspace's Vault",
+        "--vault-workspace": "Directory whose local Vault receives the token",
+        "--path": "Vault path to store the token at (default: slack/bot-token)",
+        "--workflow": "Grant this cloud workflow ID access to the token (repeatable)",
+    },
+    "integration slack manifest": {"--project": "Slack CLI project directory"},
+}
+
+
+COMMAND_HELP = {
+    "auth login": "Sign in to OutcomeCI Cloud",
+    "auth status": "Show the signed-in account",
+    "auth logout": "Remove stored OutcomeCI credentials",
+    "workflow sync": "Upload a workflow to OutcomeCI Cloud as a new workflow or version",
+    "vault list": "List a workspace's Vault entries, without values",
+    "vault put": "Store a credential in a workspace's Vault",
+    "vault rotate": "Replace a Vault entry's value",
+    "vault grant": "Set which workflows may use a Vault entry",
+    "vault revoke": "Revoke a Vault entry",
+    "vault local init": "Create this checkout's encrypted local Vault",
+    "vault local list": "List local Vault entries, without values",
+    "vault local put": "Store a credential in the local Vault",
+    "integration slack setup": "Create and install a Slack app with the Slack CLI",
+    "integration slack status": "Check the Slack app and Slack CLI",
+    "integration slack manifest": "Print the Slack app manifest",
+    "integration slack sync-credentials": "Copy the Slack app's bot token into a Vault",
+}
+
+
+def _describe(parser: argparse.ArgumentParser, path: str = "") -> None:
+    """Give every command and argument without its own help the description
+    COMMAND_HELP or ARGUMENT_HELP holds."""
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for choice in action._choices_actions:
+                if choice.help is None:
+                    choice.help = COMMAND_HELP.get(f"{path} {choice.dest}".strip())
+            # Commands left out of the listing on purpose stay hidden.
+            listed = {choice.dest: choice for choice in action._choices_actions}
+            action._choices_actions[:] = [
+                listed.get(name)
+                or action._ChoicesPseudoAction(name, (), COMMAND_HELP[f"{path} {name}".strip()])
+                for name in action.choices
+                if name in listed or f"{path} {name}".strip() in COMMAND_HELP
+            ]
+            for name, child in action.choices.items():
+                _describe(child, f"{path} {name}".strip())
+            continue
+        if action.help is not None or isinstance(action, argparse._HelpAction):
+            continue
+        for key in (*action.option_strings, action.dest):
+            found = ARGUMENT_HELP.get(path, {}).get(key) or ARGUMENT_HELP[""].get(key)
+            if found:
+                action.help = found
+                break
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(
         prog="oci", description="Write, run and publish OutcomeCI workflows"
@@ -291,6 +392,7 @@ def parser() -> argparse.ArgumentParser:
     )
     slack_manifest_command.add_argument("--project", type=Path, default=Path.cwd())
     slack_manifest_command.add_argument("--source", type=Path, help=argparse.SUPPRESS)
+    _describe(root)
     return root
 
 

@@ -209,3 +209,26 @@ def test_workflow_debug_is_gone() -> None:
 
     with pytest.raises(SystemExit):
         main(["workflow", "debug", "--help"])
+
+
+def test_every_visible_command_and_option_has_help() -> None:
+    import argparse
+
+    from outcomeci.cli import parser
+
+    missing = []
+
+    def walk(current: argparse.ArgumentParser, path: str) -> None:
+        for action in current._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                listed = {choice.dest: choice for choice in action._choices_actions}
+                for name, child in action.choices.items():
+                    if name in listed:
+                        if not listed[name].help:
+                            missing.append(f"{path} {name}")
+                        walk(child, f"{path} {name}")
+            elif not isinstance(action, argparse._HelpAction) and not action.help:
+                missing.append(f"{path} {'/'.join(action.option_strings) or action.dest}")
+
+    walk(parser(), "oci")
+    assert missing == []
