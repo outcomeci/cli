@@ -6,7 +6,6 @@ agent login from this machine. With `--cloud`, secrets come from a short-lived
 lease on the workspace's Vault (gated server-side on the same permission as
 managing that workflow's Vault grants) and the agent login is the workspace's
 connected agent, held exclusively for the run as a cloud run holds it.
-`--replay` claims a real queued invocation and runs it the same way.
 """
 
 from __future__ import annotations
@@ -32,7 +31,6 @@ from typing import Any
 from .cloud import (
     CloudRequestError,
     complete_debug_agent_lease,
-    complete_debug_lease,
     credentials_path,
     issue_debug_lease,
     renew_debug_agent_lease,
@@ -131,7 +129,6 @@ def run_cloud(
     workflow_id: str,
     *,
     trigger_name: str | None = None,
-    replay: str | None = None,
     payload_path: Path | None = None,
     agent: str | None = None,
     model: str | None = None,
@@ -148,10 +145,6 @@ def run_cloud(
     _check_agent(agent, model)
     # Everything that can fail on the user's input fails here, before a lease
     # takes the workspace's agent connection away from its cloud runs.
-    if replay is not None and (retry_run or trigger_name or payload_path):
-        raise ExecutionError(
-            "--replay runs the recorded trigger; drop --trigger, --payload, --retry"
-        )
     image = image or default_image()
     _check_image(image)
     _flush_pending_releases()
@@ -159,56 +152,39 @@ def run_cloud(
     if retry_run is not None:
         _retryable(root, retry_run)
         name, payload = None, None
-    elif replay is None:
+    else:
         name, payload = _resolve_trigger(
             compiled, trigger_name or _default_trigger(compiled), payload_path
         )
-    else:
-        name, payload = None, None
-    leases = _issue_leases(workspace_id, workflow_id, _runners(compiled, agent), replay)
+    leases = _issue_leases(workspace_id, workflow_id, _runners(compiled, agent))
     lease = leases[0]
 
     with ExitStack() as held:
+        held.enter_context(_termination_interrupts())
+        hold = held.enter_context(_hold_agent_lease(workspace_id, workflow_id, leases))
+        what = f"run {retry_run}" if retry_run else f"trigger {name!r}"
+        print(
+            f"Running {what} inside {image} with workspace {workspace_id}'s Vault "
+            f"for workflow {workflow_id}.",
+            file=sys.stderr,
+        )
         try:
-            held.enter_context(_termination_interrupts())
-            hold = held.enter_context(_hold_agent_lease(workspace_id, workflow_id, leases))
-            if replay is not None:
-                name = lease.get("trigger_name")
-                if not name:
-                    raise ExecutionError(
-                        "this invocation has no recorded trigger; it may predate this contract"
-                    )
-                payload = lease.get("input") or {}
-            what = f"run {retry_run}" if retry_run else f"trigger {name!r}"
-            print(
-                f"Running {what} inside {image} with workspace {workspace_id}'s Vault "
-                f"for workflow {workflow_id}.",
-                file=sys.stderr,
+            result = _run_in_image(
+                image,
+                root,
+                config,
+                lease,
+                hold,
+                name=name,
+                payload=payload,
+                agent=agent,
+                model=model,
+                auto_continue=auto_continue,
+                network=network,
+                retry_run=retry_run,
             )
-            try:
-                result = _run_in_image(
-                    image,
-                    root,
-                    config,
-                    lease,
-                    hold,
-                    name=name,
-                    payload=payload,
-                    agent=agent,
-                    model=model,
-                    auto_continue=auto_continue,
-                    network=network,
-                    retry_run=retry_run,
-                )
-            finally:
-                _save_cloud_rotations(workspace_id, workflow_id, lease, hold.output)
-        except BaseException:
-            if replay is not None:
-                with suppress(ExecutionError):
-                    complete_debug_lease(workspace_id, workflow_id, replay, "failed")
-            raise
-    if replay is not None:
-        complete_debug_lease(workspace_id, workflow_id, replay, "completed")
+        finally:
+            _save_cloud_rotations(workspace_id, workflow_id, lease, hold.output)
     return result
 
 
@@ -226,22 +202,19 @@ def _retryable(root: Path, run_id: str) -> None:
         )
 
 
-def _issue_leases(
-    workspace_id: str, workflow_id: str, runners: list[str], invocation_id: str | None
-) -> list[dict[str, Any]]:
+def _issue_leases(workspace_id: str, workflow_id: str, runners: list[str]) -> list[dict[str, Any]]:
     """One Vault lease per runner the run needs, each holding that runner's login.
 
-    Only the first claims a replayed invocation. When a later one is refused,
-    the logins already leased are released before the refusal is raised.
+    When a later one is refused, the logins already leased are released before
+    the refusal is raised.
     """
     leases: list[dict[str, Any]] = []
     try:
-        for index, runner in enumerate(runners):
+        for runner in runners:
             leases.append(
                 issue_debug_lease(
                     workspace_id,
                     workflow_id,
-                    invocation_id=invocation_id if index == 0 else None,
                     ttl_seconds=IMAGE_LEASE_TTL_SECONDS,
                     agent_provider=runner,
                 )

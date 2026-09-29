@@ -188,7 +188,7 @@ def test_get_workflow_raises_when_not_found(monkeypatch) -> None:
         raise AssertionError("expected an ExecutionError")
 
 
-def test_issue_debug_lease_posts_the_optional_invocation_id(monkeypatch) -> None:
+def test_issue_debug_lease_posts_the_lease_request(monkeypatch) -> None:
     captured = {}
 
     def request(path, *, method="GET", body=None):
@@ -199,7 +199,7 @@ def test_issue_debug_lease_posts_the_optional_invocation_id(monkeypatch) -> None
     result = cloud.issue_debug_lease("workspace_1", "workflow_1")
     assert result["lease_id"] == "lease-1"
     assert captured["path"] == "/workspaces/workspace_1/workflows/workflow_1/debug-lease"
-    assert captured["body"] == {"invocation_id": None, "ttl_seconds": 600}
+    assert captured["body"] == {"ttl_seconds": 600}
 
 
 def test_issue_debug_lease_raises_the_server_detail_on_failure(monkeypatch) -> None:
@@ -207,27 +207,11 @@ def test_issue_debug_lease_raises_the_server_detail_on_failure(monkeypatch) -> N
         cloud, "_authorized_request", lambda *a, **k: (409, {"detail": "not queued"})
     )
     try:
-        cloud.issue_debug_lease("workspace_1", "workflow_1", invocation_id="inv-1")
+        cloud.issue_debug_lease("workspace_1", "workflow_1")
     except Exception as exc:
         assert "not queued" in str(exc)
     else:
         raise AssertionError("expected an ExecutionError")
-
-
-def test_complete_debug_lease_posts_status(monkeypatch) -> None:
-    captured = {}
-
-    def request(path, *, method="GET", body=None):
-        captured.update(path=path, method=method, body=body)
-        return 200, {"completed": True}
-
-    monkeypatch.setattr(cloud, "_authorized_request", request)
-    cloud.complete_debug_lease("workspace_1", "workflow_1", "inv-1", "failed")
-    assert (
-        captured["path"]
-        == "/workspaces/workspace_1/workflows/workflow_1/debug-lease/inv-1/complete"
-    )
-    assert captured["body"] == {"status": "failed"}
 
 
 def test_logout_revokes_before_removing_local_credentials(tmp_path: Path, monkeypatch) -> None:
@@ -268,7 +252,7 @@ def test_issue_debug_lease_asks_for_the_agent_credential(monkeypatch) -> None:
         {
             "path": "/workspaces/w1/workflows/wf1/debug-lease",
             "method": "POST",
-            "body": {"invocation_id": None, "ttl_seconds": 3600, "agent_provider": "codex"},
+            "body": {"ttl_seconds": 3600, "agent_provider": "codex"},
         }
     ]
 

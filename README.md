@@ -75,8 +75,6 @@ needs Docker.
   OpenCode from `OPENROUTER_API_KEY` or `agents/opencode`.
 - `--cloud WORKFLOW_ID --workspace-id ID` leases the workspace Vault's
   credentials and its connected agent instead.
-- `--replay INVOCATION_ID` with `--cloud` runs a real queued cloud invocation,
-  such as a webhook that arrived, on this machine.
 
 `--payload FILE` supplies the trigger payload, `--auto-continue` runs every
 step, and `--retry RUN_ID` resumes a run that stopped on an error. Each run's

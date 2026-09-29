@@ -208,8 +208,7 @@ def _container(monkeypatch, **kwargs):
 
 
 def _image_run(root, **kwargs):
-    if "replay" not in kwargs:
-        kwargs.setdefault("trigger_name", "go")
+    kwargs.setdefault("trigger_name", "go")
     return workflow_run.run_cloud(
         root,
         root / "outcome.yml",
@@ -323,20 +322,6 @@ def test_input_errors_fail_before_any_lease_is_issued(monkeypatch, image_env):
         )
 
     workflow_run.issue_debug_lease.assert_not_called()
-
-
-def test_a_replay_without_a_recorded_trigger_still_releases_the_agent_lease(monkeypatch, image_env):
-    root, _ = image_env
-    workflow_run.issue_debug_lease.return_value = _agent_lease(trigger_name=None)
-    monkeypatch.setattr(workflow_run, "complete_debug_lease", mock.Mock())
-
-    with pytest.raises(ExecutionError, match="no recorded trigger"):
-        _image_run(root, replay="inv-1")
-
-    assert workflow_run.complete_debug_agent_lease.call_args.args[4] == "failed"
-    workflow_run.complete_debug_lease.assert_called_once_with(
-        "workspace_1", "workflow_1", "inv-1", "failed"
-    )
 
 
 def test_a_failed_release_keeps_the_rotation_and_does_not_mask_the_run_error(
@@ -762,11 +747,3 @@ def test_the_cli_offers_opencode_for_agent():
     from outcomeci.cli import AGENT_CHOICES
 
     assert "opencode" in AGENT_CHOICES
-
-
-def test_a_replay_takes_no_trigger_payload_or_retry(monkeypatch, image_env):
-    root, _ = image_env
-    for extra in ({"trigger_name": "go"}, {"retry_run": "run-1"}):
-        with pytest.raises(ExecutionError, match="--replay runs the recorded trigger"):
-            _image_run(root, replay="inv-1", **extra)
-    workflow_run.issue_debug_lease.assert_not_called()

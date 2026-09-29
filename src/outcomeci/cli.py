@@ -270,11 +270,6 @@ def parser() -> argparse.ArgumentParser:
         help="Use this cloud workflow's Vault grants and the workspace's connected agent",
     )
     run_command.add_argument("--workspace-id", help="Cloud workspace identifier (with --cloud)")
-    run_command.add_argument(
-        "--replay",
-        metavar="INVOCATION_ID",
-        help="Claim and run a real queued invocation of the --cloud workflow",
-    )
     workflow_sync.add_argument("file", type=Path)
     workflow_sync.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     workflow_sync.add_argument("--name")
@@ -479,7 +474,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                             args.workspace_id,
                             args.cloud,
                             trigger_name=args.trigger,
-                            replay=args.replay,
                             payload_path=args.payload,
                             agent=args.agent,
                             model=args.model,
@@ -490,8 +484,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                     )
                     return 0
-                if args.replay or args.workspace_id:
-                    raise ExecutionError("--replay and --workspace-id need --cloud")
+                if args.workspace_id:
+                    raise ExecutionError("--workspace-id needs --cloud")
                 _print_json(
                     workflow_run.run_local(
                         root,

@@ -281,7 +281,6 @@ def issue_debug_lease(
     workspace_id: str,
     workflow_id: str,
     *,
-    invocation_id: str | None = None,
     ttl_seconds: int = 600,
     agent_provider: str | None = None,
 ) -> dict[str, Any]:
@@ -290,7 +289,7 @@ def issue_debug_lease(
     With agent_provider, the lease also carries the workspace's agent credential
     for that provider, held exclusively until complete_debug_agent_lease().
     """
-    body: dict[str, Any] = {"invocation_id": invocation_id, "ttl_seconds": ttl_seconds}
+    body: dict[str, Any] = {"ttl_seconds": ttl_seconds}
     if agent_provider is not None:
         body["agent_provider"] = agent_provider
     status, value = _authorized_request(
@@ -335,17 +334,6 @@ def complete_debug_agent_lease(
         body=body,
     )
     _raise_for_status(status, value, 200, "could not release the debug agent lease")
-
-
-def complete_debug_lease(
-    workspace_id: str, workflow_id: str, invocation_id: str, status_value: str
-) -> None:
-    status, value = _authorized_request(
-        f"/workspaces/{workspace_id}/workflows/{workflow_id}/debug-lease/{invocation_id}/complete",
-        method="POST",
-        body={"status": status_value},
-    )
-    _raise_for_status(status, value, 200, "could not resolve the debug-claimed invocation")
 
 
 def rotate_debug_vault_credential(
