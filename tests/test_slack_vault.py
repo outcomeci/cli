@@ -160,8 +160,7 @@ def test_cli_routes_destination_without_token_output(installed, monkeypatch, cap
 
     monkeypatch.setattr(slack_vault, "sync_credentials", sync)
     assert (
-        main(["integration", "slack", "sync-credentials", "--workspace", str(installed), "--local"])
-        == 0
+        main(["integration", "slack", "sync-credentials", "--dir", str(installed), "--local"]) == 0
     )
     assert json.loads(capsys.readouterr().out) == {"synced": True}
 

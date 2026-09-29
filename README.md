@@ -197,7 +197,7 @@ oci integration slack sync-credentials --local
 oci integration slack sync-credentials --cloud workspace_… --workflow WORKFLOW_ID
 ```
 
-`--workspace PATH` selects the workflow directory containing the generated Slack
+`--dir PATH` selects the workflow directory containing the generated Slack
 app (defaults to the current directory). For a different local destination, add
 `--vault-workspace PATH`. Use `--team TEAM_ID_OR_DOMAIN` when multiple workspaces
 have installed the app. Local Vault initialization is automatic. Both destinations

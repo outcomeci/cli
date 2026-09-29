@@ -96,10 +96,10 @@ def test_workflow_get_rejects_a_support_file_path_outside_outcomeci(
 
 def test_integration_dry_run_and_doctor_are_machine_readable(tmp_path: Path, capsys) -> None:
     initialize(tmp_path)
-    phase = ["--phase", "investigate", "--workspace", str(tmp_path)]
+    phase = ["--phase", "investigate", "--dir", str(tmp_path)]
     assert main(["integration", "dry-run", *phase]) == 0
     assert json.loads(capsys.readouterr().out)["requests_executed"] is False
-    main(["integration", "doctor", "--workspace", str(tmp_path)])
+    main(["integration", "doctor", "--dir", str(tmp_path)])
     report = json.loads(capsys.readouterr().out)
     assert report["credentials_exposed"] is False
 
@@ -108,7 +108,7 @@ def test_local_vault_commands_are_offline_and_never_print_values(
     tmp_path: Path, capsys, monkeypatch
 ) -> None:
     monkeypatch.setenv("OUTCOMECI_CONFIG_HOME", str(tmp_path / "config"))
-    assert main(["vault", "local", "init", "--workspace", str(tmp_path)]) == 0
+    assert main(["vault", "local", "init", "--dir", str(tmp_path)]) == 0
     capsys.readouterr()
     assert (
         main(
@@ -119,14 +119,14 @@ def test_local_vault_commands_are_offline_and_never_print_values(
                 "linear/api_key",
                 "--value",
                 "top-secret",
-                "--workspace",
+                "--dir",
                 str(tmp_path),
             ]
         )
         == 0
     )
     assert "top-secret" not in capsys.readouterr().out
-    assert main(["vault", "local", "list", "--workspace", str(tmp_path)]) == 0
+    assert main(["vault", "local", "list", "--dir", str(tmp_path)]) == 0
     output = capsys.readouterr().out
     assert "linear/api_key" in output
     assert "top-secret" not in output
@@ -149,7 +149,7 @@ def test_slack_setup_passes_the_request_url_and_events(tmp_path: Path, monkeypat
 
     monkeypatch.setattr(cli, "setup_slack", fake_setup)
     url = "https://example.com/v1/webhooks/route/token"
-    base = ["integration", "slack", "setup", "--workspace", str(tmp_path)]
+    base = ["integration", "slack", "setup", "--dir", str(tmp_path)]
 
     assert main(base) == 0
     assert main([*base, "--request-url", url, "--event", "mention"]) == 0
@@ -166,12 +166,9 @@ def test_local_vault_put_drops_the_newline_a_pipe_adds(tmp_path: Path, monkeypat
     from outcomeci import local_vault
 
     monkeypatch.setenv("OUTCOMECI_CONFIG_HOME", str(tmp_path / "config"))
-    assert main(["vault", "local", "init", "--workspace", str(tmp_path)]) == 0
+    assert main(["vault", "local", "init", "--dir", str(tmp_path)]) == 0
     monkeypatch.setattr("sys.stdin", io.StringIO("ghp-token\n"))
-    assert (
-        main(["vault", "local", "put", "github", "--value-stdin", "--workspace", str(tmp_path)])
-        == 0
-    )
+    assert main(["vault", "local", "put", "github", "--value-stdin", "--dir", str(tmp_path)]) == 0
     assert local_vault.resolve(tmp_path, "vault:github") == "ghp-token"
 
 

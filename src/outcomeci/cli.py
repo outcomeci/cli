@@ -40,17 +40,17 @@ from .repository import initialize
 AGENT_CHOICES = ("codex", "claude", "opencode")
 
 
-def _add_workspace_argument(command: argparse.ArgumentParser) -> None:
-    command.add_argument("--workspace", type=Path, default=Path.cwd())
+def _add_dir_argument(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--dir", type=Path, default=Path.cwd())
 
 
 def _add_workflow_arguments(command: argparse.ArgumentParser) -> None:
-    _add_workspace_argument(command)
+    _add_dir_argument(command)
     command.add_argument("--config", type=Path)
 
 
 def _workflow_path(args: argparse.Namespace) -> Path:
-    return (args.config or args.workspace / "outcome.yml").resolve()
+    return (args.config or args.dir / "outcome.yml").resolve()
 
 
 def _print_json(value: object, *, compact: bool = False, sort_keys: bool = False) -> None:
@@ -208,14 +208,14 @@ def parser() -> argparse.ArgumentParser:
     local_vault = vault_commands.add_parser("local", help="Manage an encrypted offline Vault")
     local_vault_commands = local_vault.add_subparsers(dest="local_vault_command", required=True)
     local_vault_init = local_vault_commands.add_parser("init")
-    _add_workspace_argument(local_vault_init)
+    _add_dir_argument(local_vault_init)
     local_vault_list = local_vault_commands.add_parser("list")
-    _add_workspace_argument(local_vault_list)
+    _add_dir_argument(local_vault_list)
     local_vault_put = local_vault_commands.add_parser("put")
     local_vault_put.add_argument("path")
     local_vault_put.add_argument("--value")
     local_vault_put.add_argument("--value-stdin", action="store_true")
-    _add_workspace_argument(local_vault_put)
+    _add_dir_argument(local_vault_put)
     init = commands.add_parser("init", help="Write a starter workflow into a directory")
     init.add_argument("--dir", type=Path, default=Path.cwd())
     validate_command = commands.add_parser(
@@ -254,7 +254,7 @@ def parser() -> argparse.ArgumentParser:
     )
     slack_commands = slack.add_subparsers(dest="slack_command", required=True)
     slack_setup = slack_commands.add_parser("setup")
-    _add_workspace_argument(slack_setup)
+    _add_dir_argument(slack_setup)
     slack_setup.add_argument("--name", default="OutcomeCI")
     slack_setup.add_argument("--team")
     slack_setup.add_argument(
@@ -273,7 +273,7 @@ def parser() -> argparse.ArgumentParser:
     slack_sync = slack_commands.add_parser(
         "sync-credentials", help="Sync the installed app token to a Vault"
     )
-    _add_workspace_argument(slack_sync)
+    _add_dir_argument(slack_sync)
     slack_destination = slack_sync.add_mutually_exclusive_group(required=True)
     slack_destination.add_argument("--local", action="store_true")
     slack_destination.add_argument("--cloud", metavar="WORKSPACE_ID")
@@ -282,7 +282,7 @@ def parser() -> argparse.ArgumentParser:
     slack_sync.add_argument("--path", default="slack/bot-token")
     slack_sync.add_argument("--workflow", action="append")
     slack_status_command = slack_commands.add_parser("status")
-    _add_workspace_argument(slack_status_command)
+    _add_dir_argument(slack_status_command)
     slack_manifest_command = slack_commands.add_parser(
         "manifest", help="Print the generated Slack app manifest"
     )
@@ -412,7 +412,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         if args.command == "vault":
             if args.vault_command == "local":
-                workspace = args.workspace.resolve()
+                workspace = args.dir.resolve()
                 if args.local_vault_command == "init":
                     _print_json(initialize_local_vault(workspace))
                 elif args.local_vault_command == "list":
@@ -536,7 +536,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.slack_command == "setup":
                 _print_json(
                     setup_slack(
-                        args.workspace,
+                        args.dir,
                         name=args.name,
                         request_url=args.request_url,
                         events=args.event or ["mention", "dm"],
@@ -547,7 +547,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             elif args.slack_command == "sync-credentials":
                 _print_json(
                     slack_vault.sync_credentials(
-                        args.workspace,
+                        args.dir,
                         local=args.local,
                         cloud_workspace=args.cloud,
                         vault_workspace=args.vault_workspace,
@@ -557,7 +557,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                 )
             elif args.slack_command == "status":
-                _print_json(slack_status(args.workspace), sort_keys=True)
+                _print_json(slack_status(args.dir), sort_keys=True)
             elif args.slack_command == "manifest":
                 _print_json(slack_manifest(args.source or args.project), compact=True)
         return 0
