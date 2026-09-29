@@ -78,8 +78,14 @@ def parser() -> argparse.ArgumentParser:
     )
     auth_commands.add_parser("status")
     auth_commands.add_parser("logout")
-    workflow = commands.add_parser("workflow", help="Manage OutcomeCI Cloud workflows")
+    workflow = commands.add_parser("workflow", help="Compile, run and publish workflows")
     workflow_commands = workflow.add_subparsers(dest="workflow_command", required=True)
+    workflow_compile = workflow_commands.add_parser(
+        "compile", help="Print the compiled workflow: steps, grants, instructions and schemas"
+    )
+    workflow_compile.add_argument("--dir", type=Path, default=Path.cwd())
+    workflow_compile.add_argument("--config", type=Path, default=Path("outcome.yml"))
+    workflow_compile.add_argument("--step", help="Print only this step's instructions")
     workflow_get = workflow_commands.add_parser(
         "get", help="Fetch a workflow's latest cloud revision"
     )
@@ -241,16 +247,15 @@ def parser() -> argparse.ArgumentParser:
     local_vault_put.add_argument("--value")
     local_vault_put.add_argument("--value-stdin", action="store_true")
     _add_workspace_argument(local_vault_put)
-    for name in ("init", "validate", "status"):
-        item = commands.add_parser(name)
-        item.add_argument("--dir", type=Path, default=Path.cwd())
-    outcome = commands.add_parser("outcome")
-    outcome_commands = outcome.add_subparsers(dest="outcome_command", required=True)
-    for name in ("validate", "compile"):
-        item = outcome_commands.add_parser(name)
-        item.add_argument("config", nargs="?", type=Path, default=Path("outcome.yml"))
-        if name == "compile":
-            item.add_argument("--step", dest="phase", help="Print only this step's instructions")
+    init = commands.add_parser("init", help="Write a starter workflow into a directory")
+    init.add_argument("--dir", type=Path, default=Path.cwd())
+    validate_command = commands.add_parser(
+        "validate", help="Compile the workflow and print its revision"
+    )
+    validate_command.add_argument("--dir", type=Path, default=Path.cwd())
+    validate_command.add_argument("--config", type=Path, default=Path("outcome.yml"))
+    status_command = commands.add_parser("status")
+    status_command.add_argument("--dir", type=Path, default=Path.cwd())
     integration = commands.add_parser("integration", help="Set up a provider's app, such as Slack")
     # list, describe, execute, dry-run and doctor are how a running step's agent
     # calls its granted APIs; they stay out of help and usage.
@@ -339,6 +344,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 _print_json(cloud_logout())
             return 0
         if args.command == "workflow":
+            if args.workflow_command == "compile":
+                result = compile_workflow((args.dir / args.config).resolve())
+                if args.step:
+                    phase = result["instructions"]["phases"].get(args.step)
+                    if phase is None:
+                        raise ExecutionError(f"workflow has no step {args.step}")
+                    result = {
+                        **result,
+                        "instructions": {
+                            "orchestrator": result["instructions"]["orchestrator"],
+                            "phase": phase,
+                        },
+                    }
+                _print_json(result, sort_keys=True)
+                return 0
             if args.workflow_command == "get":
                 result = get_workflow(args.workspace_id, args.workflow_id)
                 if args.output:
@@ -501,7 +521,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.command == "init":
             _print_json({"created": initialize(args.dir)})
         elif args.command == "validate":
-            result = validate(args.dir)
+            result = compile_workflow((args.dir / args.config).resolve())
             _print_json({"valid": True, "workflow_revision": result["workflow_revision"]})
         elif args.command == "status":
             result = validate(args.dir)
@@ -512,25 +532,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "path": str(args.dir.resolve()),
                 }
             )
-        elif args.command == "outcome" and args.outcome_command == "validate":
-            result = compile_workflow(args.config)
-            _print_json(
-                {"valid": True, "workflow_revision": result["workflow_revision"]}, sort_keys=True
-            )
-        elif args.command == "outcome" and args.outcome_command == "compile":
-            result = compile_workflow(args.config)
-            if args.phase:
-                phase = result["instructions"]["phases"].get(args.phase)
-                if phase is None:
-                    raise ExecutionError(f"workflow has no step {args.phase}")
-                result = {
-                    **result,
-                    "instructions": {
-                        "orchestrator": result["instructions"]["orchestrator"],
-                        "phase": phase,
-                    },
-                }
-            _print_json(result, sort_keys=True)
         elif args.command == "integration" and args.integration_command in {
             "list",
             "describe",

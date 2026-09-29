@@ -184,3 +184,17 @@ def test_agent_only_integration_commands_stay_out_of_help(capsys) -> None:
     assert "{slack}" in help_text
     for hidden in ("list", "describe", "execute", "dry-run", "doctor"):
         assert hidden not in help_text
+
+
+def test_validate_and_compile_read_the_workflow_in_a_directory(tmp_path: Path, capsys) -> None:
+    main(["init", "--dir", str(tmp_path)])
+    capsys.readouterr()
+    (tmp_path / "outcome.yml").rename(tmp_path / "triage.outcome.yaml")
+    config = ["--dir", str(tmp_path), "--config", "triage.outcome.yaml"]
+    assert main(["validate", *config]) == 0
+    revision = json.loads(capsys.readouterr().out)["workflow_revision"]
+    assert main(["workflow", "compile", *config, "--step", "plan"]) == 0
+    compiled = json.loads(capsys.readouterr().out)
+    assert compiled["workflow_revision"] == revision
+    assert compiled["instructions"]["phase"]["path"] == ".outcomeci/instructions/plan.md"
+    assert main(["workflow", "compile", *config, "--step", "missing"]) == 2
