@@ -35,7 +35,7 @@ from .local_vault import list_entries as list_local_vault_entries
 from .local_vault import put as put_local_vault_entry
 from .process import ExecutionError
 from .publication import prepare_publication
-from .repository import RepositoryError, initialize, validate
+from .repository import initialize
 
 AGENT_CHOICES = ("codex", "claude")
 
@@ -254,8 +254,6 @@ def parser() -> argparse.ArgumentParser:
     )
     validate_command.add_argument("--dir", type=Path, default=Path.cwd())
     validate_command.add_argument("--config", type=Path, default=Path("outcome.yml"))
-    status_command = commands.add_parser("status")
-    status_command.add_argument("--dir", type=Path, default=Path.cwd())
     integration = commands.add_parser("integration", help="Set up a provider's app, such as Slack")
     # list, describe, execute, dry-run and doctor are how a running step's agent
     # calls its granted APIs; they stay out of help and usage.
@@ -523,15 +521,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.command == "validate":
             result = compile_workflow((args.dir / args.config).resolve())
             _print_json({"valid": True, "workflow_revision": result["workflow_revision"]})
-        elif args.command == "status":
-            result = validate(args.dir)
-            _print_json(
-                {
-                    "initialized": True,
-                    "workflow_revision": result["workflow_revision"],
-                    "path": str(args.dir.resolve()),
-                }
-            )
         elif args.command == "integration" and args.integration_command in {
             "list",
             "describe",
@@ -603,7 +592,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except IntegrationError as exc:
         print(json.dumps({"error": exc.as_dict()}, sort_keys=True), file=sys.stderr)
         return 1 if exc.retryable else 2
-    except (ConfigError, RepositoryError, ExecutionError, SlackError) as exc:
+    except (ConfigError, ExecutionError, SlackError) as exc:
         print(f"oci: {exc}", file=sys.stderr)
         return 1 if isinstance(exc, ExecutionError) and exc.retryable else 2
 

@@ -1,15 +1,10 @@
-"""OutcomeCI repository lifecycle."""
+"""The starter workflow `oci init` writes."""
 
 from __future__ import annotations
 
 from pathlib import Path
 
-from .config import ConfigError, compile_workflow
 from .templates import WORKFLOW_INSTRUCTIONS, WORKFLOW_REQUEST, WORKFLOW_YAML
-
-
-class RepositoryError(RuntimeError):
-    pass
 
 
 def _files(root: Path) -> dict[Path, str]:
@@ -31,10 +26,3 @@ def initialize(root: Path) -> list[str]:
         path.write_text(content, encoding="utf-8")
         created.append(str(path.relative_to(root)))
     return created
-
-
-def validate(root: Path) -> dict:
-    try:
-        return compile_workflow(root / "outcome.yml")
-    except ConfigError as exc:
-        raise RepositoryError(str(exc)) from exc
