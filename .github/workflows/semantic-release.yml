@@ -53,3 +53,4 @@ jobs:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           gh workflow run internal-release.yml --ref main -f tag="$TAG"
+          gh workflow run runner-release-tag.yml --ref main -f tag="$TAG"
