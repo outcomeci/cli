@@ -4,11 +4,14 @@ import json
 import os
 import stat
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from outcomeci.cloud_runner.client import CoreError
+import httpx
+
+from outcomeci.cloud_runner.client import CoreClient, CoreError
 from outcomeci.cloud_runner.main import (
     CODEX_FILE_AUTH_CONFIG,
     _inject_agent_credential,
@@ -1338,3 +1341,149 @@ class MultiRunnerTests(unittest.TestCase):
         self.assertEqual(status, "completed")
         self.assertEqual(values["expected_credential_version"], 5)
         self.assertEqual(values["agent_credential"], {"tokens": {"refresh_token": "rt-2"}})
+
+
+class FinalReportTests(unittest.TestCase):
+    """Once every step has run, nothing the runner reports may requeue the run."""
+
+    claim = {
+        "content": "apiVersion: outcomeci.workflow/v1\n",
+        "files": {},
+        "trigger_name": "webhook",
+        "input": {},
+        "lease_token": "lease-secret",
+        "agent": {"provider": "claude", "credential": "claude-token", "credential_version": 1},
+        "vault": {"expires_at": "2099-01-01T00:00:00+00:00", "values": {}},
+    }
+
+    def http_client(self, complete_statuses, heartbeat_status=200):
+        """A real CoreClient over a mock transport; /complete answers in sequence."""
+        completions = []
+        statuses = iter(complete_statuses)
+
+        def handler(request):
+            suffix = request.url.path.rsplit("/", 1)[-1]
+            if suffix == "claim":
+                return httpx.Response(200, json=self.claim)
+            if suffix == "start":
+                return httpx.Response(204)
+            if suffix == "heartbeat":
+                return httpx.Response(
+                    heartbeat_status, json={"active": True, "policy_events_received": 0}
+                )
+            if suffix == "complete":
+                completions.append(json.loads(request.content))
+                return httpx.Response(next(statuses), json={"completed": True})
+            return httpx.Response(404)
+
+        client = CoreClient(
+            "https://api.outcomeci.com",
+            "invocation-1",
+            "boot",
+            "workflow",
+            transport=httpx.MockTransport(handler),
+        )
+        return client, completions
+
+    def run_workflow(self, client, *, heartbeat_failure=False):
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "private"
+            root.mkdir()
+
+            def trigger(workspace, config, name, payload, **options):
+                options["on_created"]("run-1")
+                outcome = root / ".outcomeci" / "outcomes" / "run-1"
+                outcome.mkdir(parents=True)
+                (outcome / "run.json").write_text("{}")
+                return {"run_id": "run-1", "completed_steps": ["only"], "status": "completed"}
+
+            class InlineThread:
+                """Run the heartbeat loop once, synchronously, so its failure is recorded."""
+
+                def __init__(self, target, daemon):
+                    self.target = target
+
+                def start(self):
+                    self.target()
+
+            with (
+                mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
+                mock.patch("outcomeci.cloud_runner.main.tempfile.mkdtemp", return_value=str(root)),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.COMPLETION_REPORT_DELAYS_SECONDS", (0,) * 5
+                ),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.threading.Thread",
+                    InlineThread if heartbeat_failure else threading.Thread,
+                ),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.HEARTBEAT_INTERVAL_SECONDS",
+                    0 if heartbeat_failure else 15.0,
+                ),
+                mock.patch("outcomeci.local.trigger", side_effect=trigger),
+                mock.patch(
+                    "outcomeci.config.compile_workflow",
+                    return_value={
+                        "instructions": {"steps": {"only": {}}},
+                        "workflow": {"spec": {"agents": {"default": {}}}},
+                    },
+                ),
+                mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
+            ):
+                try:
+                    code = execute_workflow(
+                        Launch("workflow", "invocation-1", "boot", "https://api.outcomeci.com"),
+                        client,
+                    )
+                except Exception as error:  # noqa: BLE001 - returned for assertions
+                    code = error
+        events = [
+            json.loads(line)
+            for line in stderr.getvalue().splitlines()
+            if "workflow_completion_report_failed" in line
+        ]
+        return code, events
+
+    def test_a_transient_503_on_completion_is_retried_and_reported_once_completed(self):
+        client, completions = self.http_client([503, 200])
+        code, events = self.run_workflow(client)
+        self.assertEqual(code, 0)
+        self.assertEqual([item["status"] for item in completions], ["completed", "completed"])
+        self.assertEqual(events, [])
+
+    def test_persistent_5xx_on_completion_never_reports_a_retryable_failure(self):
+        client, completions = self.http_client([503] * 6)
+        code, events = self.run_workflow(client)
+        self.assertEqual(code, 1)
+        self.assertEqual([item["status"] for item in completions], ["completed"] * 6)
+        self.assertFalse(any(item["retryable"] for item in completions))
+        self.assertEqual(
+            events,
+            [
+                {
+                    "event": "workflow_completion_report_failed",
+                    "report_category": "core_unavailable",
+                    "status": "completed",
+                    "requeued": False,
+                }
+            ],
+        )
+
+    def test_a_non_retryable_completion_rejection_still_reports_a_terminal_failure(self):
+        client, completions = self.http_client([400, 200])
+        code, events = self.run_workflow(client)
+        self.assertIsInstance(code, CoreError)
+        self.assertEqual(code.category, "core_unavailable")
+        self.assertFalse(code.retryable)
+        self.assertEqual([item["status"] for item in completions], ["completed", "failed"])
+        self.assertIs(completions[1]["retryable"], False)
+        self.assertEqual(events, [])
+
+    def test_a_failure_after_every_step_ran_is_reported_as_terminal(self):
+        client, completions = self.http_client([503, 200], heartbeat_status=503)
+        code, events = self.run_workflow(client, heartbeat_failure=True)
+        self.assertIsInstance(code, CoreError)
+        self.assertEqual(code.category, "policy_evidence_upload_failed")
+        self.assertEqual([item["status"] for item in completions], ["failed", "failed"])
+        self.assertFalse(any(item["retryable"] for item in completions))
+        self.assertEqual(events, [])

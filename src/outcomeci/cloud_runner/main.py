@@ -12,6 +12,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,9 @@ HEARTBEAT_INTERVAL_SECONDS = 15.0
 WORKFLOW_ARTIFACT_FILE_LIMIT = 200
 WORKFLOW_ARTIFACT_FILE_BYTES = 2 * 1024 * 1024
 WORKFLOW_ARTIFACT_TOTAL_BYTES = 20 * 1024 * 1024
+# Waits between attempts to report a final workflow result: 6 attempts over
+# about a minute, inside the lease the heartbeat keeps alive.
+COMPLETION_REPORT_DELAYS_SECONDS: tuple[float, ...] = (2.0, 4.0, 8.0, 16.0, 30.0)
 
 
 def workflow_artifacts(root: Path, run_id: str) -> list[dict[str, str]]:
@@ -134,6 +138,23 @@ def _inject_agent_credential(root: Path, provider: str, credential: Any) -> dict
     raise ContractError("unsupported workflow agent")
 
 
+def _report_final(report: Callable[[], None]) -> None:
+    """Report a final workflow result, retrying transient Core errors.
+
+    Core's complete handler is idempotent for a repeated status, so a retry
+    after a lost response is safe. A non-retryable error, or a retryable one
+    that outlasts every attempt, is raised to the caller.
+    """
+    for delay in (*COMPLETION_REPORT_DELAYS_SECONDS, None):
+        try:
+            report()
+            return
+        except CoreError as error:
+            if not error.retryable or delay is None:
+                raise
+        time.sleep(delay)
+
+
 def _claim_or_skip(claim_fn):
     """Call a claim_*() method, treating a retryable conflict as a no-op.
 
@@ -157,6 +178,20 @@ def _claim_or_skip(claim_fn):
             file=sys.stderr,
         )
         return None
+
+
+def _completion_report_failed(error: CoreError, status: str) -> None:
+    print(
+        json.dumps(
+            {
+                "event": "workflow_completion_report_failed",
+                "report_category": error.category,
+                "status": status,
+                "requeued": False,
+            }
+        ),
+        file=sys.stderr,
+    )
 
 
 def execute_workflow(launch: Launch, client: CoreClient) -> int:
@@ -183,6 +218,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
     agent_update = None
     credential_version = None
     provider: str | None = None
+    steps_finished = False
     try:
         config = root / "outcome.yml"
         config.write_text(str(claim["content"]), encoding="utf-8")
@@ -325,36 +361,60 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
             if not result.get("ready_steps"):
                 raise ContractError("workflow requires a durable continuation")
             result = execute_call(call_continue)
+        # Every step has run, side effects included. From here on, nothing may
+        # requeue the invocation: a retry would run every step again.
+        steps_finished = True
         if heartbeat_failure:
             raise CoreError("policy_evidence_upload_failed", True)
         if provider == "codex":
             agent_update = json.loads((root / ".codex" / "auth.json").read_text())
         artifacts = workflow_artifacts(root, run_id)
-        client.workflow_complete(
-            lease,
-            "completed",
-            run_id=run_id,
-            artifacts=artifacts,
-            expected_credential_version=credential_version,
-            agent_credential=agent_update,
-        )
+        try:
+            _report_final(
+                lambda: client.workflow_complete(
+                    lease,
+                    "completed",
+                    run_id=run_id,
+                    artifacts=artifacts,
+                    expected_credential_version=credential_version,
+                    agent_credential=agent_update,
+                )
+            )
+        except CoreError as completion_error:
+            if not completion_error.retryable:
+                raise
+            # Core stayed unreachable. Report nothing further: a failure report
+            # would requeue a finished run or mark a successful one failed.
+            _completion_report_failed(completion_error, "completed")
+            return 1
         return 0
     except Exception as exc:
         auth_path = root / ".codex" / "auth.json"
         if provider == "codex" and credential_version is not None and auth_path.is_file():
             with suppress(OSError, json.JSONDecodeError):
                 agent_update = json.loads(auth_path.read_text())
-        try:
+
+        category = workflow_failure_category(exc)
+        detail = redact_diagnostic(exc)
+        retryable = isinstance(exc, CoreError) and exc.retryable and not steps_finished
+
+        def report_failure() -> None:
             client.workflow_complete(
                 lease,
                 "failed",
                 run_id=run_id,
-                category=workflow_failure_category(exc),
-                detail=redact_diagnostic(exc),
+                category=category,
+                detail=detail,
                 expected_credential_version=credential_version,
                 agent_credential=agent_update,
-                retryable=isinstance(exc, CoreError) and exc.retryable,
+                retryable=retryable,
             )
+
+        try:
+            if steps_finished:
+                _report_final(report_failure)
+            else:
+                report_failure()
         except CoreError as completion_error:
             # The original failure (exc) is what gets re-raised below; if the report
             # of it also gets rejected, that's otherwise invisible -- the invocation
@@ -365,7 +425,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                     {
                         "event": "workflow_completion_report_failed",
                         "report_category": completion_error.category,
-                        "original_category": workflow_failure_category(exc),
+                        "original_category": category,
                     }
                 ),
                 file=sys.stderr,
