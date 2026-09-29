@@ -248,7 +248,7 @@ def test_approved_alert_runs_every_step_inside_its_grants(workflow, monkeypatch)
     fix_inputs = {item["name"]: item["value"] for item in agent.prompts["fix"]["inputs"]}
     assert fix_inputs["triage"]["repo"] == {"owner": "outcomeci", "name": "cli"}
     announce_inputs = {item["name"]: item["value"] for item in agent.prompts["announce"]["inputs"]}
-    assert announce_inputs["pr"]["number"] == 7
+    assert announce_inputs["fix"]["pr"]["number"] == 7
     assert agent.prompts["fix"]["grants"][0]["args"] == {
         "repo": {"owner": "outcomeci", "name": "cli"}
     }

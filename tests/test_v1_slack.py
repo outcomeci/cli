@@ -167,7 +167,7 @@ class Agent:
             result = pr["output"]["result"]
             outputs = {"pr": {"url": result["html_url"], "number": result["number"], "branch": "b"}}
         elif step == "announce":
-            links = ", ".join(item["url"] for item in inputs["pr"] if item)
+            links = ", ".join(item["url"] for item in inputs["implement"]["pr"] if item)
             _call(env, "slack.post", {"text": f"PRs: {links}", "thread_ts": REQUEST["ts"]})
         else:
             raise AssertionError(f"unexpected step {step}")
@@ -278,8 +278,10 @@ def test_a_discussed_plan_becomes_one_pull_request_per_repository(workflow, monk
     plan_input = {item["name"]: item["value"] for item in implements[0]["inputs"]}["plan"]
     assert plan_input["summary"] == "Add --json output and document it"
     announce = next(step for step in agent.steps if step["step"] == "announce")
-    prs = {item["name"]: item["value"] for item in announce["inputs"]}["pr"]
-    assert [pr["number"] for pr in prs] == [1, 2]
+    inputs = {item["name"]: item["value"] for item in announce["inputs"]}
+    # One result per repo in the plan's order, so a missing PR can be named.
+    assert [pr["number"] for pr in inputs["implement"]["pr"]] == [1, 2]
+    assert [repo["repo"]["name"] for repo in inputs["plan"]["repos"]] == ["cli", "api"]
 
 
 def test_a_discussion_that_never_converges_is_capped_and_nothing_is_built(workflow, monkeypatch):
