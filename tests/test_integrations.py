@@ -22,36 +22,21 @@ from outcomeci.process import ExecutionError
 
 
 def workflow(tmp_path: Path) -> Path:
-    instructions = tmp_path / ".outcomeci" / "instructions"
-    instructions.mkdir(parents=True)
-    (instructions / "standup.md").write_text("# Standup\n", encoding="utf-8")
-    (instructions / "intake.md").write_text("# Intake\n", encoding="utf-8")
+    tmp_path.mkdir(parents=True, exist_ok=True)
     value = {
-        "apiVersion": "outcomeci.workflow/v1alpha1",
+        "apiVersion": "outcomeci.workflow/v1",
         "kind": "OutcomeWorkflow",
         "metadata": {"name": "delivery"},
         "spec": {
             "triggers": {"manual": {"type": "manual"}},
-            "backend": {"provider": "filesystem"},
-            "context": {"provider": "filesystem", "include": []},
-            "instructions": {"standup": {"path": ".outcomeci/instructions/standup.md"}},
+            "instructions": {"workflow": {"content": "Deliver the outcome."}},
             "agents": {
                 "default": {"runner": "codex"},
                 "phases": {
                     "intake": {
-                        "instructions": ".outcomeci/instructions/intake.md",
+                        "instructions": {"content": "Create the ticket."},
                         "needs": [],
-                        "integrations": [
-                            {"type": "api", "capability": "tickets.create"},
-                            {
-                                "type": "human",
-                                "timing": "after",
-                                "id": "confirm_scope",
-                                "participant": "requester",
-                                "purpose": "Confirm the proposed scope.",
-                                "interaction": "approval",
-                            },
-                        ],
+                        "capabilities": ["tickets.create"],
                     }
                 },
             },
@@ -105,9 +90,6 @@ def workflow(tmp_path: Path) -> Path:
 def test_compiles_phase_scoped_capability(tmp_path: Path) -> None:
     compiled = compile_file(workflow(tmp_path))
     assert compiled["instructions"]["phases"]["intake"]["capabilities"] == ["tickets.create"]
-    assert compiled["instructions"]["phases"]["intake"]["humans"]["after"][0]["id"] == (
-        "confirm_scope"
-    )
     assert "secret" not in json.dumps(compiled).lower()
 
 
@@ -127,10 +109,9 @@ def test_operation_policy_is_discoverable_and_audited(tmp_path: Path) -> None:
     assert result["audit"]["policy"] == executor.describe("tickets.create")["policy"]
 
 
-def test_dry_run_includes_api_and_humans_without_credentials_or_io(tmp_path: Path) -> None:
+def test_dry_run_describes_api_calls_without_credentials_or_io(tmp_path: Path) -> None:
     result = IntegrationExecutor(compile_file(workflow(tmp_path))).dry_run("intake")
     assert [item["name"] for item in result["api"]] == ["tickets.create"]
-    assert result["humans"][0]["id"] == "confirm_scope"
     assert result["credentials_resolved"] is False
     assert result["requests_executed"] is False
     assert "TICKET_TOKEN" not in json.dumps(result)
@@ -230,28 +211,6 @@ def test_http_failure_has_stable_safe_taxonomy(tmp_path: Path) -> None:
         "retryable": False,
     }
     assert "private" not in str(raised.value)
-
-
-def test_versioned_local_integration_package_is_merged_and_pinned(tmp_path: Path) -> None:
-    path = workflow(tmp_path)
-    value = yaml.safe_load(path.read_text())
-    package_definition = {
-        "apiVersion": "outcomeci.workflow/v1alpha1",
-        "kind": "OutcomeIntegrationPackage",
-        "metadata": {"name": "tickets", "version": "1.2.0"},
-        "spec": {
-            "connections": value["spec"].pop("connections"),
-            "integrations": value["spec"].pop("integrations"),
-        },
-    }
-    package = tmp_path / ".outcomeci/integrations/tickets.yml"
-    package.parent.mkdir(parents=True)
-    package.write_text(yaml.safe_dump(package_definition, sort_keys=False))
-    value["spec"]["integration_packages"] = [{"path": ".outcomeci/integrations/tickets.yml"}]
-    path.write_text(yaml.safe_dump(value, sort_keys=False))
-    compiled = compile_file(path)
-    assert "tickets.create" in IntegrationExecutor(compiled).capabilities("intake")
-    assert compiled["workflow"]["spec"]["integration_packages"][0]["version"] == "1.2.0"
 
 
 def test_executes_with_credential_but_returns_only_projected_output(tmp_path: Path) -> None:

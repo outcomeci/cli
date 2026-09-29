@@ -10,10 +10,9 @@ import httpx
 import pytest
 import test_v1_sentry as sentry
 import test_v1_slack as slack_example
-import yaml
 
 from outcomeci import local
-from outcomeci.config import ConfigError, compile_workflow
+from outcomeci.config import compile_workflow
 from outcomeci.integrations import IntegrationError, IntegrationExecutor
 from outcomeci.policy import PolicyExecutor
 from outcomeci.process import ExecutionError
@@ -100,30 +99,6 @@ def test_github_write_refuses_merges_and_settings_before_sending(monkeypatch):
         with pytest.raises(IntegrationError, match="does not allow"):
             executor.execute("github.write", {"method": method, "path": path}, phase="fix")
     assert sent == []
-
-
-def test_v1alpha1_files_keep_their_contract(tmp_path):
-    base = yaml.safe_load(
-        (Path(__file__).parent.parent / "examples/integration-package/outcome.yml").read_text()
-    )
-    for mutate, message in [
-        (
-            lambda doc: doc["spec"]["agents"]["phases"]["intake"].update(
-                instructions={"content": "x"}
-            ),
-            "inline instructions",
-        ),
-    ]:
-        doc = json.loads(json.dumps(base))
-        mutate(doc)
-        path = tmp_path / "outcome.yml"
-        path.write_text(yaml.safe_dump(doc), encoding="utf-8")
-        for name in ("instructions.md", "customer.integration.yml"):
-            (tmp_path / name).write_text(
-                (Path(__file__).parent.parent / "examples/integration-package" / name).read_text()
-            )
-        with pytest.raises(ConfigError, match=message):
-            compile_workflow(path)
 
 
 class FlakySlack(sentry.Services):

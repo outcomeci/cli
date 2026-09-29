@@ -579,8 +579,7 @@ class IntegrationExecutor:
 
     def dry_run(self, phase: str) -> dict[str, Any]:
         """Describe the phase's authorized effects without resolving credentials or doing I/O."""
-        phase_policy = self.compiled["instructions"]["phases"].get(phase)
-        if phase_policy is None:
+        if phase not in self.compiled["instructions"]["phases"]:
             raise IntegrationError(
                 "integration.phase_not_found",
                 f"workflow has no phase {phase}",
@@ -590,11 +589,6 @@ class IntegrationExecutor:
             "phase": phase,
             "workflow_revision": self.compiled["workflow_revision"],
             "api": [self.describe(name) for name in self.capabilities(phase)],
-            "humans": [
-                {"timing": timing, **hook}
-                for timing in ("before", "during", "after")
-                for hook in phase_policy["humans"][timing]
-            ],
             "credentials_resolved": False,
             "requests_executed": False,
         }

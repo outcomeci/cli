@@ -11,7 +11,7 @@ import test_v1_sentry as sentry
 import test_v1_slack as slack_example
 
 from outcomeci import v1_runtime
-from outcomeci.config import ConfigError, compile_workflow
+from outcomeci.config import compile_workflow
 from outcomeci.integrations import IntegrationError, IntegrationExecutor
 from outcomeci.policy import PolicyExecutor
 
@@ -160,26 +160,6 @@ def test_a_reply_file_is_fetched_only_within_its_threads_conversation(tmp_path, 
     assert refused["name"] == "shot.png" and "channel must be C1" in refused["error"]
     assert Path(fetched["path"]).read_bytes() == IMAGE
     assert v1_runtime._attachment(executor, {"api": "slack"}, "C9", item, "discuss")["error"]
-
-
-def test_a_v1alpha1_integration_cannot_download():
-    from outcomeci.config import _reject_lowered_only
-
-    spec = {
-        "integrations": {
-            "files": {
-                "operations": {
-                    "get": {
-                        "request": {"method": "GET", "path": "/f"},
-                        "response": {"download": {"url": "body.url"}},
-                    }
-                }
-            }
-        }
-    }
-
-    with pytest.raises(ConfigError, match="response.download"):
-        _reject_lowered_only(spec)
 
 
 def _broker(tmp_path, monkeypatch, info, grants, *, step_policy=None):

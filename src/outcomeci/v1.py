@@ -335,7 +335,10 @@ def _reasoning(value: Any) -> tuple[dict[str, Any], dict[str, Any] | None]:
         raise ConfigError("reasoning.fallback must be a list")
     if len(fallback) > 1:
         raise ConfigError("this runtime tries one fallback; list a single reasoning.fallback entry")
-    return default, _agent(fallback[0], "reasoning.fallback[0]")
+    chosen = _agent(fallback[0], "reasoning.fallback[0]")
+    if "runner" not in chosen:
+        raise ConfigError("reasoning.fallback[0].runner is required")
+    return default, chosen
 
 
 def _agent(value: Any, field: str) -> dict[str, Any]:
@@ -748,7 +751,7 @@ def load(path: Path) -> dict[str, Any]:
     stem = path.name.split(".", 1)[0]
     lowered = lower(document, path.parent, stem)
     extension = lowered.pop("_v1")
-    root = validate_lowered(lowered, path, lowered=True)
+    root = validate_lowered(lowered, path)
     graph = root["_graph"]
     for name, block in extension["blocks"].items():
         graph["phases"][name]["v1"] = {**block, "trigger": extension["trigger"]}

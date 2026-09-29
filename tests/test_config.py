@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -8,178 +7,77 @@ import yaml
 
 from outcomeci.config import ConfigError, compile_workflow
 
-
-def _workflow(tmp_path: Path) -> Path:
-    instructions = tmp_path / ".outcomeci" / "instructions"
-    instructions.mkdir(parents=True)
-    for name in ("orchestrate", "intake", "product", "technical", "plan"):
-        (instructions / f"{name}.md").write_text(f"# {name}\n")
-    schemas = tmp_path / ".outcomeci" / "schemas"
-    schemas.mkdir()
-    (schemas / "packet.json").write_text(json.dumps({"type": "object", "required": ["intent"]}))
-    value = {
-        "apiVersion": "outcomeci.workflow/v1alpha1",
-        "kind": "OutcomeWorkflow",
-        "metadata": {"name": "custom"},
-        "spec": {
-            "triggers": {"manual": {"type": "manual"}},
-            "backend": {"provider": "filesystem"},
-            "context": {"provider": "filesystem"},
-            "instructions": {
-                "orchestrate": {
-                    "path": ".outcomeci/instructions/orchestrate.md",
-                    "model": "gpt-orchestrator",
-                }
-            },
-            "agents": {
-                "default": {"runner": "codex", "model": "gpt-default"},
-                "phases": {
-                    "intake": {
-                        "instructions": ".outcomeci/instructions/intake.md",
-                        "needs": [],
-                        "expects": {
-                            "inputs": [
-                                {
-                                    "name": "request",
-                                    "from": "runtime.intent",
-                                    "media_type": "text/plain",
-                                }
-                            ],
-                            "outputs": [
-                                {
-                                    "name": "packet",
-                                    "path": "intake/packet.json",
-                                    "media_type": "application/json",
-                                    "schema": ".outcomeci/schemas/packet.json",
-                                }
-                            ],
-                        },
-                    },
-                    "product": {
-                        "instructions": ".outcomeci/instructions/product.md",
-                        "needs": ["intake"],
-                        "runner": "claude",
-                        "model": "claude-review",
-                        "expects": {
-                            "inputs": [
-                                {
-                                    "name": "packet",
-                                    "from": "intake.outputs.packet",
-                                    "media_type": "application/json",
-                                }
-                            ],
-                            "outputs": [
-                                {
-                                    "name": "review",
-                                    "path": "reviews/product.md",
-                                    "media_type": "text/markdown",
-                                }
-                            ],
-                        },
-                    },
-                    "technical": {
-                        "instructions": ".outcomeci/instructions/technical.md",
-                        "needs": ["intake"],
-                        "expects": {
-                            "inputs": [
-                                {
-                                    "name": "packet",
-                                    "from": "intake.outputs.packet",
-                                    "media_type": "application/json",
-                                }
-                            ],
-                            "outputs": [
-                                {
-                                    "name": "review",
-                                    "path": "reviews/technical.md",
-                                    "media_type": "text/markdown",
-                                }
-                            ],
-                        },
-                    },
-                    "plan": {
-                        "instructions": ".outcomeci/instructions/plan.md",
-                        "needs": ["product", "technical"],
-                        "expects": {
-                            "inputs": [
-                                {
-                                    "name": "product",
-                                    "from": "product.outputs.review",
-                                    "media_type": "text/markdown",
-                                },
-                                {
-                                    "name": "technical",
-                                    "from": "technical.outputs.review",
-                                    "media_type": "text/markdown",
-                                },
-                            ],
-                            "outputs": [
-                                {"name": "plan", "path": "plan.md", "media_type": "text/markdown"}
-                            ],
-                        },
-                    },
-                },
-            },
-            "connections": [],
+WORKFLOW = {
+    "apiVersion": "outcomeci.workflow/v1",
+    "name": "custom",
+    "trigger": "manual",
+    "reasoning": {"default": {"runner": "codex", "model": "gpt-default"}},
+    "steps": [
+        {
+            "intake": {
+                "reason": "intake.md",
+                "from": "trigger",
+                "returns": {"packet": {"intent": "string"}},
+            }
         },
-    }
+        {
+            "review": {
+                "reason": "review.md",
+                "with": "intake.packet",
+                "using": {"runner": "claude", "model": "claude-review"},
+                "returns": {"review": "string"},
+            }
+        },
+        {"plan": {"reason": "plan.md", "with": ["review.review"], "returns": {"plan": "string"}}},
+    ],
+}
+
+
+def _workflow(tmp_path: Path, **changes) -> Path:
+    instructions = tmp_path / ".outcomeci" / "instructions"
+    instructions.mkdir(parents=True, exist_ok=True)
+    for name in ("intake", "review", "plan"):
+        (instructions / f"{name}.md").write_text(f"# {name}\n")
+    value = {**WORKFLOW, **changes}
     path = tmp_path / "outcome.yml"
     path.write_text(yaml.safe_dump(value, sort_keys=False))
     return path
 
 
-def test_compiler_registry_preserves_v1alpha1_contract(tmp_path: Path) -> None:
-    path = _workflow(tmp_path)
-
-    compiled = compile_workflow(path)
-
-    assert compiled["api_version"] == "outcomeci.workflow/v1alpha1"
+def test_compiles_a_v1_workflow(tmp_path: Path) -> None:
+    compiled = compile_workflow(_workflow(tmp_path))
+    assert compiled["api_version"] == "outcomeci.workflow/v1"
     assert compiled["engine_version"] == "2"
 
 
-def test_compiler_registry_rejects_unknown_api_version(tmp_path: Path) -> None:
-    path = _workflow(tmp_path)
-    value = yaml.safe_load(path.read_text())
-    value["apiVersion"] = "outcomeci.com/v9"
-    path.write_text(yaml.safe_dump(value, sort_keys=False))
-
-    with pytest.raises(ConfigError, match="unsupported apiVersion.*v9"):
+def test_a_v1alpha1_file_is_refused_with_the_version_to_use(tmp_path: Path) -> None:
+    path = tmp_path / "outcome.yml"
+    path.write_text("apiVersion: outcomeci.workflow/v1alpha1\nkind: OutcomeWorkflow\n")
+    with pytest.raises(ConfigError, match="use outcomeci.workflow/v1"):
         compile_workflow(path)
 
 
-def test_compiles_fan_out_graph_and_effective_agent_policies(tmp_path: Path) -> None:
+def test_an_unknown_api_version_is_refused(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="unsupported apiVersion.*v9"):
+        compile_workflow(_workflow(tmp_path, apiVersion="outcomeci.com/v9"))
+
+
+def test_steps_run_in_order_with_their_own_agents(tmp_path: Path) -> None:
     compiled = compile_workflow(_workflow(tmp_path))
-    assert compiled["graph"]["levels"] == [["intake"], ["product", "technical"], ["plan"]]
+    assert compiled["graph"]["levels"] == [["intake"], ["review"], ["plan"]]
     assert compiled["triggers"] == {"manual": {"type": "manual"}}
-    assert compiled["instructions"]["orchestrator"]["policy"] == {
-        "runner": "codex",
-        "model": "gpt-orchestrator",
-    }
-    assert compiled["instructions"]["phases"]["product"]["policy"] == {
-        "runner": "claude",
-        "model": "claude-review",
-    }
-    assert compiled["instructions"]["phases"]["technical"]["policy"] == {
-        "runner": "codex",
-        "model": "gpt-default",
-    }
-    assert (
-        compiled["instructions"]["schemas"][".outcomeci/schemas/packet.json"]["value"]["type"]
-        == "object"
-    )
+    phases = compiled["instructions"]["phases"]
+    assert phases["review"]["policy"] == {"runner": "claude", "model": "claude-review"}
+    assert phases["plan"]["policy"] == {"runner": "codex", "model": "gpt-default"}
+    assert phases["intake"]["expects"]["outputs"][0]["path"] == "intake/outputs.json"
 
 
-def test_agent_default_fallback_compiles_and_survives_to_the_workflow_document(
-    tmp_path: Path,
-) -> None:
-    path = _workflow(tmp_path)
-    value = yaml.safe_load(path.read_text())
-    value["spec"]["agents"]["default"]["fallback"] = {
-        "runner": "claude",
-        "model": "claude-opus-5",
+def test_a_fallback_agent_reaches_the_compiled_workflow(tmp_path: Path) -> None:
+    reasoning = {
+        "default": {"runner": "codex"},
+        "fallback": [{"runner": "claude", "model": "claude-opus-5"}],
     }
-    path.write_text(yaml.safe_dump(value, sort_keys=False))
-    compiled = compile_workflow(path)
+    compiled = compile_workflow(_workflow(tmp_path, reasoning=reasoning))
     assert compiled["workflow"]["spec"]["agents"]["default"]["fallback"] == {
         "runner": "claude",
         "model": "claude-opus-5",
@@ -190,70 +88,36 @@ def test_agent_default_fallback_compiles_and_survives_to_the_workflow_document(
     "fallback,error",
     [
         ({"runner": "codex"}, "must differ from the default runner"),
-        ({"runner": "not-a-runner"}, "must be codex, claude, or opencode"),
-        ({}, "fallback.runner is required"),
+        ({"runner": "not-a-runner"}, "runner must be one of"),
+        ({}, "fallback\[0\].runner is required"),
     ],
 )
-def test_agent_default_fallback_rejects_invalid_configuration(
-    tmp_path: Path, fallback: dict, error: str
-) -> None:
-    path = _workflow(tmp_path)
-    value = yaml.safe_load(path.read_text())
-    value["spec"]["agents"]["default"]["fallback"] = fallback
-    path.write_text(yaml.safe_dump(value, sort_keys=False))
+def test_an_invalid_fallback_is_refused(tmp_path: Path, fallback: dict, error: str) -> None:
+    reasoning = {"default": {"runner": "codex"}, "fallback": [fallback]}
     with pytest.raises(ConfigError, match=error):
-        compile_workflow(path)
+        compile_workflow(_workflow(tmp_path, reasoning=reasoning))
 
 
-def test_agent_default_rejects_unknown_fields(tmp_path: Path) -> None:
-    path = _workflow(tmp_path)
-    value = yaml.safe_load(path.read_text())
-    value["spec"]["agents"]["default"]["bogus"] = True
-    path.write_text(yaml.safe_dump(value, sort_keys=False))
-    with pytest.raises(ConfigError, match="unknown fields: bogus"):
-        compile_workflow(path)
+def test_reasoning_accepts_only_runner_and_model(tmp_path: Path) -> None:
+    reasoning = {"default": {"runner": "codex", "bogus": True}}
+    with pytest.raises(ConfigError, match="supports runner and model"):
+        compile_workflow(_workflow(tmp_path, reasoning=reasoning))
 
 
-def test_requires_a_trigger(tmp_path: Path) -> None:
-    path = _workflow(tmp_path)
-    value = yaml.safe_load(path.read_text())
-    del value["spec"]["triggers"]
-    path.write_text(yaml.safe_dump(value, sort_keys=False))
-    with pytest.raises(ConfigError, match="spec.triggers"):
-        compile_workflow(path)
+def test_a_trigger_is_required(tmp_path: Path) -> None:
+    with pytest.raises(ConfigError, match="trigger must be one of"):
+        compile_workflow(_workflow(tmp_path, trigger=None))
 
 
-def test_email_trigger_can_feed_a_phase(tmp_path: Path) -> None:
-    path = _workflow(tmp_path)
-    value = yaml.safe_load(path.read_text())
-    value["spec"]["triggers"] = {
-        "inbound_email": {"type": "email.received", "filters": {"subject_prefix": "Proof"}}
-    }
-    value["spec"]["agents"]["phases"]["intake"]["expects"]["inputs"][0]["from"] = (
-        "trigger.inbound_email"
-    )
-    path.write_text(yaml.safe_dump(value, sort_keys=False))
-    compiled = compile_workflow(path)
-    assert compiled["triggers"]["inbound_email"]["type"] == "email.received"
+def test_an_email_trigger_compiles(tmp_path: Path) -> None:
+    compiled = compile_workflow(_workflow(tmp_path, trigger="email"))
+    assert compiled["triggers"] == {"email": {"type": "email.received"}}
 
 
-def test_cron_trigger_compiles_with_expression_and_timezone(tmp_path: Path) -> None:
-    path = _workflow(tmp_path)
-    value = yaml.safe_load(path.read_text())
-    value["spec"]["triggers"] = {
-        "daily": {
-            "type": "cron",
-            "expression": "*/15 * * * *",
-            "timezone": "America/Chicago",
-        }
-    }
-    path.write_text(yaml.safe_dump(value, sort_keys=False))
-    compiled = compile_workflow(path)
-    assert compiled["triggers"]["daily"] == {
-        "type": "cron",
-        "expression": "*/15 * * * *",
-        "timezone": "America/Chicago",
-    }
+def test_a_cron_trigger_compiles_with_expression_and_timezone(tmp_path: Path) -> None:
+    trigger = {"type": "cron", "expression": "*/15 * * * *", "timezone": "America/Chicago"}
+    compiled = compile_workflow(_workflow(tmp_path, trigger=trigger))
+    assert compiled["triggers"]["cron"] == trigger
 
 
 @pytest.mark.parametrize(
@@ -271,10 +135,7 @@ def test_cron_trigger_compiles_with_expression_and_timezone(tmp_path: Path) -> N
             {"type": "cron", "expression": "0 9 5 * 2", "timezone": "America/Chicago"},
             "day-of-month or day-of-week",
         ),
-        (
-            {"type": "cron", "expression": "0 9 * * *"},
-            "timezone is required",
-        ),
+        ({"type": "cron", "expression": "0 9 * * *"}, "timezone is required"),
         (
             {"type": "cron", "expression": "0 9 * * *", "timezone": "Not/AZone"},
             "not a recognized IANA time zone",
@@ -285,54 +146,33 @@ def test_cron_trigger_compiles_with_expression_and_timezone(tmp_path: Path) -> N
         ),
     ],
 )
-def test_cron_trigger_rejects_invalid_configuration(
-    tmp_path: Path, trigger: dict, error: str
-) -> None:
-    path = _workflow(tmp_path)
-    value = yaml.safe_load(path.read_text())
-    value["spec"]["triggers"] = {"daily": trigger}
-    path.write_text(yaml.safe_dump(value, sort_keys=False))
+def test_an_invalid_cron_trigger_is_refused(tmp_path: Path, trigger: dict, error: str) -> None:
     with pytest.raises(ConfigError, match=error):
-        compile_workflow(path)
+        compile_workflow(_workflow(tmp_path, trigger=trigger))
 
 
-@pytest.mark.parametrize(
-    "mutation,error",
-    [
-        (
-            lambda value: value["spec"]["agents"]["phases"]["plan"].update(needs=["missing"]),
-            "unknown phase",
-        ),
-        (lambda value: value["spec"]["agents"]["phases"]["intake"].update(needs=["plan"]), "cycle"),
-        (
-            lambda value: value["spec"]["agents"]["phases"]["plan"]["expects"]["inputs"][0].update(
-                {"from": "missing.outputs.review"}
-            ),
-            "no declared producer",
-        ),
-        (
-            lambda value: value["spec"]["agents"]["phases"]["plan"]["expects"]["outputs"][0].update(
-                path="../plan.md"
-            ),
-            "remain within",
-        ),
-    ],
-)
-def test_rejects_invalid_graph_contracts(tmp_path: Path, mutation, error: str) -> None:
-    path = _workflow(tmp_path)
-    value = yaml.safe_load(path.read_text())
-    mutation(value)
-    path.write_text(yaml.safe_dump(value, sort_keys=False))
-    with pytest.raises(ConfigError, match=error):
-        compile_workflow(path)
+def test_a_step_can_read_only_earlier_outputs(tmp_path: Path) -> None:
+    steps = [dict(step) for step in WORKFLOW["steps"]]
+    steps[2] = {"plan": {"reason": "plan.md", "with": ["review.missing"]}}
+    with pytest.raises(ConfigError, match="returns no missing"):
+        compile_workflow(_workflow(tmp_path, steps=steps))
 
 
-def test_yaml_mapping_order_does_not_change_revision(tmp_path: Path) -> None:
+def test_step_names_are_unique(tmp_path: Path) -> None:
+    steps = [*WORKFLOW["steps"], {"intake": {"reason": "plan.md"}}]
+    with pytest.raises(ConfigError, match="duplicate or reserved step name"):
+        compile_workflow(_workflow(tmp_path, steps=steps))
+
+
+def test_field_order_does_not_change_the_revision(tmp_path: Path) -> None:
     path = _workflow(tmp_path)
     first = compile_workflow(path)["workflow_revision"]
     value = yaml.safe_load(path.read_text())
-    value["spec"]["agents"]["phases"] = dict(
-        reversed(list(value["spec"]["agents"]["phases"].items()))
-    )
+    value = dict(reversed(list(value.items())))
+    value["steps"] = [
+        {name: dict(reversed(list(step.items())))}
+        for entry in value["steps"]
+        for name, step in entry.items()
+    ]
     path.write_text(yaml.safe_dump(value, sort_keys=False))
     assert compile_workflow(path)["workflow_revision"] == first

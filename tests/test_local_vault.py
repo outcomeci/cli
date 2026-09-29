@@ -6,9 +6,9 @@ from pathlib import Path
 
 import httpx
 import yaml
+from lowered import compile_file
 from test_integrations import workflow
 
-from outcomeci.config import compile_workflow
 from outcomeci.integrations import IntegrationExecutor, local_credential_resolver
 from outcomeci.local_vault import initialize, list_entries, put, resolve
 
@@ -46,7 +46,7 @@ def test_local_vault_resolves_structured_credentials_for_executor(
         return httpx.Response(201, json={"id": "T-1"})
 
     executor = IntegrationExecutor(
-        compile_workflow(config),
+        compile_file(config),
         resolver=local_credential_resolver(tmp_path),
         transport=httpx.MockTransport(handler),
     )

@@ -185,32 +185,3 @@ def test_durations():
 )
 def test_paths_stay_under_the_granted_repository(path, inside):
     assert _within(path, "/repos/o/r") is inside
-
-
-def test_a_v1alpha1_workflow_cannot_declare_a_receiver(tmp_path):
-    path = tmp_path / "outcome.yml"
-    path.write_text(
-        yaml.safe_dump(
-            {
-                "apiVersion": "outcomeci.workflow/v1alpha1",
-                "kind": "OutcomeWorkflow",
-                "metadata": {"name": "w"},
-                "spec": {
-                    "triggers": {
-                        "inbound": {
-                            "type": "webhook.received",
-                            "receiver": {
-                                "uses": "slack",
-                                "secret": "vault:slack/signing",
-                                "events": ["dm"],
-                            },
-                        }
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ConfigError, match="receiver"):
-        compile_workflow(path)
