@@ -94,14 +94,6 @@ def test_workflow_get_rejects_a_support_file_path_outside_outcomeci(
     assert "workflow support file path is invalid" in capsys.readouterr().err
 
 
-def test_schema_can_be_printed_and_exported(tmp_path: Path, capsys) -> None:
-    assert main(["schema", "print"]) == 0
-    assert json.loads(capsys.readouterr().out)["$id"].endswith("outcome-v1alpha1.schema.json")
-    output = tmp_path / "outcome.schema.json"
-    assert main(["schema", "export", str(output)]) == 0
-    assert json.loads(output.read_text())["title"] == "OutcomeCI Outcome Workflow"
-
-
 def test_integration_dry_run_and_doctor_are_machine_readable(tmp_path: Path, capsys) -> None:
     initialize(tmp_path)
     phase = ["--phase", "investigate", "--workspace", str(tmp_path)]

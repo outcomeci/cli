@@ -1,18 +1,15 @@
 from __future__ import annotations
 
 import copy
-import json
 from pathlib import Path
 
 import pytest
 from lowered import email_payload
 
-from outcomeci.cli import main
 from outcomeci.config import ConfigError
 from outcomeci.contracts import (
     ContractError,
     contract_schema,
-    render_reference,
     validate_contract,
 )
 
@@ -73,33 +70,3 @@ def test_instruction_symlink_cannot_read_private_vault(tmp_path: Path) -> None:
     (tmp_path / "instructions.md").symlink_to(private)
     with pytest.raises(ConfigError, match="broker-private"):
         _relative_path(tmp_path, "instructions.md", "instructions")
-
-
-def test_contract_schema_cli_and_generated_documentation(tmp_path: Path, capsys) -> None:
-    payload = tmp_path / "email.json"
-    payload.write_text(json.dumps(email_payload()))
-    assert main(["schema", "validate", str(payload), "--type", "email.received"]) == 0
-    assert json.loads(capsys.readouterr().out)["valid"] is True
-    assert main(["schema", "print", "--type", "agent"]) == 0
-    assert json.loads(capsys.readouterr().out)["required"] == ["type", "instructions"]
-    cron_payload = tmp_path / "cron.json"
-    cron_payload.write_text(json.dumps(contract_schema("cron")["examples"][0]))
-    assert main(["schema", "validate", str(cron_payload), "--type", "cron"]) == 0
-    assert json.loads(capsys.readouterr().out)["valid"] is True
-    assert main(["schema", "print", "--type", "cron"]) == 0
-    assert json.loads(capsys.readouterr().out)["required"] == [
-        "schema_version",
-        "type",
-        "schedule_id",
-        "generation",
-        "schedule_arn",
-        "scheduled_at",
-        "execution_id",
-        "attempt_number",
-        "trigger_name",
-    ]
-    assert main(["schema", "docs"]) == 0
-    assert capsys.readouterr().out.rstrip() == render_reference().rstrip()
-    reference = Path(__file__).parents[1] / "docs" / "typed-contracts-v1.md"
-    assert reference.read_text().rstrip() == render_reference().rstrip()
-    assert "`artifacts[].artifact_ref`" in render_reference()

@@ -24,7 +24,6 @@ from .cloud import login as cloud_login
 from .cloud import login_with_key as cloud_login_with_key
 from .cloud import logout as cloud_logout
 from .config import ConfigError, compile_workflow
-from .contracts import ContractError, render_reference, validate_contract
 from .integrations import (
     IntegrationError,
     IntegrationExecutor,
@@ -37,7 +36,6 @@ from .local_vault import put as put_local_vault_entry
 from .process import ExecutionError
 from .publication import prepare_publication
 from .repository import RepositoryError, initialize, validate
-from .schema import export_schema, load_schema, schema_path
 
 AGENT_CHOICES = ("codex", "claude")
 
@@ -75,28 +73,6 @@ def parser() -> argparse.ArgumentParser:
             action.add_argument("--target", required=True)
             action.add_argument("--ttl-seconds", type=int, default=900)
             action.add_argument("--public", action="store_true", help="Acknowledge public exposure")
-    schema = commands.add_parser("schema", help="Inspect the versioned outcome.yml schema")
-    schema_commands = schema.add_subparsers(dest="schema_command", required=True)
-    schema_path_command = schema_commands.add_parser("path", help="Print the packaged schema path")
-    schema_print_command = schema_commands.add_parser("print", help="Print the current schema")
-    schema_export = schema_commands.add_parser("export", help="Export the current schema")
-    for command in (schema_path_command, schema_print_command, schema_export):
-        command.add_argument(
-            "--type",
-            choices=("workflow", "email.received", "webhook.received", "cron", "agent"),
-            default="workflow",
-        )
-    schema_commands.add_parser("docs", help="Print reference documentation from enforced schemas")
-    schema_validate_command = schema_commands.add_parser(
-        "validate", help="Validate a typed payload or phase configuration"
-    )
-    schema_validate_command.add_argument("input", type=Path)
-    schema_validate_command.add_argument(
-        "--type",
-        choices=("email.received", "webhook.received", "cron", "agent"),
-        required=True,
-    )
-    schema_export.add_argument("output", type=Path)
     auth = commands.add_parser("auth", help="Authenticate with OutcomeCI Cloud")
     auth_commands = auth.add_subparsers(dest="auth_command", required=True)
     auth_login = auth_commands.add_parser("login")
@@ -373,22 +349,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if args.tunnel_command == "status"
                     else tunnels.stop(args.workspace_id)
                 )
-            return 0
-        if args.command == "schema":
-            if args.schema_command == "path":
-                print(schema_path(args.type))
-            elif args.schema_command == "print":
-                _print_json(load_schema(args.type), sort_keys=True)
-            elif args.schema_command == "docs":
-                print(render_reference())
-            elif args.schema_command == "validate":
-                try:
-                    validate_contract(args.type, json.loads(args.input.read_text(encoding="utf-8")))
-                except (ContractError, OSError, json.JSONDecodeError) as exc:
-                    raise ExecutionError(str(exc)) from exc
-                _print_json({"valid": True, "type": args.type})
-            else:
-                print(export_schema(args.output, args.type))
             return 0
         if args.command == "auth":
             if args.auth_command == "login":

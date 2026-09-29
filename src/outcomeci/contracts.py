@@ -1,4 +1,4 @@
-"""Versioned trigger and phase contracts shared by runtime and documentation."""
+"""Versioned trigger payload contracts, validated before any run starts."""
 
 from __future__ import annotations
 
@@ -32,7 +32,6 @@ CONTRACT_FILES = {
     "email.received": "email-received-v1.schema.json",
     "webhook.received": "webhook-received-v1.schema.json",
     "cron": "cron-received-v1.schema.json",
-    "agent": "agent-phase-v1.schema.json",
 }
 
 
@@ -63,62 +62,3 @@ def validate_trigger_payload(trigger_type: str, value: Any) -> None:
             raise ContractError("manual trigger payload must be an object")
         return
     validate_contract(trigger_type, value)
-
-
-def _field_rows(schema: dict[str, Any], prefix: str = "") -> list[str]:
-    rows = []
-    for field, definition in schema.get("properties", {}).items():
-        kind = definition.get("type")
-        if isinstance(kind, list):
-            kind = " or ".join(kind)
-        if "const" in definition:
-            kind = repr(definition["const"])
-        elif "enum" in definition:
-            kind = ", ".join(definition["enum"])
-        name = f"{prefix}{field}"
-        rows.append(
-            f"| `{name}` | {'yes' if field in schema.get('required', []) else 'no'} | {kind or 'object'} | {definition.get('description', '')} |"
-        )
-        if definition.get("type") == "array":
-            rows.extend(_field_rows(definition.get("items", {}), f"{name}[]."))
-        elif definition.get("type") == "object":
-            rows.extend(_field_rows(definition, f"{name}."))
-    return rows
-
-
-def render_reference() -> str:
-    """Generate the reference from the same packaged schemas used for validation."""
-    lines = [
-        "# Typed workflow contracts",
-        "",
-        "Generated from packaged v1 JSON Schemas. Do not edit field tables by hand.",
-        "",
-    ]
-    for name in CONTRACT_FILES:
-        schema = contract_schema(name)
-        lines.extend(
-            [
-                f"## {schema['title']}",
-                "",
-                schema["description"],
-                "",
-                f"Schema: `{schema['$id']}`",
-                "",
-                "| Field | Required | Type | Meaning |",
-                "| --- | --- | --- | --- |",
-            ]
-        )
-        lines.extend(_field_rows(schema))
-        lines.append("")
-        if schema.get("examples"):
-            lines.extend(
-                [
-                    "### Example payload",
-                    "",
-                    "```json",
-                    json.dumps(schema["examples"][0], indent=2),
-                    "```",
-                    "",
-                ]
-            )
-    return "\n".join(lines)
