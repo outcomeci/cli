@@ -6,7 +6,7 @@ V1_STEP_TASK = """{shared}
 
 {instructions}
 
-{environment} Write only this step's result file and notes beneath {outcome_root}. Call an API capability with `{runtime_cli} integration execute <capability> --phase {step} --input-stdin`, passing its input as JSON on stdin; each capability's input schema is in the context below. The capability broker holds the credentials and enforces this step's grants.
+{environment} Write only this step's result file and notes beneath {outcome_root}. Call an API capability with `{runtime_cli} integration execute <capability> --step {step} --input-stdin`, passing its input as JSON on stdin; each capability's input schema is in the context below. The capability broker holds the credentials and enforces this step's grants.
 
 {context_json}"""
 

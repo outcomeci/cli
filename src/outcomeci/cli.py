@@ -93,7 +93,7 @@ ARGUMENT_HELP: dict[str, dict[str, str]] = {
         "--value": "Secret value; prefer --value-stdin, which keeps it out of shell history",
         "--value-stdin": "Read the secret value from stdin",
         "--workflow-id": "Grant this workflow ID access to the entry (repeatable)",
-        "--phase": "Step whose grants the call runs under",
+        "--step": "Step whose grants the call runs under",
         "--team": "Slack workspace, when the app is installed in several",
         "entry_id": "Vault entry ID, as oci vault list prints it",
         "capability": "Capability name, such as github.read",
@@ -331,19 +331,19 @@ def parser() -> argparse.ArgumentParser:
         dest="integration_command", required=True, metavar="{slack}"
     )
     integration_list = integration_commands.add_parser("list")
-    integration_list.add_argument("--phase")
+    integration_list.add_argument("--step")
     _add_workflow_arguments(integration_list)
     integration_describe = integration_commands.add_parser("describe")
     integration_describe.add_argument("capability")
     _add_workflow_arguments(integration_describe)
     integration_execute = integration_commands.add_parser("execute")
     integration_execute.add_argument("capability")
-    integration_execute.add_argument("--phase", required=True)
+    integration_execute.add_argument("--step", required=True)
     integration_execute.add_argument("--input", default="{}")
     integration_execute.add_argument("--input-stdin", action="store_true")
     _add_workflow_arguments(integration_execute)
     integration_dry_run = integration_commands.add_parser("dry-run")
-    integration_dry_run.add_argument("--phase", required=True)
+    integration_dry_run.add_argument("--step", required=True)
     _add_workflow_arguments(integration_dry_run)
     integration_doctor = integration_commands.add_parser("doctor")
     integration_doctor.add_argument(
@@ -600,11 +600,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                 compiled, resolver=local_credential_resolver(_workflow_path(args).parent)
             )
             if args.integration_command == "list":
-                _print_json({"capabilities": executor.capabilities(args.phase)}, sort_keys=True)
+                _print_json({"capabilities": executor.capabilities(args.step)}, sort_keys=True)
             elif args.integration_command == "describe":
                 _print_json(executor.describe(args.capability), sort_keys=True)
             elif args.integration_command == "dry-run":
-                _print_json(executor.dry_run(args.phase), sort_keys=True)
+                _print_json(executor.dry_run(args.step), sort_keys=True)
             elif args.integration_command == "doctor":
                 result = doctor(
                     compiled,
@@ -624,7 +624,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result = (
                     invoke_integration(args.capability, inputs)
                     if os.environ.get("OUTCOMECI_CAPABILITY_SOCKET")
-                    else executor.execute(args.capability, inputs, step=args.phase)
+                    else executor.execute(args.capability, inputs, step=args.step)
                 )
                 _print_json(result, sort_keys=True)
         elif args.command == "integration" and args.integration_command == "slack":

@@ -96,8 +96,8 @@ def test_workflow_get_rejects_a_support_file_path_outside_outcomeci(
 
 def test_integration_dry_run_and_doctor_are_machine_readable(tmp_path: Path, capsys) -> None:
     initialize(tmp_path)
-    phase = ["--phase", "investigate", "--dir", str(tmp_path)]
-    assert main(["integration", "dry-run", *phase]) == 0
+    step = ["--step", "investigate", "--dir", str(tmp_path)]
+    assert main(["integration", "dry-run", *step]) == 0
     assert json.loads(capsys.readouterr().out)["requests_executed"] is False
     main(["integration", "doctor", "--dir", str(tmp_path)])
     report = json.loads(capsys.readouterr().out)
