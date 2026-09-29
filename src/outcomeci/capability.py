@@ -55,6 +55,7 @@ class Broker:
         policy_reviewer=None,
         grants=None,
         container_isolated=False,
+        inputs=None,
     ):
         compiled = compiled if compiled is not None else compile_workflow(config)
         hooks = compiled["instructions"]["phases"][phase]["humans"]
@@ -80,7 +81,11 @@ class Broker:
                     "content": (
                         f"Step policy for {phase}: {step['v1']['policy']}\n"
                         "Grant arguments such as the channel or repository are enforced "
-                        "separately; judge the proposal against this policy only."
+                        "separately; judge the proposal against this policy only.\n"
+                        "context.inputs is what this step was given by the steps before "
+                        "it, such as a plan its requester approved in discussion. Where "
+                        "it differs from the original trigger, the inputs are what the "
+                        "step must do; do not hold it to the trigger's first wording."
                     ),
                     "policy": step["policy"],
                 }
@@ -95,6 +100,7 @@ class Broker:
             {
                 "intent": state.get("intent"),
                 "trigger": state.get("trigger"),
+                **({"inputs": inputs} if inputs is not None else {}),
                 "phase": compiled["instructions"]["phases"][phase],
             },
             reviewer=policy_reviewer,
@@ -179,6 +185,7 @@ def serve(
     policy_reviewer=None,
     grants=None,
     container_isolated=False,
+    inputs=None,
 ) -> Iterator[dict[str, str]]:
     temporary = tempfile.TemporaryDirectory(prefix="oci-cap-")
     directory = Path(temporary.name)
@@ -196,6 +203,7 @@ def serve(
         policy_reviewer,
         grants,
         container_isolated,
+        inputs,
     )
     thread = threading.Thread(target=broker.server.serve_forever, daemon=True)
     thread.start()

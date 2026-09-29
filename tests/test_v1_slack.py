@@ -204,7 +204,7 @@ def workflow(tmp_path: Path, monkeypatch) -> Path:
     return tmp_path / "wf"
 
 
-def _run(root: Path, slack: Slack, agent: Agent, monkeypatch) -> dict:
+def _run(root: Path, slack: Slack, agent: Agent, monkeypatch, reviewed: list | None = None) -> dict:
     real = httpx.Client
 
     def client(*args, **kwargs):
@@ -217,11 +217,14 @@ def _run(root: Path, slack: Slack, agent: Agent, monkeypatch) -> dict:
     options = local.ExecutionOptions(
         credential_resolver=lambda reference: "xoxb-test-credential",
         execution_backend="outcomeci",
-        policy_reviewer=lambda proposal: {
-            "decision": "allow",
-            "proposal_sha256": proposal["proposal_sha256"],
-            "reason": "ok",
-        },
+        policy_reviewer=lambda proposal: (
+            (reviewed.append(proposal) if reviewed is not None else None)
+            or {
+                "decision": "allow",
+                "proposal_sha256": proposal["proposal_sha256"],
+                "reason": "ok",
+            }
+        ),
     )
     return debug.execute(
         root, config, compile_workflow(config), "webhook", _payload(), options, auto_continue=True
@@ -342,3 +345,18 @@ def test_the_draft_step_opens_a_screenshot_attached_to_the_request(workflow, mon
     assert Path(opened["file"]["path"]).is_relative_to(
         workflow / ".outcomeci/outcomes" / result["run_id"] / "attachments"
     )
+
+
+def test_the_reviewer_judges_a_step_against_its_approved_plan(workflow, monkeypatch):
+    slack = Slack(["also document it", "go ahead"])
+    reviewed: list = []
+
+    result = _run(workflow, slack, Agent(), monkeypatch, reviewed)
+
+    assert result["status"] == "completed"
+    implement = [p for p in reviewed if str(p["request"].get("path", "")).startswith("/repos/")]
+    assert implement, [p["request"] for p in reviewed]
+    inputs = {item["name"]: item["value"] for item in implement[0]["context"]["inputs"]}
+    # The discussion revised the plan; the reviewer sees the revision, not only the trigger.
+    assert inputs["plan"]["summary"] == "Add --json output and document it"
+    assert "context.inputs is what this step was given" in implement[0]["policy"]["content"]
