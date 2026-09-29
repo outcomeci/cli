@@ -28,32 +28,6 @@ jobs:
         with:
           role-to-assume: ${{ vars.RUNNER_IMAGE_AWS_ROLE_ARN }}
           aws-region: us-east-1
-      - name: Require every gating staging proof to have passed for this version
-        env:
-          TAG: ${{ inputs.tag }}
-        run: |
-          VERSION="${TAG#v}"
-          for PROOF in docs-quickstart-v1 vault-credentials-v1; do
-            LATEST=$(aws cloudwatch get-metric-statistics \
-              --namespace "OutcomeCI/DocsProof" \
-              --metric-name ProofPassedByVersion \
-              --dimensions Name=Environment,Value=staging Name=Proof,Value="$PROOF" Name=Version,Value="$VERSION" \
-              --start-time "$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%S)" \
-              --end-time "$(date -u +%Y-%m-%dT%H:%M:%S)" \
-              --period 3600 \
-              --statistics Minimum \
-              --query 'sort_by(Datapoints, &Timestamp)[-1].Minimum' \
-              --output text)
-            if [ -z "$LATEST" ] || [ "$LATEST" = "None" ]; then
-              echo "::error::No staging $PROOF run has tested outcomeci-cli==$VERSION yet. Staging checks hourly against CodeArtifact's latest release candidate — wait for it to pick up this tag and pass, then re-run this workflow."
-              exit 1
-            fi
-            if [ "$(printf '%.0f' "$LATEST")" -lt 1 ]; then
-              echo "::error::Staging's $PROOF failed against outcomeci-cli==$VERSION. Fix the regression before promoting."
-              exit 1
-            fi
-            echo "staging $PROOF passed for outcomeci-cli==$VERSION"
-          done
       - run: pip install hatchling hatch-vcs
       - name: Download the internally tested distributions
         env:
@@ -66,41 +40,8 @@ jobs:
           pip download --no-deps --no-build-isolation --no-binary=:all: --dest dist "outcomeci-cli==$VERSION"
       - uses: pypa/gh-action-pypi-publish@release/v1
 
-  proof-runner:
-    needs: publish
-    runs-on: ubuntu-latest
-    environment: promote
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ inputs.tag }}
-          fetch-depth: 0
-      - uses: aws-actions/configure-aws-credentials@v6
-        with:
-          role-to-assume: ${{ vars.RUNNER_IMAGE_AWS_ROLE_ARN }}
-          aws-region: us-east-1
-      - id: ecr
-        uses: aws-actions/amazon-ecr-login@v2
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Mirror the internally tested proof runner
-        env:
-          REGISTRY: ${{ steps.ecr.outputs.registry }}
-          TAG: ${{ inputs.tag }}
-        run: |
-          docker buildx imagetools create \
-            --tag "ghcr.io/outcomeci/proof-runner:${TAG#v}" \
-            "$REGISTRY/outcomeci-proof-runner:release-$TAG"
-
   release:
-    needs: [publish, proof-runner]
+    needs: publish
     runs-on: ubuntu-latest
     permissions:
       actions: write

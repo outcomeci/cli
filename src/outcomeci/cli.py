@@ -35,8 +35,6 @@ from .local_vault import initialize as initialize_local_vault
 from .local_vault import list_entries as list_local_vault_entries
 from .local_vault import put as put_local_vault_entry
 from .process import ExecutionError
-from .proof_runner import bundled_definition, bundled_proof_names
-from .proof_runner import run as run_simulation
 from .publication import prepare_publication
 from .repository import RepositoryError, initialize, validate
 from .schema import export_schema, load_schema, schema_path
@@ -279,14 +277,6 @@ def parser() -> argparse.ArgumentParser:
     for name in ("init", "validate", "status"):
         item = commands.add_parser(name)
         item.add_argument("--dir", type=Path, default=Path.cwd())
-    proof = commands.add_parser("proof", help="Run ecosystem persona durability proofs")
-    proof_commands = proof.add_subparsers(dest="proof_command", required=True)
-    proof_run = proof_commands.add_parser("run")
-    proof_source = proof_run.add_mutually_exclusive_group()
-    proof_source.add_argument("--definition", type=Path)
-    proof_source.add_argument("--name", choices=bundled_proof_names())
-    proof_run.add_argument("--workspace", type=Path, default=Path("/proof"))
-    proof_run.add_argument("--report", type=Path)
     outcome = commands.add_parser("outcome")
     outcome_commands = outcome.add_subparsers(dest="outcome_command", required=True)
     for name in ("validate", "compile"):
@@ -384,11 +374,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else tunnels.stop(args.workspace_id)
                 )
             return 0
-        if args.command == "proof":
-            definition = args.definition or (bundled_definition(args.name) if args.name else None)
-            result = run_simulation(definition, args.workspace, args.report)
-            _print_json(result, sort_keys=True)
-            return 0 if result["status"] == "passed" else 2
         if args.command == "schema":
             if args.schema_command == "path":
                 print(schema_path(args.type))

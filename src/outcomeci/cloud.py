@@ -210,22 +210,6 @@ def _authorized_request(
     return status, value
 
 
-def start_email_trigger_proof(workspace_id: str) -> dict[str, Any]:
-    status, value = _authorized_request(
-        f"/workspaces/{workspace_id}/email-trigger-proofs", method="POST", body={}
-    )
-    _raise_for_status(status, value, 202, "could not start email trigger proof", require_dict=True)
-    return value
-
-
-def get_email_trigger_proof(workspace_id: str, proof_id: str) -> dict[str, Any]:
-    status, value = _authorized_request(
-        f"/workspaces/{workspace_id}/email-trigger-proofs/{proof_id}"
-    )
-    _raise_for_status(status, value, 200, "could not read email trigger proof", require_dict=True)
-    return value
-
-
 def get_workflow(workspace_id: str, workflow_id: str) -> dict[str, Any]:
     status, value = _authorized_request(
         f"/workspaces/{workspace_id}/workflow-revisions/{workflow_id}/latest"

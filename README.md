@@ -85,55 +85,6 @@ The skill coordinates `outcome begin`, `compile`, `validate-artifacts`,
 `advance`, and `status`. Managed OutcomeCI runners continue to use `outcome
 run --claim ...`; both modes share workflow compilation and artifact schemas.
 
-## Ecosystem durability proofs
-
-The separately packaged `proof-runner` treats a versioned persona journey as
-an ecosystem-level test. Run without `--name`, it runs `vault-credentials-v1`,
-which stores every credential type in an encrypted local Vault, authenticates
-each against a local mock server, rotates them, and verifies no secret reaches
-the evidence:
-
-```console
-oci proof run --workspace ./proof-runs
-docker build -f Dockerfile.proof-runner -t outcomeci-proof-runner .
-docker run --rm --network none --tmpfs /proof:rw,noexec,nosuid,uid=10001,gid=10001,size=128m outcomeci-proof-runner
-```
-
-Pass/fail evidence is written as a machine-readable report and hash-linked
-event ledger. `proof.yml` holds exactly one persona journey. The bundled proofs
-are `vault-credentials-v1`, `webhook-trigger-v1`, `docs-quickstart-v1`, and
-`email-trigger-v1` for managed ingress. The managed proof uses only a workspace API key and sends
-a fixed MIME message through the real SES ingress:
-
-```console
-export OUTCOMECI_PROOF_API_URL=https://staging-api.outcomeci.com
-export OUTCOMECI_PROOF_WORKSPACE_ID=workspace_example
-read -rsp "Workspace API key: " OUTCOMECI_PROOF_API_KEY
-export OUTCOMECI_PROOF_API_KEY
-oci proof run --name email-trigger-v1 --workspace ./proof-runs
-```
-
-It waits for encrypted artifact persistence, exactly-once workflow invocation,
-and real metered usage, then prints a redacted `email received` receipt.
-
-Filesystem workflows can pin repository evidence explicitly:
-
-```yaml
-spec:
-  context:
-    provider: filesystem
-    include:
-      - .outcomeci/context/**
-      - docs/**
-    exclude:
-      - node_modules/**
-      - dist/**
-```
-
-Compiled context records each matched path, size, and SHA-256 hash. Context
-changes therefore produce a new workflow revision. Files remain in place and
-are read by the active local agent; they are not copied into `outcome.yml`.
-
 ## Credential-blind API capabilities
 
 An outcome workflow can grant named API operations only to phases that need

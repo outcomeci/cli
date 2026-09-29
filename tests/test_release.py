@@ -28,20 +28,15 @@ def test_publish_uses_trusted_publishing() -> None:
 def test_merge_release_stays_internal_until_promotion() -> None:
     semantic = (ROOT / ".github/workflows/semantic-release.yml").read_text()
     internal = (ROOT / ".github/workflows/internal-release.yml").read_text()
-    proof = (ROOT / ".github/workflows/proof-runner-container.yml").read_text()
     assert "gh workflow run publish.yml" not in semantic
     assert "gh workflow run internal-release.yml" in semantic
-    assert "gh workflow run proof-runner-container.yml" in semantic
+    assert "proof-runner" not in semantic
     assert "workflow_dispatch:" in internal
     assert "ref: ${{ inputs.tag || github.ref }}" in internal
     assert "codeartifact login --tool twine" in internal
     assert "twine upload --repository codeartifact" in internal
     assert "codeartifact describe-package-version" in internal
     assert "--skip-existing" not in internal
-    assert "workflow_dispatch:" in proof
-    assert "REQUESTED_TAG: ${{ inputs.tag }}" in proof
-    assert "outcomeci-proof-runner" in proof
-    assert "docker push" in proof
 
 
 def test_outcome_runner_uses_only_immutable_ecr_tags() -> None:
