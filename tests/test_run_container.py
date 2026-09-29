@@ -75,7 +75,7 @@ def test_a_failed_run_leaves_the_codex_login_for_the_host(monkeypatch, dirs):
     source, output = dirs
 
     def execute(*args, **kwargs):
-        raise ExecutionError("phase failed")
+        raise ExecutionError("step failed")
 
     monkeypatch.setattr(run_container, "execute", execute)
 

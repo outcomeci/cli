@@ -34,7 +34,7 @@ def test_workflow_get_writes_content_and_support_files(tmp_path: Path, capsys, m
             "content": "apiVersion: outcomeci.workflow/v1\n",
             "files": {
                 ".outcomeci/instructions/orchestrator.md": base64.b64encode(
-                    b"Run the phases."
+                    b"Run the steps."
                 ).decode()
             },
         },
@@ -56,7 +56,7 @@ def test_workflow_get_writes_content_and_support_files(tmp_path: Path, capsys, m
     )
     assert output.read_text() == "apiVersion: outcomeci.workflow/v1\n"
     support_file = tmp_path / ".outcomeci/instructions/orchestrator.md"
-    assert support_file.read_text() == "Run the phases."
+    assert support_file.read_text() == "Run the steps."
     result = json.loads(capsys.readouterr().out)
     assert result["revision"] == 12
     assert result["support_files_written"] == [str(support_file)]

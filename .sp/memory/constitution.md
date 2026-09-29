@@ -81,7 +81,7 @@ maintained copies drift, and the drift is silent until something depends on the
 difference.
 
 - **Precedent for the danger**: `local.py`'s `_validate_required_effects` (the
-  must-confirm gate that blocks a phase from completing) and `_write_effect_receipts`
+  must-confirm gate that blocks a step from completing) and `_write_effect_receipts`
   (the reported artifact) each independently re-derived "did this broker call actually
   succeed" from the same journal entry shape -- and had already drifted: one used a
   strict `result.get("ok") is True` check, the other a looser `bool(result.get("ok"))`.

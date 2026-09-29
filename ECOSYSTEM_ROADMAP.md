@@ -7,13 +7,13 @@ receiving credentials or depending on OutcomeCI Cloud.
 ## Foundation
 
 - [x] Publish a versioned JSON Schema for `outcome.yml`.
-- [x] Expose phase-scoped capability discovery through the CLI.
-- [x] Represent API calls and human participation through one typed phase
+- [x] Expose step-scoped capability discovery through the CLI.
+- [x] Represent API calls and human participation through one typed step
   `integrations` contract.
 - [x] Declare side effects, approval requirements, and idempotency for every API
   operation.
 - [x] Add a credential-blind dry-run that reports the calls and human requests a
-  phase could make.
+  step could make.
 - [x] Add `oci integration doctor` for configuration, credential-reference, and
   connectivity diagnostics.
 
@@ -33,13 +33,13 @@ receiving credentials or depending on OutcomeCI Cloud.
 - [x] Publish a baseline conformance suite for third-party runners and integrations.
 - [x] Document compatibility and migration guarantees for the current schema version.
 
-## Phase integration contract
+## Step integration contract
 
 Human participation is an integration, not a separate workflow language:
 
 ```yaml
 agents:
-  phases:
+  steps:
     intake:
       integrations:
         - type: api
@@ -59,7 +59,7 @@ typed integration form.
 
 ## Delivery sequence
 
-1. Schema, typed phase integrations, and operation safety metadata.
+1. Schema, typed step integrations, and operation safety metadata.
 2. Dry-run, doctor, and a stable error taxonomy.
 3. Locking and reusable integration packages.
 4. MCP projection, examples, and the conformance suite.
