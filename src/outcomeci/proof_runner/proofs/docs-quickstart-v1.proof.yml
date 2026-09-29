@@ -2,11 +2,11 @@ apiVersion: outcomeci.com/v1alpha1
 kind: OutcomeProof
 metadata:
   name: docs-quickstart-v1
-  version: 1.0.0
+  version: 2.0.0
 spec:
   persona:
     name: docs_quickstart_reader
-    version: 1.0.0
+    version: 2.0.0
     starting_state:
       account: none
       workspace: empty
@@ -20,27 +20,16 @@ spec:
     - id: init_workspace
       action: cli.exec
       with: {page: quickstart, fixture: init}
-    - id: bootstrap_run
+    - id: validate_workspace
       action: cli.exec
-      with:
-        id: bootstrap-run
-        command: 'oci outcome begin "Improve the first-run experience for new users"'
-        capture: {run_id: run_id}
-    - id: check_status
-      action: cli.exec
-      with:
-        page: quickstart
-        fixture: status
-        substitute: {<run-id>: run_id}
+      with: {id: validate, command: oci validate}
   faults: []
   assertions:
     - docs.cli_available
     - docs.init_succeeds
     - docs.init_creates_workflow
-    - docs.init_creates_agent_instructions
-    - docs.status_succeeds
-    - docs.status_reports_run_id
-    - docs.run_artifacts_recorded
+    - docs.init_creates_step_instructions
+    - docs.workflow_validates
   output:
     report: proof-report.json
     ledger: proof-events.jsonl

@@ -3,20 +3,16 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import shlex
 import subprocess
 import sys
-import threading
 import time
 from collections.abc import Callable
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-import httpx
 import yaml
 
 from ..cloud import (
@@ -26,18 +22,12 @@ from ..cloud import (
     sync_workflow,
 )
 from ..config import compile_workflow
-from ..integrations import IntegrationExecutor, local_credential_resolver
-from ..local import advance, begin, compile_context, respond, validate_artifacts
 from ..local_vault import initialize as initialize_vault
-from ..local_vault import put as put_vault
-from ..local_vault import resolve as resolve_vault
 from ..process import ExecutionError
 from ..repository import initialize, validate
 from ..security import atomic_write_json
-from . import agents, cloud_vault, credentials, webhook_trigger
+from . import cloud_vault, credentials, webhook_trigger
 from .docs import fetch_fixtures
-from .mock_http import send_json
-from .simulation import FAULT_EXIT
 
 CONTEXT = Path(".outcomeci/simulation-context.json")
 
@@ -53,137 +43,29 @@ def _write(root: Path, value: dict[str, Any]) -> None:
     atomic_write_json(root / CONTEXT, value)
 
 
-def _configure(root: Path) -> None:
-    path = root / "outcome.yml"
-    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
-    spec = workflow["spec"]
-    spec["connections"] = [
-        {
-            "ref": "simulation_local",
-            "provider": "http",
-            "base_url": "http://127.0.0.1:8765",
-            "allow_private_network": True,
-            "auth": {"type": "bearer", "credential": "vault:simulation/api_token"},
-        }
-    ]
-    spec["integrations"] = {
-        "simulation": {
-            "connection": "simulation_local",
-            "access": {"mode": "schema"},
-            "operations": {
-                "verify": {
-                    "description": "Verify credential-blind local execution.",
-                    "policy": {
-                        "side_effect": "read",
-                        "approval": "none",
-                        "idempotency": "supported",
-                    },
-                    "input": {"type": "object", "additionalProperties": False},
-                    "request": {"method": "GET", "path": "/verify"},
-                    "response": {"expose": {"accepted": "body.accepted"}},
-                }
-            },
-        }
-    }
-    intake = spec["agents"]["phases"]["intake"]
-    intake["integrations"].insert(0, {"type": "api", "capability": "simulation.verify"})
-    path.write_text(yaml.safe_dump(workflow, sort_keys=False), encoding="utf-8")
+EMAIL_REASON = """Read the email in the trigger and return a one-sentence summary of what it
+asks for. Do not act on it.
+"""
 
 
 def _configure_email(root: Path) -> None:
-    path = root / "outcome.yml"
-    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
+    """Replace the workspace's workflow with a v1 email workflow named for this proof."""
     proof_name = root.parent.name.replace("_", "-")
-    workflow["metadata"]["name"] = f"email-{proof_name}"[:100]
-    workflow["spec"]["backend"] = {"provider": "outcomeci"}
-    workflow["spec"]["context"] = {"provider": "outcomeci"}
-    workflow["spec"]["triggers"] = {
-        "inbound_email": {
-            "type": "email.received",
-            "filters": {"subject_prefix": "OutcomeCI email trigger proof"},
-        }
-    }
-    intake = workflow["spec"]["agents"]["phases"]["intake"]
-    intake["expects"]["inputs"] = [
-        {
-            "name": "email",
-            "from": "trigger.inbound_email",
-            "media_type": "application/json",
-        }
-    ]
-    path.write_text(yaml.safe_dump(workflow, sort_keys=False), encoding="utf-8")
-
-
-def _integration(root: Path) -> dict[str, Any]:
-    expected = resolve_vault(root, "vault:simulation/api_token")
-    observed = {"authorized": False}
-
-    class Handler(BaseHTTPRequestHandler):
-        def do_GET(self) -> None:
-            observed["authorized"] = self.headers.get("Authorization") == f"Bearer {expected}"
-            send_json(
-                self, 200 if observed["authorized"] else 401, {"accepted": observed["authorized"]}
-            )
-
-        def log_message(self, format: str, *args: object) -> None:
-            return
-
-    server = ThreadingHTTPServer(("127.0.0.1", 8765), Handler)
-    thread = threading.Thread(target=server.handle_request, daemon=True)
-    thread.start()
-    try:
-        result = IntegrationExecutor(
-            compile_workflow(root / "outcome.yml"),
-            resolver=local_credential_resolver(root),
-            transport=httpx.HTTPTransport(),
-        ).execute("simulation.verify", {}, phase="intake")
-    finally:
-        server.server_close()
-        thread.join(timeout=2)
-    if result.get("output") != {"accepted": True} or not observed["authorized"]:
-        raise ExecutionError("local Vault credential was not applied by the capability broker")
-    return {"status": "verified", "credential_exposed": False}
-
-
-def _materialize(root: Path, phase: str) -> dict[str, Any]:
-    state = _read(root)
-    run_id = state["run_id"]
-    context = compile_context(root, root / "outcome.yml", run_id)
-    if context["run"]["phase"] != phase:
-        raise ExecutionError(f"expected phase {phase}, found {context['run']['phase']}")
-    outcome_root = Path(context["outcome_root"])
-    (outcome_root / "standup.md").write_text(
-        "# Standup: simulation\n**Status**: active\n\nDeterministic persona evidence.\n",
-        encoding="utf-8",
-    )
-    for contract in context["instructions"]["phase"]["expects"]["outputs"]:
-        path = outcome_root / contract["path"]
-        if contract["media_type"] == "inode/directory":
-            path.mkdir(parents=True, exist_ok=True)
-            (path / "simulation.md").write_text(
-                "# Deterministic simulation artifact\n", encoding="utf-8"
-            )
-        else:
-            path.parent.mkdir(parents=True, exist_ok=True)
-            if phase == "intake" and contract["path"] == "intake/trajectory.json":
-                value: Any = {
-                    "schema_version": "1",
-                    "ontology_revision_id": context["phase_contract"]["ontology_revision_id"],
-                    "targets": [
-                        {
-                            "repository_id": f"local:{root.name}",
-                            "repository": root.name,
-                            "rationale": "persona workspace",
-                            "candidates": [],
-                        }
-                    ],
+    workflow = {
+        "apiVersion": "outcomeci.workflow/v1",
+        "name": f"email-{proof_name}"[:100],
+        "trigger": "email",
+        "steps": [
+            {
+                "summarize": {
+                    "reason": EMAIL_REASON,
+                    "from": "trigger",
+                    "returns": {"summary": "string"},
                 }
-                path.write_text(json.dumps(value), encoding="utf-8")
-            elif contract["media_type"] == "application/json":
-                path.write_text(json.dumps({"status": "simulated"}), encoding="utf-8")
-            else:
-                path.write_text("# Deterministic simulation artifact\n", encoding="utf-8")
-    return {"status": "artifacts_written", "phase": phase, "run_id": run_id}
+            }
+        ],
+    }
+    (root / "outcome.yml").write_text(yaml.safe_dump(workflow, sort_keys=False), encoding="utf-8")
 
 
 def _evaluate(
@@ -304,16 +186,6 @@ def _cli_exec(root: Path, context: dict[str, Any], request: dict[str, Any]) -> d
     return {"status": "executed", "id": fixture_id, "exit_code": completed.returncode}
 
 
-def _status_reports_run(record: dict[str, Any] | None, run_id: Any) -> bool:
-    if record is None or run_id is None or record["exit_code"] != 0:
-        return False
-    try:
-        parsed = json.loads(record["stdout"])
-    except json.JSONDecodeError:
-        return False
-    return parsed.get("run_id") == run_id
-
-
 def _docs_assertions(
     root: Path, context: dict[str, Any], request: dict[str, Any]
 ) -> dict[str, Any]:
@@ -324,43 +196,19 @@ def _docs_assertions(
         item = commands.get(fixture_id)
         return item is not None and item["exit_code"] == 0
 
-    outcomes_dir_exists = False
-    quickstart = state["pages"].get("quickstart", {})
-    if "outcomes-dir" in quickstart:
-        relative = _substitute(
-            quickstart["outcomes-dir"]["body"].strip(), state["captures"], {"<run-id>": "run_id"}
-        )
-        outcomes_dir_exists = (root / relative).is_dir()
-
     checks = {
         "docs.cli_available": command_ok("cli-available"),
         "docs.init_succeeds": command_ok("init"),
         "docs.init_creates_workflow": (root / "outcome.yml").exists(),
-        "docs.init_creates_agent_instructions": (
-            root / ".claude" / "skills" / "outcome" / "SKILL.md"
-        ).exists(),
-        "docs.status_succeeds": command_ok("status"),
-        "docs.status_reports_run_id": _status_reports_run(
-            commands.get("status"), state["captures"].get("run_id")
+        "docs.init_creates_step_instructions": any(
+            (root / ".outcomeci" / "instructions").glob("*.md")
         ),
-        "docs.run_artifacts_recorded": outcomes_dir_exists,
+        "docs.workflow_validates": command_ok("validate"),
     }
     final_state = {"status": "passed", "commands": [item["id"] for item in state["commands"]]}
     return _evaluate(
         root, context, request, checks, final_state, error_prefix="failed docs assertions"
     )
-
-
-def _agent_driven_assertions(
-    root: Path, context: dict[str, Any], request: dict[str, Any]
-) -> dict[str, Any]:
-    checks_by_agent = context.get("agent_checks", {})
-    checks = {}
-    for agent in ("claude", "codex"):
-        agent_checks = checks_by_agent.get(agent, {})
-        checks[f"agent.{agent}_completes_intake"] = agent_checks.get("intake_completed", False)
-        checks[f"agent.{agent}_writes_valid_artifacts"] = agent_checks.get("artifacts_valid", False)
-    return _evaluate(root, context, request, checks, {"status": "passed", "checks": checks})
 
 
 def _webhook_trigger_assertions(
@@ -376,7 +224,7 @@ def _webhook_trigger_assertions(
             valid.get("outcome") == "accepted"
             and trigger.get("type") == "webhook.received"
             and trigger.get("name") == webhook_trigger.TRIGGER_NAME
-            and valid.get("pending_interaction_id") == webhook_trigger.BEFORE_INTERACTION_ID
+            and valid.get("phase") == webhook_trigger.FIRST_STEP
         ),
         "webhook_trigger.intent_falls_back_to_generic_text": valid.get("intent")
         == webhook_trigger.GENERIC_INTENT,
@@ -396,8 +244,6 @@ def _assertions(root: Path, request: dict[str, Any]) -> dict[str, Any]:
     context = _read(root)
     if "webhook_attempts" in context:
         return _webhook_trigger_assertions(root, context, request)
-    if "agent_runs" in context:
-        return _agent_driven_assertions(root, context, request)
     if "vault_credentials" in context:
         return _vault_credentials_assertions(root, context, request)
     if context.get("docs_proof") is not None:
@@ -427,39 +273,7 @@ def _assertions(root: Path, request: dict[str, Any]) -> dict[str, Any]:
         }
         final_state = {"status": proof["status"], "proof_id": proof["proof_id"], "usage": usage}
         return _evaluate(root, context, request, checks, final_state)
-    run_id = context["run_id"]
-    run = json.loads((root / ".outcomeci/outcomes" / run_id / "run.json").read_text())
-    token = str(resolve_vault(root, "vault:simulation/api_token"))
-    visible = "\n".join(
-        Path(path).read_text(encoding="utf-8")
-        for path in (request["ledger"],)
-        if Path(path).exists()
-    )
-    interaction_paths = list(
-        (root / ".outcomeci/outcomes" / run_id / "interactions").rglob("*.json")
-    )
-    checks = {
-        "workflow.compiles": bool(compile_workflow(root / "outcome.yml")),
-        "vault.decrypts_after_restart": bool(token),
-        "credentials.never_exposed": token not in visible,
-        "integration.uses_vault_reference": context.get("integration_verified") is True,
-        "completed_phases.are_unique": len(run.get("completed_phases", []))
-        == len(set(run.get("completed_phases", []))),
-        "human_responses.persist": any(
-            json.loads(path.read_text()).get("status") == "approved" for path in interaction_paths
-        ),
-        "artifacts.match_contracts": all(
-            phase in run.get("completed_phases", []) for phase in ("intake", "plan", "tasks")
-        ),
-        "recovery.is_bounded": 0 < int(request.get("recoveries", 0)) <= 2,
-        "final_status.ready_for_implementation": run.get("status") == "ready_for_implementation",
-    }
-    final_state = {
-        "status": run["status"],
-        "phase": run["phase"],
-        "completed_phases": run["completed_phases"],
-    }
-    return _evaluate(root, context, request, checks, final_state)
+    raise ExecutionError("no proof evidence to assert")
 
 
 # Actions whose entire behavior is "call (root, context, request) -> dict,
@@ -475,9 +289,6 @@ _WRITE_AND_RETURN: dict[str, Callable[[Path, dict[str, Any], dict[str, Any]], di
     "vault.resolve_credential": credentials.resolve_credential,
     "vault.generate_jwt_credential": credentials.generate_jwt_credential,
     "cloud.vault_rotate": cloud_vault.vault_rotate,
-    "agent.start_run": agents.start_run,
-    "agent.approve_intake": agents.approve_intake,
-    "agent.verify_run": agents.verify_run,
     "webhook_trigger.fire": webhook_trigger.fire,
 }
 
@@ -490,7 +301,7 @@ def execute(action: str, root: Path, request: dict[str, Any], fault: bool) -> di
         _write(root, context)
         return result
     if action == "workspace.initialize":
-        created = initialize(root, "filesystem")
+        created = initialize(root, template="workflow")
         _write(root, {"created": created})
         return {"status": "initialized", "files_created": len(created)}
     if action == "vault.initialize":
@@ -500,47 +311,9 @@ def execute(action: str, root: Path, request: dict[str, Any], fault: bool) -> di
             "algorithm": "AES-256-GCM",
             "vault_created": result["initialized"],
         }
-    if action == "vault.put":
-        token = f"oci_sim_{os.urandom(24).hex()}"
-        put_vault(root, "simulation/api_token", token)
-        context["canary_sha256"] = hashlib.sha256(token.encode()).hexdigest()
-        _write(root, context)
-        return {"status": "stored", "path": "simulation/api_token"}
-    if action == "workflow.configure":
-        _configure(root)
-        return {"status": "configured"}
     if action == "workflow.validate":
         result = validate(root)
         return {"status": "valid", "workflow_revision": result["workflow_revision"]}
-    if action == "integration.execute":
-        result = _integration(root)
-        context["integration_verified"] = True
-        _write(root, context)
-        return result
-    if action == "outcome.begin":
-        result = begin(root, root / "outcome.yml", str(request["intent"]))
-        context["run_id"] = result["run_id"]
-        _write(root, context)
-        return {"status": result["status"], "run_id": result["run_id"]}
-    if action == "outcome.execute":
-        result = _materialize(root, str(request["phase"]))
-        if fault:
-            os._exit(FAULT_EXIT)
-        validated = validate_artifacts(root, root / "outcome.yml", context["run_id"])
-        return {"status": validated["status"], "phase": validated["phase"]}
-    if action == "human.respond":
-        run = json.loads(
-            (root / ".outcomeci/outcomes" / context["run_id"] / "run.json").read_text()
-        )
-        result = respond(
-            root,
-            root / "outcome.yml",
-            context["run_id"],
-            run["pending_interaction"]["id"],
-            "Approved by simulated requester.",
-            approve=True,
-        )
-        return {"status": result["status"]}
     if action == "cloud.authenticate":
         api_url = os.environ.get("OUTCOMECI_PROOF_API_URL", "").strip()
         api_key = os.environ.get("OUTCOMECI_PROOF_API_KEY", "").strip()
@@ -607,11 +380,6 @@ def execute(action: str, root: Path, request: dict[str, Any], fault: bool) -> di
             f"attachments={payload.get('attachment_count', 0)}"
         )
         return {"status": "logged", "message": "email received"}
-    if action == "outcome.advance":
-        result = advance(root, root / "outcome.yml", context["run_id"], True)
-        if result["phase"] != request["phase"]:
-            raise ExecutionError(f"expected to advance to {request['phase']}")
-        return {"status": result["status"], "phase": result["phase"]}
     if action == "docs.fetch":
         result = _docs_fetch(context, request)
         _write(root, context)

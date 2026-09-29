@@ -20,12 +20,11 @@ from pathlib import Path
 from typing import Any
 
 import httpx
-import yaml
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding as asym_padding
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from ..config import compile_workflow
+from ..config import compile_lowered
 from ..integrations import IntegrationExecutor, environment_resolver, local_credential_resolver
 from ..local_vault import put as put_vault
 from ..local_vault import resolve as resolve_vault
@@ -148,12 +147,12 @@ def resolve_env_credential(request: dict[str, Any]) -> dict[str, Any]:
 # ── Connection auth types, against a local mock authorization server ───────
 
 
-def _configure_credential_connection(
-    root: Path, auth_type: str, credential_path: str, base_url: str
-) -> None:
-    path = root / "outcome.yml"
-    workflow = yaml.safe_load(path.read_text(encoding="utf-8"))
-    spec = workflow["spec"]
+def _credential_check(auth_type: str, credential_path: str, base_url: str) -> dict[str, Any]:
+    """A lowered workflow with one `credential_check.verify` capability.
+
+    Connectors authenticate with bearer tokens only; the lowered phase graph
+    every workflow compiles to supports every auth type the Vault stores, and
+    this proof checks each of them end to end."""
     auth: dict[str, Any] = {"credential": f"vault:{credential_path}"}
     if auth_type == "api_key":
         auth.update({"type": "api_key", "header": "X-API-Key"})
@@ -173,38 +172,56 @@ def _configure_credential_connection(
         auth.update({"type": "jwt_bearer", "token_url": f"{base_url}/token"})
     else:
         raise ExecutionError(f"unsupported credential auth_type {auth_type}")
-    spec["connections"] = [
-        {
-            "ref": "credential_check",
-            "provider": "http",
-            "base_url": base_url,
-            "allow_private_network": True,
-            "auth": auth,
-        }
-    ]
-    spec["integrations"] = {
-        "credential_check": {
-            "connection": "credential_check",
-            "access": {"mode": "schema"},
-            "operations": {
-                "verify": {
-                    "description": "Verify a credential type authenticates correctly.",
-                    "policy": {
-                        "side_effect": "read",
-                        "approval": "none",
-                        "idempotency": "supported",
+    return {
+        "apiVersion": "outcomeci.workflow/v1",
+        "kind": "OutcomeWorkflow",
+        "metadata": {"name": "credential-check"},
+        "spec": {
+            "triggers": {"manual": {"type": "manual"}},
+            "backend": {"provider": "outcomeci"},
+            "context": {"provider": "outcomeci"},
+            "instructions": {"workflow": {"content": "Verify a credential."}},
+            "agents": {
+                "default": {"runner": "codex"},
+                "phases": {
+                    "check": {
+                        "needs": [],
+                        "instructions": {"content": "Verify a credential."},
+                        "capabilities": ["credential_check.verify"],
+                        "expects": {"inputs": [], "outputs": []},
+                    }
+                },
+            },
+            "connections": [
+                {
+                    "ref": "credential_check",
+                    "provider": "http",
+                    "base_url": base_url,
+                    "allow_private_network": True,
+                    "auth": auth,
+                }
+            ],
+            "integrations": {
+                "credential_check": {
+                    "connection": "credential_check",
+                    "access": {"mode": "schema"},
+                    "operations": {
+                        "verify": {
+                            "description": "Verify a credential type authenticates correctly.",
+                            "policy": {
+                                "side_effect": "read",
+                                "approval": "none",
+                                "idempotency": "supported",
+                            },
+                            "input": {"type": "object", "additionalProperties": False},
+                            "request": {"method": "GET", "path": "/verify"},
+                            "response": {"expose": {"accepted": "body.accepted"}},
+                        }
                     },
-                    "input": {"type": "object", "additionalProperties": False},
-                    "request": {"method": "GET", "path": "/verify"},
-                    "response": {"expose": {"accepted": "body.accepted"}},
                 }
             },
-        }
+        },
     }
-    spec["agents"]["phases"]["intake"]["integrations"] = [
-        {"type": "api", "capability": "credential_check.verify"}
-    ]
-    path.write_text(yaml.safe_dump(workflow, sort_keys=False), encoding="utf-8")
 
 
 def _mock_authorization_server(auth_type: str, expected: Any) -> ThreadingHTTPServer:
@@ -300,14 +317,12 @@ def authenticate_connection(root: Path, request: dict[str, Any]) -> dict[str, An
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
-        _configure_credential_connection(
-            root, auth_type, credential_path, f"http://127.0.0.1:{port}"
-        )
+        workflow = _credential_check(auth_type, credential_path, f"http://127.0.0.1:{port}")
         result = IntegrationExecutor(
-            compile_workflow(root / "outcome.yml"),
+            compile_lowered(workflow, root / "outcome.yml"),
             resolver=local_credential_resolver(root),
             transport=httpx.HTTPTransport(),
-        ).execute("credential_check.verify", {}, phase="intake")
+        ).execute("credential_check.verify", {}, phase="check")
     finally:
         server.shutdown()
         thread.join(timeout=2)

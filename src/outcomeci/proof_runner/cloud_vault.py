@@ -2,7 +2,7 @@
 
 Runs cloud.py's real vault_request()/session-refresh code against a small
 mock server instead of live cloud infrastructure, so this proof stays
-deterministic and network-free like local-first-v1. State is written to a
+deterministic and network-free like the rest of vault-credentials-v1. State is written to a
 file in the workspace so a fresh mock server, started fresh each isolated
 step, still sees what a previous step did.
 """

@@ -23,14 +23,7 @@ FAULT_EXIT = 86
 ALLOWED_ACTIONS = {
     "workspace.initialize",
     "vault.initialize",
-    "vault.put",
-    "workflow.configure",
     "workflow.validate",
-    "integration.execute",
-    "outcome.begin",
-    "outcome.execute",
-    "human.respond",
-    "outcome.advance",
     "cloud.authenticate",
     "workflow.configure_email",
     "workflow.sync",
@@ -49,22 +42,12 @@ ALLOWED_ACTIONS = {
     "cloud.vault_put",
     "cloud.vault_rotate",
     "cloud.vault_verify",
-    "agent.start_run",
-    "agent.approve_intake",
-    "agent.verify_run",
     "webhook_trigger.configure",
     "webhook_trigger.fire",
 }
 ALLOWED_ASSERTIONS = {
-    "workflow.compiles",
-    "vault.decrypts_after_restart",
     "credentials.never_exposed",
-    "integration.uses_vault_reference",
-    "completed_phases.are_unique",
-    "human_responses.persist",
-    "artifacts.match_contracts",
     "recovery.is_bounded",
-    "final_status.ready_for_implementation",
     "email.ingress_processed",
     "email.triggered_exactly_once",
     "email.artifacts_encrypted",
@@ -76,10 +59,8 @@ ALLOWED_ASSERTIONS = {
     "docs.cli_available",
     "docs.init_succeeds",
     "docs.init_creates_workflow",
-    "docs.init_creates_agent_instructions",
-    "docs.status_succeeds",
-    "docs.status_reports_run_id",
-    "docs.run_artifacts_recorded",
+    "docs.init_creates_step_instructions",
+    "docs.workflow_validates",
     "credential.api_key_authenticates",
     "credential.basic_authenticates",
     "credential.bearer_authenticates",
@@ -91,10 +72,6 @@ ALLOWED_ASSERTIONS = {
     "cloud_vault.rotation_takes_effect",
     "cloud_vault.grants_survive_rotation",
     "cloud_session.expired_token_auto_refreshes",
-    "agent.claude_completes_intake",
-    "agent.claude_writes_valid_artifacts",
-    "agent.codex_completes_intake",
-    "agent.codex_writes_valid_artifacts",
     "webhook_trigger.definition_compiles",
     "webhook_trigger.accepts_valid_payload",
     "webhook_trigger.state_shape_matches_payload",
@@ -104,7 +81,7 @@ ALLOWED_ASSERTIONS = {
 }
 
 
-def bundled_definition(name: str = "local-first-v1") -> Path:
+def bundled_definition(name: str = "vault-credentials-v1") -> Path:
     return Path(str(files("outcomeci.proof_runner").joinpath(f"proofs/{name}.proof.yml")))
 
 

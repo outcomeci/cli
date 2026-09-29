@@ -88,10 +88,10 @@ run --claim ...`; both modes share workflow compilation and artifact schemas.
 ## Ecosystem durability proofs
 
 The separately packaged `proof-runner` treats a versioned persona journey as
-an ecosystem-level test. Its bundled local-first proof starts with an empty
-workspace, initializes OutcomeCI and an encrypted local Vault, executes a
-Vault-backed capability, runs intake through tasks, kills phase processes at
-durable boundaries, and verifies exact recovery:
+an ecosystem-level test. Run without `--name`, it runs `vault-credentials-v1`,
+which stores every credential type in an encrypted local Vault, authenticates
+each against a local mock server, rotates them, and verifies no secret reaches
+the evidence:
 
 ```console
 oci proof run --workspace ./proof-runs
@@ -100,9 +100,9 @@ docker run --rm --network none --tmpfs /proof:rw,noexec,nosuid,uid=10001,gid=100
 ```
 
 Pass/fail evidence is written as a machine-readable report and hash-linked
-event ledger. `proof.yml` holds exactly one persona journey. The first release
-ships `local-first-v1` for offline runtime durability and `email-trigger-v1`
-for managed ingress. The managed proof uses only a workspace API key and sends
+event ledger. `proof.yml` holds exactly one persona journey. The bundled proofs
+are `vault-credentials-v1`, `webhook-trigger-v1`, `docs-quickstart-v1`, and
+`email-trigger-v1` for managed ingress. The managed proof uses only a workspace API key and sends
 a fixed MIME message through the real SES ingress:
 
 ```console
