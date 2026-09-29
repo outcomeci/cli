@@ -57,7 +57,7 @@ def test_vault_put_typed_credential_keeps_value_private(monkeypatch, capsys) -> 
                 "slack",
                 "--credential-type",
                 "auth_header",
-                "--workflow",
+                "--workflow-id",
                 "workflow_1",
                 "--value-stdin",
             ]

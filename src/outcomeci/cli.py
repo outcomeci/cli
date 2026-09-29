@@ -92,7 +92,7 @@ ARGUMENT_HELP: dict[str, dict[str, str]] = {
         "--model": "Model for --agent",
         "--value": "Secret value; prefer --value-stdin, which keeps it out of shell history",
         "--value-stdin": "Read the secret value from stdin",
-        "--workflow": "Grant this workflow ID access to the entry (repeatable)",
+        "--workflow-id": "Grant this workflow ID access to the entry (repeatable)",
         "--phase": "Step whose grants the call runs under",
         "--team": "Slack workspace, when the app is installed in several",
         "entry_id": "Vault entry ID, as oci vault list prints it",
@@ -127,10 +127,11 @@ ARGUMENT_HELP: dict[str, dict[str, str]] = {
     "integration slack setup": {"--name": "Slack app name"},
     "integration slack sync-credentials": {
         "--local": "Copy the bot token into the local Vault",
-        "--cloud": "Copy the bot token into this cloud workspace's Vault",
-        "--vault-workspace": "Directory whose local Vault receives the token",
+        "--cloud": "Copy the bot token into the --workspace-id workspace's Vault",
+        "--workspace-id": "Cloud workspace identifier (with --cloud)",
+        "--vault-dir": "Directory whose local Vault receives the token (with --local)",
         "--path": "Vault path to store the token at (default: slack/bot-token)",
-        "--workflow": "Grant this cloud workflow ID access to the token (repeatable)",
+        "--workflow-id": "Grant this cloud workflow ID access to the token (repeatable)",
     },
     "integration slack manifest": {"--project": "Slack CLI project directory"},
 }
@@ -266,10 +267,11 @@ def parser() -> argparse.ArgumentParser:
     )
     run_command.add_argument(
         "--cloud",
-        metavar="WORKFLOW_ID",
-        help="Use this cloud workflow's Vault grants and the workspace's connected agent",
+        action="store_true",
+        help="Use the cloud workflow's Vault grants and the workspace's connected agent",
     )
     run_command.add_argument("--workspace-id", help="Cloud workspace identifier (with --cloud)")
+    run_command.add_argument("--workflow-id", help="Cloud workflow identifier (with --cloud)")
     workflow_sync.add_argument("file", type=Path)
     workflow_sync.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     workflow_sync.add_argument("--name")
@@ -288,7 +290,7 @@ def parser() -> argparse.ArgumentParser:
     vault_put.add_argument("--name")
     vault_put.add_argument("--value")
     vault_put.add_argument("--value-stdin", action="store_true")
-    vault_put.add_argument("--workflow", action="append", default=[])
+    vault_put.add_argument("--workflow-id", action="append", default=[])
     vault_put.add_argument("--provider", help="Credential provider, for example slack")
     credentials.add_arguments(vault_put)
     vault_rotate = vault_commands.add_parser("rotate")
@@ -299,7 +301,7 @@ def parser() -> argparse.ArgumentParser:
     vault_grant = vault_commands.add_parser("grant")
     vault_grant.add_argument("entry_id")
     vault_grant.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
-    vault_grant.add_argument("--workflow", action="append", default=[])
+    vault_grant.add_argument("--workflow-id", action="append", default=[])
     vault_revoke = vault_commands.add_parser("revoke")
     vault_revoke.add_argument("entry_id")
     vault_revoke.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
@@ -375,11 +377,12 @@ def parser() -> argparse.ArgumentParser:
     _add_dir_argument(slack_sync)
     slack_destination = slack_sync.add_mutually_exclusive_group(required=True)
     slack_destination.add_argument("--local", action="store_true")
-    slack_destination.add_argument("--cloud", metavar="WORKSPACE_ID")
-    slack_sync.add_argument("--vault-workspace", type=Path)
+    slack_destination.add_argument("--cloud", action="store_true")
+    slack_sync.add_argument("--workspace-id")
+    slack_sync.add_argument("--vault-dir", type=Path)
     slack_sync.add_argument("--team")
     slack_sync.add_argument("--path", default="slack/bot-token")
-    slack_sync.add_argument("--workflow", action="append")
+    slack_sync.add_argument("--workflow-id", action="append")
     slack_status_command = slack_commands.add_parser("status")
     _add_dir_argument(slack_status_command)
     slack_manifest_command = slack_commands.add_parser(
@@ -465,14 +468,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.workflow_command == "run":
                 root = args.dir.resolve()
                 if args.cloud:
-                    if not args.workspace_id:
-                        raise ExecutionError("--cloud needs --workspace-id")
+                    if not args.workspace_id or not args.workflow_id:
+                        raise ExecutionError("--cloud needs --workspace-id and --workflow-id")
                     _print_json(
                         workflow_run.run_cloud(
                             root,
                             root / args.config,
                             args.workspace_id,
-                            args.cloud,
+                            args.workflow_id,
                             trigger_name=args.trigger,
                             payload_path=args.payload,
                             agent=args.agent,
@@ -484,8 +487,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         )
                     )
                     return 0
-                if args.workspace_id:
-                    raise ExecutionError("--workspace-id needs --cloud")
+                if args.workspace_id or args.workflow_id:
+                    raise ExecutionError("--workspace-id and --workflow-id need --cloud")
                 _print_json(
                     workflow_run.run_local(
                         root,
@@ -551,7 +554,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         credential=credentials.build(
                             args.credential_type, args, value=value, secrets=secrets
                         ),
-                        workflow_ids=args.workflow,
+                        workflow_ids=args.workflow_id,
                     )
                 else:
                     result = vault_request(
@@ -560,7 +563,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         path=args.path,
                         display_name=args.name or args.path,
                         value=value,
-                        workflow_ids=args.workflow,
+                        workflow_ids=args.workflow_id,
                     )
             elif args.vault_command == "rotate":
                 value = sys.stdin.read().rstrip("\n") if args.value_stdin else args.value
@@ -571,7 +574,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             elif args.vault_command == "grant":
                 result = vault_request(
-                    args.workspace_id, "grant", entry_id=args.entry_id, workflow_ids=args.workflow
+                    args.workspace_id,
+                    "grant",
+                    entry_id=args.entry_id,
+                    workflow_ids=args.workflow_id,
                 )
             else:
                 result = vault_request(args.workspace_id, "revoke", entry_id=args.entry_id)
@@ -634,15 +640,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                     sort_keys=True,
                 )
             elif args.slack_command == "sync-credentials":
+                if args.workspace_id and not args.cloud:
+                    raise SlackError("--workspace-id is only valid with --cloud")
                 _print_json(
                     slack_vault.sync_credentials(
                         args.dir,
                         local=args.local,
-                        cloud_workspace=args.cloud,
-                        vault_workspace=args.vault_workspace,
+                        cloud_workspace=args.workspace_id if args.cloud else None,
+                        vault_workspace=args.vault_dir,
                         team=args.team,
                         path=args.path,
-                        workflows=args.workflow,
+                        workflows=args.workflow_id,
                     )
                 )
             elif args.slack_command == "status":

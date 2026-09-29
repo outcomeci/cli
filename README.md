@@ -73,7 +73,7 @@ needs Docker.
   from this machine: Codex from `~/.codex/auth.json`, Claude from
   `CLAUDE_CODE_OAUTH_TOKEN` or the local Vault entry `agents/claude`, and
   OpenCode from `OPENROUTER_API_KEY` or `agents/opencode`.
-- `--cloud WORKFLOW_ID --workspace-id ID` leases the workspace Vault's
+- `--cloud --workspace-id ID --workflow-id ID` leases the workspace Vault's
   credentials and its connected agent instead.
 
 `--payload FILE` supplies the trigger payload, `--auto-continue` runs every

@@ -177,3 +177,28 @@ def test_cloud_failure_does_not_echo_secret(installed, monkeypatch):
             installed, cloud_workspace="workspace_test", transport=transport()
         )
     assert BOT not in str(exc.value)
+
+
+def test_cloud_sync_needs_a_workspace_id(tmp_path, capsys) -> None:
+    from outcomeci.cli import main
+
+    assert (
+        main(["integration", "slack", "sync-credentials", "--dir", str(tmp_path), "--cloud"]) == 2
+    )
+    assert "--cloud with --workspace-id" in capsys.readouterr().err
+    assert (
+        main(
+            [
+                "integration",
+                "slack",
+                "sync-credentials",
+                "--dir",
+                str(tmp_path),
+                "--local",
+                "--workspace-id",
+                "ws-1",
+            ]
+        )
+        == 2
+    )
+    assert "only valid with --cloud" in capsys.readouterr().err
