@@ -407,6 +407,23 @@ def test_a_review_sees_earlier_requests_but_not_their_response_bodies(workflow, 
     )
 
 
+def test_a_review_sees_only_its_own_steps_requests(workflow, monkeypatch):
+    """triage's Slack post is not fix's to follow; only fix's own calls are receipts."""
+    services = sentry.Services()
+    sentry._serve(monkeypatch, services)
+    reviews: list = []
+
+    sentry._run(workflow, sentry.Agent(), monkeypatch, reviews)
+
+    fix = [
+        review
+        for review in reviews
+        if review["policy"]["content"].startswith("Step policy for fix:")
+    ]
+    assert fix
+    assert all(item["phase"] == "fix" for review in fix for item in review["receipts"])
+
+
 def _broker(tmp_path, monkeypatch, reviewer, responses):
     compiled = compile_workflow(sentry.EXAMPLES / sentry.WORKFLOW)
     monkeypatch.setattr(sentry.integrations, "_safe_destination", lambda url, allow: None)

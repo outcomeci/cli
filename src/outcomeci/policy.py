@@ -428,12 +428,16 @@ class PolicyExecutor:
                             "request": request,
                             "policy": policy,
                             "context": self.context,
+                            # Only this step's own calls: an earlier step's requests,
+                            # such as a plan posted before a discussion revised it,
+                            # would read as what this step must do.
                             "receipts": [
                                 {
                                     key: call.get(key)
                                     for key in ("capability", "phase", "status", "request")
                                 }
                                 for call in state["calls"].values()
+                                if call.get("phase") == phase
                             ],
                         }
                     )
