@@ -257,7 +257,7 @@ class FlowTests(unittest.TestCase):
                         "event_id": "00000000-0000-0000-0000-000000000001",
                         "occurred_at": "2026-09-16T00:00:00+00:00",
                         "event_type": "permission.reviewed",
-                        "phase": "notify",
+                        "step": "notify",
                         "capability": "slack.request",
                         "message": "Permission advisor: allow",
                         "decision": "allow",

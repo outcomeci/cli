@@ -131,22 +131,22 @@ class PolicyExecutor:
         self,
         state: dict[str, Any],
         event_type: str,
-        phase: str,
+        step: str,
         capability: str,
         message: str,
         **fields: Any,
     ) -> None:
         state.setdefault("events", []).append(
-            event(event_type, phase, capability, message, **fields)
+            event(event_type, step, capability, message, **fields)
         )
 
-    def _deny(self, state: dict[str, Any], phase: str, capability: str, message: str) -> None:
+    def _deny(self, state: dict[str, Any], step: str, capability: str, message: str) -> None:
         """Record and persist a permission.denied event. The caller still
         raises afterward -- what it raises varies (a fresh IntegrationError
         with its own code, or a bare re-raise of a caught one), so that part
         stays at each call site."""
         self._event(
-            state, "permission.denied", phase, capability, message, decision="deny", level="warning"
+            state, "permission.denied", step, capability, message, decision="deny", level="warning"
         )
         self._save(state)
 
@@ -220,12 +220,12 @@ class PolicyExecutor:
             return str(request.get("method", "")).upper() in {"GET", "HEAD"}
         return operation["policy"]["side_effect"] == "read"
 
-    def execute(self, capability: str, inputs: Mapping[str, Any], *, phase: str) -> dict[str, Any]:
+    def execute(self, capability: str, inputs: Mapping[str, Any], *, step: str) -> dict[str, Any]:
         integration = self.executor.compiled["workflow"]["spec"]["integrations"][
             capability.split(".")[0]
         ]
         grant_as, alternatives = None, []
-        if self.grants is not None and capability in self.executor.capabilities(phase):
+        if self.grants is not None and capability in self.executor.capabilities(step):
             try:
                 inputs, grant_as, alternatives = self._apply_grants(capability, dict(inputs))
             except IntegrationError as exc:
@@ -237,13 +237,13 @@ class PolicyExecutor:
                         if file.exists()
                         else {"calls": {}, "references": {}}
                     )
-                    self._deny(state, phase, capability, str(exc))
+                    self._deny(state, step, capability, str(exc))
                 raise
         if not self.step_policy and not integration["access"].get("max_requests"):
             return self.executor.execute(
                 capability,
                 inputs,
-                phase=phase,
+                step=step,
                 response_grants=[checks for _, checks in alternatives],
             )
         with (self.directory / "lock").open("a+") as lock:
@@ -252,8 +252,8 @@ class PolicyExecutor:
             state = (
                 json.loads(file.read_text()) if file.exists() else {"calls": {}, "references": {}}
             )
-            if capability not in self.executor.capabilities(phase):
-                self._deny(state, phase, capability, "Integration capability is not authorized")
+            if capability not in self.executor.capabilities(step):
+                self._deny(state, step, capability, "Integration capability is not authorized")
                 raise IntegrationError(
                     "integration.capability_denied",
                     "capability is not authorized",
@@ -263,7 +263,7 @@ class PolicyExecutor:
             fingerprint = digest(
                 {
                     "revision": self.executor.compiled["workflow_revision"],
-                    "phase": phase,
+                    "step": step,
                     "capability": capability,
                     "request": {key: value for key, value in request.items() if key != "purpose"},
                 }
@@ -291,7 +291,7 @@ class PolicyExecutor:
                 for call in state["calls"].values()
             )
             if count >= integration["access"].get("max_requests", 1000):
-                self._deny(state, phase, capability, "Integration request budget exhausted")
+                self._deny(state, step, capability, "Integration request budget exhausted")
                 raise IntegrationError(
                     "integration.budget_exhausted",
                     "integration request budget exhausted",
@@ -299,7 +299,7 @@ class PolicyExecutor:
                 )
             call = {
                 "capability": capability,
-                "phase": phase,
+                "step": step,
                 "invocation": self.invocation,
                 "sequence": len(state["calls"]) + 1,
                 "as": grant_as,
@@ -311,7 +311,7 @@ class PolicyExecutor:
             self._event(
                 state,
                 "integration.proposed",
-                phase,
+                step,
                 capability,
                 f"Integration request proposed: {capability}",
                 proposal_sha256=fingerprint,
@@ -333,7 +333,7 @@ class PolicyExecutor:
                     capability, request
                 )
                 if reviewed:
-                    compared = self.executor.compared(capability, actual, phase=phase)
+                    compared = self.executor.compared(capability, request, step=step)
                     review = self.reviewer(
                         {
                             "proposal_sha256": fingerprint,
@@ -348,7 +348,7 @@ class PolicyExecutor:
                             "receipts": [
                                 {
                                     key: call.get(key)
-                                    for key in ("capability", "phase", "status", "request")
+                                    for key in ("capability", "step", "status", "request")
                                 }
                                 for call in state["calls"].values()
                                 if call.get("invocation") == self.invocation
@@ -372,7 +372,7 @@ class PolicyExecutor:
                     self._event(
                         state,
                         "permission.reviewed",
-                        phase,
+                        step,
                         capability,
                         f"Permission advisor: {decision}",
                         proposal_sha256=fingerprint,
@@ -394,7 +394,7 @@ class PolicyExecutor:
                 self._event(
                     state,
                     "integration.started",
-                    phase,
+                    step,
                     capability,
                     "Approved integration request started",
                     proposal_sha256=fingerprint,
@@ -403,7 +403,7 @@ class PolicyExecutor:
                 result = self.executor.execute(
                     capability,
                     request,
-                    phase=phase,
+                    step=step,
                     response_grants=[checks for _, checks in alternatives],
                 )
                 granted_by = result.get("audit", {}).get("grant")
@@ -423,7 +423,7 @@ class PolicyExecutor:
                 self._event(
                     state,
                     "integration.completed" if ok else "integration.failed",
-                    phase,
+                    step,
                     capability,
                     ("Integration request succeeded" if ok else "Integration request failed"),
                     proposal_sha256=fingerprint,
@@ -441,7 +441,7 @@ class PolicyExecutor:
                         self._event(
                             state,
                             "permission.reviewed",
-                            phase,
+                            step,
                             capability,
                             "Permission advisor failed; no request authorized",
                             decision="error",
@@ -456,7 +456,7 @@ class PolicyExecutor:
                         self._event(
                             state,
                             "integration.failed",
-                            phase,
+                            step,
                             capability,
                             "Integration request failed or delivery is uncertain",
                             proposal_sha256=fingerprint,

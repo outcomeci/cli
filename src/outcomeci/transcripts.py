@@ -134,14 +134,14 @@ def _select_sessions(
 def _transcripts(
     agent: str,
     root: Path,
-    phase: str,
+    step: str,
     *,
     session_id: str | None = None,
     byte_offset: int = 0,
     workspace: Path | None = None,
     since: str | None = None,
 ) -> dict[str, Any]:
-    target = root / "transcripts" / phase / agent
+    target = root / "transcripts" / step / agent
     target.mkdir(parents=True, exist_ok=True)
     files, usage, total = [], [], 0
     sources = (
@@ -172,10 +172,10 @@ def _transcripts(
                 "usage_records": len(records),
             }
         )
-    usage_path = root / "transcripts" / phase / "usage.json"
+    usage_path = root / "transcripts" / step / "usage.json"
     usage_path.write_text(
         json.dumps(
-            {"schema_version": 1, "provider": agent, "phase": phase, "records": usage},
+            {"schema_version": 1, "provider": agent, "step": step, "records": usage},
             indent=2,
             sort_keys=True,
         )
@@ -184,7 +184,7 @@ def _transcripts(
     )
     return {
         "provider": agent,
-        "phase": phase,
+        "step": step,
         "files": files,
         "usage_path": str(usage_path.relative_to(root)),
         "usage_records": len(usage),

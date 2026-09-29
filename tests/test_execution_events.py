@@ -29,11 +29,11 @@ def test_advisor_reason_recorded_without_request_secrets(tmp_path, decision):
         "body": {"text": "private-email-body"},
     }
     if decision == "allow":
-        broker.execute("slack.request", request, phase="notify")
+        broker.execute("slack.request", request, step="notify")
     else:
         broker.executor.resolver = lambda _: pytest.fail("credential resolved on denial")
         with pytest.raises(IntegrationError):
-            broker.execute("slack.request", request, phase="notify")
+            broker.execute("slack.request", request, step="notify")
     recorded = events(broker)
     assert recorded[0]["event_type"] == "integration.proposed"
     assert recorded[1]["decision"] == decision
@@ -60,7 +60,7 @@ def test_invalid_review_never_records_untrusted_reason(tmp_path):
     )
     with pytest.raises(IntegrationError):
         broker.execute(
-            "slack.request", {"method": "POST", "path": "/api/chat.postMessage"}, phase="notify"
+            "slack.request", {"method": "POST", "path": "/api/chat.postMessage"}, step="notify"
         )
     assert events(broker)[-1]["decision"] == "error"
     assert "private-review-content" not in json.dumps(events(broker))

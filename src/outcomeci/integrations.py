@@ -355,20 +355,20 @@ class IntegrationExecutor:
             "bytes": len(received),
         }
 
-    def capabilities(self, phase: str | None = None) -> list[str]:
+    def capabilities(self, step: str | None = None) -> list[str]:
         integrations = self.compiled["workflow"]["spec"].get("integrations", {})
         all_names = sorted(
             f"{integration}.{operation}"
             for integration, value in integrations.items()
             for operation in value["operations"]
         )
-        if phase is None:
+        if step is None:
             return all_names
-        policy = self.compiled["instructions"]["steps"].get(phase)
+        policy = self.compiled["instructions"]["steps"].get(step)
         if policy is None:
             raise IntegrationError(
-                "integration.phase_not_found",
-                f"workflow has no step {phase}",
+                "integration.step_not_found",
+                f"workflow has no step {step}",
                 category="configuration",
             )
         return list(policy.get("capabilities", []))
@@ -423,24 +423,24 @@ class IntegrationExecutor:
             "policy": operation["policy"],
         }
 
-    def dry_run(self, phase: str) -> dict[str, Any]:
+    def dry_run(self, step: str) -> dict[str, Any]:
         """Describe the step's authorized effects without resolving credentials or doing I/O."""
-        if phase not in self.compiled["instructions"]["steps"]:
+        if step not in self.compiled["instructions"]["steps"]:
             raise IntegrationError(
-                "integration.phase_not_found",
-                f"workflow has no step {phase}",
+                "integration.step_not_found",
+                f"workflow has no step {step}",
                 category="configuration",
             )
         return {
-            "phase": phase,
+            "step": step,
             "workflow_revision": self.compiled["workflow_revision"],
-            "api": [self.describe(name) for name in self.capabilities(phase)],
+            "api": [self.describe(name) for name in self.capabilities(step)],
             "credentials_resolved": False,
             "requests_executed": False,
         }
 
     def compared(
-        self, capability: str, inputs: Mapping[str, Any], *, phase: str
+        self, capability: str, inputs: Mapping[str, Any], *, step: str
     ) -> dict[str, Any] | None:
         """A write that replaces a file, as a policy reviewer sees it: a unified
         diff against the file's current copy, which this reads with a GET to the
@@ -472,7 +472,7 @@ class IntegrationExecutor:
                     "path": path,
                     **({"query": {"ref": ref}} if isinstance(ref, str) and ref else {}),
                 },
-                phase=phase,
+                step=step,
             )
             current = _decoded(
                 _found(result["output"].get("result"), rule["current"]), rule["encoding"]
@@ -507,7 +507,7 @@ class IntegrationExecutor:
         capability: str,
         inputs: Mapping[str, Any],
         *,
-        phase: str,
+        step: str,
         response_grants: list[list[dict[str, Any]]] | None = None,
     ) -> dict[str, Any]:
         """Send one authorized request. `response_grants` are the grants a
@@ -515,10 +515,10 @@ class IntegrationExecutor:
         used: alternatives, one list of `{name, paths, granted}` checks per
         grant, of which one must hold entirely (`granted` in a list at one of
         `paths`). The result's audit names the alternative that held."""
-        if capability not in self.capabilities(phase):
+        if capability not in self.capabilities(step):
             raise IntegrationError(
                 "integration.capability_denied",
-                f"capability {capability} is not authorized for step {phase}",
+                f"capability {capability} is not authorized for step {step}",
                 category="policy",
             )
         integration_name, operation_name = capability.split(".", 1)
@@ -620,7 +620,7 @@ class IntegrationExecutor:
                 _diagnostic(
                     "integration_request_sending",
                     capability=capability,
-                    phase=phase,
+                    step=step,
                     method=request["method"],
                 )
                 response = client.request(
@@ -639,7 +639,7 @@ class IntegrationExecutor:
                 _diagnostic(
                     "integration_request_received",
                     capability=capability,
-                    phase=phase,
+                    step=step,
                     status=response.status_code,
                     elapsed_ms=int((time.monotonic() - started) * 1000),
                 )
@@ -704,7 +704,7 @@ class IntegrationExecutor:
                 "method": request["method"],
                 "origin": connection["base_url"],
                 "workflow_revision": self.compiled["workflow_revision"],
-                "phase": phase,
+                "step": step,
                 "policy": operation["policy"],
                 **({"grant": granted_by} if granted_by is not None else {}),
             },

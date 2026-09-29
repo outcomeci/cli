@@ -51,13 +51,13 @@ def _id(intent: str) -> str:
 
 
 def _policy(
-    compiled: dict[str, Any], phase: str, agent: str | None, model: str | None
+    compiled: dict[str, Any], step: str, agent: str | None, model: str | None
 ) -> tuple[str, str | None]:
-    selected = compiled["instructions"]["steps"].get(phase, {}).get("policy", {})
+    selected = compiled["instructions"]["steps"].get(step, {}).get("policy", {})
     runner = agent or selected.get("runner")
     chosen_model = model or selected.get("model")
     if runner not in {"codex", "claude", "opencode"}:
-        raise ExecutionError(f"no supported agent configured for {phase}")
+        raise ExecutionError(f"no supported agent configured for {step}")
     if runner == "opencode" and (
         not isinstance(chosen_model, str) or not chosen_model.startswith("openrouter/")
     ):
@@ -106,10 +106,10 @@ def _artifact_path(outcome_root: Path, contract: dict[str, Any]) -> Path:
 
 
 def _prepare_writable_artifacts(
-    compiled: dict[str, Any], outcome_root: Path, phase: str
+    compiled: dict[str, Any], outcome_root: Path, step: str
 ) -> list[Path]:
     paths = []
-    for contract in compiled["instructions"]["steps"][phase]["expects"]["outputs"]:
+    for contract in compiled["instructions"]["steps"][step]["expects"]["outputs"]:
         path = _artifact_path(outcome_root, contract)
         if contract["media_type"] == "inode/directory":
             path.mkdir(parents=True, exist_ok=True)
@@ -120,24 +120,24 @@ def _prepare_writable_artifacts(
     return paths
 
 
-def _validate_outputs(compiled: dict[str, Any], outcome_root: Path, phase: str) -> None:
-    for contract in compiled["instructions"]["steps"][phase]["expects"]["outputs"]:
+def _validate_outputs(compiled: dict[str, Any], outcome_root: Path, step: str) -> None:
+    for contract in compiled["instructions"]["steps"][step]["expects"]["outputs"]:
         path = _artifact_path(outcome_root, contract)
         if not path.exists():
             if contract["required"]:
                 raise ExecutionError(
-                    f"missing required output {phase}.{contract['name']}: {contract['path']}"
+                    f"missing required output {step}.{contract['name']}: {contract['path']}"
                 )
             continue
         media_type = contract["media_type"]
         if media_type == "inode/directory":
             if not path.is_dir() or not any(item.is_file() for item in path.rglob("*")):
                 raise ExecutionError(
-                    f"output {phase}.{contract['name']} must be a non-empty directory"
+                    f"output {step}.{contract['name']} must be a non-empty directory"
                 )
             continue
         if not path.is_file() or not path.read_bytes():
-            raise ExecutionError(f"output {phase}.{contract['name']} must be a non-empty file")
+            raise ExecutionError(f"output {step}.{contract['name']} must be a non-empty file")
         if media_type == "application/json" or contract.get("schema"):
             try:
                 value = json.loads(path.read_text(encoding="utf-8"))
@@ -149,16 +149,14 @@ def _validate_outputs(compiled: dict[str, Any], outcome_root: Path, phase: str) 
                     )
             except (UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
                 raise ExecutionError(
-                    f"output {phase}.{contract['name']} failed JSON validation: {exc}"
+                    f"output {step}.{contract['name']} failed JSON validation: {exc}"
                 ) from exc
         elif media_type.startswith("text/"):
             try:
                 if not path.read_text(encoding="utf-8").strip():
-                    raise ExecutionError(f"output {phase}.{contract['name']} must contain text")
+                    raise ExecutionError(f"output {step}.{contract['name']} must contain text")
             except UnicodeDecodeError as exc:
-                raise ExecutionError(
-                    f"output {phase}.{contract['name']} is not UTF-8 text"
-                ) from exc
+                raise ExecutionError(f"output {step}.{contract['name']} is not UTF-8 text") from exc
 
 
 def _call_succeeded(call: dict[str, Any]) -> bool:
@@ -178,10 +176,10 @@ def _call_succeeded(call: dict[str, Any]) -> bool:
 
 
 def _validate_required_effects(
-    root: Path, compiled: dict[str, Any], run_id: str, phase: str
+    root: Path, compiled: dict[str, Any], run_id: str, step: str
 ) -> None:
     """Require broker-confirmed evidence for effects declared as mandatory."""
-    required = compiled["instructions"]["steps"][phase].get("required_capabilities", [])
+    required = compiled["instructions"]["steps"][step].get("required_capabilities", [])
     if not required:
         return
     journal = root / ".outcomeci" / ".broker" / run_id / "journal.json"
@@ -206,7 +204,7 @@ def _validate_required_effects(
         raise ExecutionError("required integration effect was not confirmed: " + ", ".join(missing))
 
 
-def _write_effect_receipts(root: Path, outcome_root: Path, run_id: str, phase: str) -> Path:
+def _write_effect_receipts(root: Path, outcome_root: Path, run_id: str, step: str) -> Path:
     """Materialize credential-free effect evidence for output validation and repair."""
     journal = root / ".outcomeci" / ".broker" / run_id / "journal.json"
     calls: list[dict[str, Any]] = []
@@ -232,7 +230,7 @@ def _write_effect_receipts(root: Path, outcome_root: Path, run_id: str, phase: s
     target = outcome_root / "effects.json"
     target.write_text(
         json.dumps(
-            {"schema_version": "1", "phase": phase, "effects": calls},
+            {"schema_version": "1", "step": step, "effects": calls},
             indent=2,
             sort_keys=True,
         )
@@ -246,7 +244,7 @@ def _repair_outputs(
     root: Path,
     compiled: dict[str, Any],
     outcome_root: Path,
-    phase: str,
+    step: str,
     runner: str,
     model: str | None,
     error: ExecutionError,
@@ -256,7 +254,7 @@ def _repair_outputs(
     container_isolated: bool,
 ) -> str:
     """Run one output-only repair with no capability socket or provider credentials."""
-    contracts = compiled["instructions"]["steps"][phase]["expects"]["outputs"]
+    contracts = compiled["instructions"]["steps"][step]["expects"]["outputs"]
     prompt = (
         "Repair the declared workflow output artifacts only. External effects may already "
         "have completed and must not be repeated. You have no integration or human "
@@ -280,22 +278,16 @@ def _repair_outputs(
     )
 
 
-def _interaction_path(root: Path, run_id: str, phase: str, interaction_id: str) -> Path:
+def _interaction_path(root: Path, run_id: str, step: str, interaction_id: str) -> Path:
     return (
-        root
-        / ".outcomeci"
-        / "outcomes"
-        / run_id
-        / "interactions"
-        / phase
-        / f"{interaction_id}.json"
+        root / ".outcomeci" / "outcomes" / run_id / "interactions" / step / f"{interaction_id}.json"
     )
 
 
 def _finish_interaction(
     root: Path,
     state: dict[str, Any],
-    phase: str,
+    step: str,
     timing: str,
     definition: dict[str, Any],
     *,
@@ -306,19 +298,19 @@ def _finish_interaction(
     request = {
         "schema_version": 1,
         "run_id": state["run_id"],
-        "phase": phase,
+        "step": step,
         "timing": timing,
         "status": status,
         "requested_at": datetime.now(UTC).isoformat(),
         **definition,
         "response": {"message": message, "responded_at": datetime.now(UTC).isoformat()},
     }
-    path = _interaction_path(root, state["run_id"], phase, definition["id"])
+    path = _interaction_path(root, state["run_id"], step, definition["id"])
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     state.setdefault("interaction_history", []).append(
         {
-            "step": phase,
+            "step": step,
             "timing": timing,
             "id": definition["id"],
             "status": status,
@@ -389,15 +381,15 @@ def _execute(
     compiled = compile_workflow(config)
     if credential_resolver is None:
         raise ExecutionError("OutcomeCI execution requires a scoped credential resolver")
-    phase = state["step"]
-    step_block = compiled["instructions"]["steps"][phase].get("v1")
+    step = state["step"]
+    step_block = compiled["instructions"]["steps"][step].get("v1")
     if step_block is None:
-        raise ExecutionError(f"step {phase} is not an outcomeci.workflow/v1 step")
+        raise ExecutionError(f"step {step} is not an outcomeci.workflow/v1 step")
     if step_block["kind"] != "agent":
-        raise ExecutionError(f"step {phase} is driven by the runtime, not an agent")
-    runner, chosen_model = _policy(compiled, phase, agent, model)
+        raise ExecutionError(f"step {step} is driven by the runtime, not an agent")
+    runner, chosen_model = _policy(compiled, step, agent, model)
     outcome_root = root / ".outcomeci" / "outcomes" / state["run_id"]
-    writable_artifacts = _prepare_writable_artifacts(compiled, outcome_root, phase)
+    writable_artifacts = _prepare_writable_artifacts(compiled, outcome_root, step)
     connection_secrets = _connection_secrets(compiled)
     context_revision = f"outcomeci:{compiled['workflow_revision']}"
     environment = (
@@ -410,7 +402,7 @@ def _execute(
             root,
             compiled,
             state,
-            phase,
+            step,
             step_block,
             outcome_root=outcome_root,
             environment=environment,
@@ -431,12 +423,12 @@ def _execute(
         }
     )
     _write(root, state)
-    return _run_phase(
+    return _run_step(
         root,
         config,
         compiled,
         state,
-        phase,
+        step,
         invocations,
         options=options,
         runner=runner,
@@ -453,7 +445,7 @@ def _step_invocations(
     root: Path,
     compiled: dict[str, Any],
     state: dict[str, Any],
-    phase: str,
+    step: str,
     step_block: dict[str, Any],
     *,
     outcome_root: Path,
@@ -480,7 +472,7 @@ def _step_invocations(
             root,
             compiled,
             state,
-            phase,
+            step,
             step_block,
             outcome_root=outcome_root,
             environment=environment,
@@ -506,7 +498,7 @@ def _step_prompt(
     root: Path,
     compiled: dict[str, Any],
     state: dict[str, Any],
-    phase: str,
+    step: str,
     step_block: dict[str, Any],
     *,
     outcome_root: Path,
@@ -530,12 +522,12 @@ def _step_prompt(
         returns = {"path": outcome_root / returns["path"], "schema": returns["schema"]}
     context = {
         "run_id": state["run_id"],
-        "step": phase,
+        "step": step,
         "workflow_revision": compiled["workflow_revision"],
         "inputs": v1_runtime.inputs(root, state, step_block, bound),
         "capabilities": [
             describer.describe(name)
-            for name in compiled["instructions"]["steps"][phase].get("capabilities", [])
+            for name in compiled["instructions"]["steps"][step].get("capabilities", [])
         ],
         "grants": grants,
         "policy": step_block.get("policy"),
@@ -545,21 +537,21 @@ def _step_prompt(
     }
     return templates.V1_STEP_TASK.format(
         shared=compiled["instructions"]["orchestrator"]["content"],
-        instructions=compiled["instructions"]["steps"][phase]["content"],
+        instructions=compiled["instructions"]["steps"][step]["content"],
         environment=environment,
         outcome_root=outcome_root,
-        phase=phase,
+        step=step,
         runtime_cli=runtime_cli,
         context_json=json.dumps(context, separators=(",", ":")),
     )
 
 
-def _run_phase(
+def _run_step(
     root: Path,
     config: Path,
     compiled: dict[str, Any],
     state: dict[str, Any],
-    phase: str,
+    step: str,
     invocations: list[tuple[str, dict[str, Any] | None]],
     *,
     options: ExecutionOptions,
@@ -576,7 +568,7 @@ def _run_phase(
     policy_reviewer = options.policy_reviewer
     _container_isolated = options._container_isolated
     repository = root.name
-    phase_started_at = datetime.now(UTC).isoformat()
+    step_started_at = datetime.now(UTC).isoformat()
     try:
         summaries = []
         for prompt, scope in invocations:
@@ -584,7 +576,7 @@ def _run_phase(
                 root,
                 config,
                 state["run_id"],
-                phase,
+                step,
                 compiled=compiled,
                 resolver=credential_resolver,
                 event_sink=event_sink,
@@ -612,16 +604,16 @@ def _run_phase(
             from . import v1_runtime
 
             v1_runtime.gather(root, state["run_id"], step_block, len(invocations))
-        _write_effect_receipts(root, outcome_root, state["run_id"], phase)
+        _write_effect_receipts(root, outcome_root, state["run_id"], step)
         try:
             try:
-                _validate_outputs(compiled, outcome_root, phase)
+                _validate_outputs(compiled, outcome_root, step)
             except ExecutionError as validation_error:
                 if event_sink:
                     event_sink(
                         event(
                             "artifact.repair_started",
-                            phase,
+                            step,
                             "workflow.outputs",
                             "Output contract repair started",
                             reason=safe_text(str(validation_error)),
@@ -633,7 +625,7 @@ def _run_phase(
                         root,
                         compiled,
                         outcome_root,
-                        phase,
+                        step,
                         runner,
                         chosen_model,
                         validation_error,
@@ -641,13 +633,13 @@ def _run_phase(
                         connection_secrets,
                         container_isolated=_container_isolated,
                     )
-                    _validate_outputs(compiled, outcome_root, phase)
+                    _validate_outputs(compiled, outcome_root, step)
                 except ExecutionError as repair_error:
                     if event_sink:
                         event_sink(
                             event(
                                 "artifact.repair_failed",
-                                phase,
+                                step,
                                 "workflow.outputs",
                                 "Output contract repair failed",
                                 reason=safe_text(str(repair_error)),
@@ -659,21 +651,21 @@ def _run_phase(
                     event_sink(
                         event(
                             "artifact.repair_completed",
-                            phase,
+                            step,
                             "workflow.outputs",
                             "Output contract repair completed",
                         )
                     )
                 summary = f"{summary}\n{repair_summary}"
-            _validate_required_effects(root, compiled, state["run_id"], phase)
+            _validate_required_effects(root, compiled, state["run_id"], step)
         finally:
             # Copy the agent's session transcript in regardless of whether the
-            # validation above succeeded -- a phase that fails required-effects
+            # validation above succeeded -- a step that fails required-effects
             # or output validation is exactly the case someone needs to inspect
             # what the agent actually did, and this used to run only on the
             # success path, leaving failed runs with no transcript at all.
             transcripts = _transcripts(
-                runner, outcome_root, phase, workspace=root, since=phase_started_at
+                runner, outcome_root, step, workspace=root, since=step_started_at
             )
     except (ExecutionError, OSError, json.JSONDecodeError) as exc:
         state.update({"status": "error", "error": str(exc)})
@@ -682,7 +674,7 @@ def _run_phase(
         if isinstance(exc, ExecutionError):
             raise
         raise ExecutionError(f"invalid local outcome artifacts: {exc}") from exc
-    state["completed_steps"] = [*state.get("completed_steps", []), phase]
+    state["completed_steps"] = [*state.get("completed_steps", []), step]
     state["status"] = (
         "awaiting_confirmation" if _ready(compiled, state["completed_steps"]) else "completed"
     )
@@ -695,7 +687,7 @@ def _run_phase(
         run_id=state["run_id"],
         workflow_run_id=None,
         trajectory_version=None,
-        phase=phase,
+        step=step,
         workflow_revision=compiled["workflow_revision"],
         backend_provider="outcomeci",
         state_repository=None,
@@ -705,7 +697,7 @@ def _run_phase(
         runner=runner,
         model=chosen_model,
         transcript=transcripts,
-        phase_contract=compiled["instructions"]["steps"][phase]["expects"],
+        step_contract=compiled["instructions"]["steps"][step]["expects"],
     )
     (outcome_root / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"

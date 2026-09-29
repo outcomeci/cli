@@ -46,7 +46,7 @@ class Broker:
         root: Path,
         config: Path,
         run_id: str,
-        phase: str,
+        step: str,
         socket_path: Path,
         compiled=None,
         resolver: CredentialResolver | None = None,
@@ -57,20 +57,20 @@ class Broker:
         inputs=None,
     ):
         compiled = compiled if compiled is not None else compile_workflow(config)
-        self.root, self.config, self.run_id, self.phase = root, config, run_id, phase
+        self.root, self.config, self.run_id, self.step = root, config, run_id, step
         run_directory = root / ".outcomeci" / "outcomes" / run_id
         state_path = run_directory / "run.json"
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
-        step = compiled["instructions"]["steps"][phase]
+        node = compiled["instructions"]["steps"][step]
         step_policy = None
-        if "v1" in step:
+        if "v1" in node:
             # A v1 step's grants are resolved by the caller before its agent
             # starts; with none given, the step may call nothing.
             grants = grants if grants is not None else []
-            if step["v1"].get("policy"):
+            if node["v1"].get("policy"):
                 step_policy = {
                     "content": (
-                        f"Step policy for {phase}: {step['v1']['policy']}\n"
+                        f"Step policy for {step}: {node['v1']['policy']}\n"
                         "Grant arguments such as the channel or repository are enforced "
                         "separately; judge the proposal against this policy only.\n"
                         "context.inputs is everything this step was given, such as a plan "
@@ -79,7 +79,7 @@ class Broker:
                         "against the current copy: judge the lines it changes, not the "
                         "whole file."
                     ),
-                    "policy": step["policy"],
+                    "policy": node["policy"],
                 }
         self.integrations = PolicyExecutor(
             IntegrationExecutor(
@@ -92,13 +92,13 @@ class Broker:
             # A v1 step is reviewed against what it was given, which holds the
             # trigger only when the step takes it (`from: trigger`).
             (
-                {"inputs": inputs or [], "phase": step}
-                if "v1" in step
+                {"inputs": inputs or [], "step": node}
+                if "v1" in node
                 else {
                     "intent": state.get("intent"),
                     "trigger": state.get("trigger"),
                     **({"inputs": inputs} if inputs is not None else {}),
-                    "phase": step,
+                    "step": node,
                 }
             ),
             reviewer=policy_reviewer,
@@ -121,7 +121,7 @@ class Broker:
             if not isinstance(inputs, dict):
                 raise ExecutionError("integration input must be an object")
             return self.integrations.execute(
-                str(payload.get("capability", "")), inputs, phase=self.phase
+                str(payload.get("capability", "")), inputs, step=self.step
             )
         raise ExecutionError("operation is not allowed by this outcome capability")
 
@@ -131,7 +131,7 @@ def serve(
     root: Path,
     config: Path,
     run_id: str,
-    phase: str,
+    step: str,
     *,
     compiled=None,
     resolver: CredentialResolver | None = None,
@@ -149,7 +149,7 @@ def serve(
         root,
         config,
         run_id,
-        phase,
+        step,
         socket_path,
         compiled,
         resolver,

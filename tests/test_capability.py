@@ -8,7 +8,7 @@ from outcomeci.process import ExecutionError
 
 def _broker():
     broker = capability.Broker.__new__(capability.Broker)
-    broker.run_id, broker.token, broker.phase = "run-1", "secret", "investigate"
+    broker.run_id, broker.token, broker.step = "run-1", "secret", "investigate"
     return broker
 
 

@@ -107,7 +107,7 @@ def run(compiled: dict, credential, server: Server, resolver=None, times: int = 
         resolver=resolver or (lambda _reference: credential),
         transport=httpx.MockTransport(server),
     )
-    return [executor.execute("tickets.read", {}, phase="call") for _ in range(times)]
+    return [executor.execute("tickets.read", {}, step="call") for _ in range(times)]
 
 
 def typed(credential_type: str, secrets: dict, configuration: dict | None = None) -> dict:

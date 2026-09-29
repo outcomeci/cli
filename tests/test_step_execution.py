@@ -188,7 +188,7 @@ def test_effect_receipts_keep_no_request_or_response_content(tmp_path: Path) -> 
     receipt = local._write_effect_receipts(tmp_path, outcome, "run-1", "notify")
     assert json.loads(receipt.read_text()) == {
         "schema_version": "1",
-        "phase": "notify",
+        "step": "notify",
         "effects": [
             {
                 "capability": "slack.post",

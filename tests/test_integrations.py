@@ -103,7 +103,7 @@ def test_operation_policy_is_discoverable_and_audited(tmp_path: Path) -> None:
         "approval": "inherit",
         "idempotency": "none",
     }
-    result = executor.execute("tickets.create", {"title": "Test"}, phase="intake")
+    result = executor.execute("tickets.create", {"title": "Test"}, step="intake")
     assert result["audit"]["policy"] == executor.describe("tickets.create")["policy"]
 
 
@@ -132,7 +132,7 @@ def test_http_failure_has_stable_safe_taxonomy(tmp_path: Path) -> None:
         transport=httpx.MockTransport(lambda _request: httpx.Response(403, text="private")),
     )
     with pytest.raises(IntegrationError) as raised:
-        executor.execute("tickets.create", {"title": "Test"}, phase="intake")
+        executor.execute("tickets.create", {"title": "Test"}, step="intake")
     assert raised.value.as_dict() == {
         "code": "integration.authorization_failed",
         "category": "authorization",
@@ -158,7 +158,7 @@ def test_executes_with_credential_but_returns_only_projected_output(tmp_path: Pa
         resolver=lambda _reference: "top-secret",
         transport=httpx.MockTransport(handler),
     )
-    result = executor.execute("tickets.create", {"title": "Broken button"}, phase="intake")
+    result = executor.execute("tickets.create", {"title": "Broken button"}, step="intake")
     assert seen == {"credential": "top-secret", "body": '{"title":"Broken button"}'}
     assert result["output"] == {"id": "T-1", "url": "https://example.test/T-1"}
     assert "top-secret" not in json.dumps(result)
@@ -180,14 +180,14 @@ def test_execute_emits_diagnostic_markers_bracketing_the_network_call(
         resolver=lambda _reference: "top-secret",
         transport=httpx.MockTransport(handler),
     )
-    executor.execute("tickets.create", {"title": "Broken button"}, phase="intake")
+    executor.execute("tickets.create", {"title": "Broken button"}, step="intake")
 
     captured = capsys.readouterr().err
     lines = [json.loads(line) for line in captured.strip().splitlines()]
     sending = next(line for line in lines if line["event"] == "integration_request_sending")
     received = next(line for line in lines if line["event"] == "integration_request_received")
     assert sending["capability"] == "tickets.create"
-    assert sending["phase"] == "intake"
+    assert sending["step"] == "intake"
     assert received["status"] == 201
     assert isinstance(received["elapsed_ms"], int)
     assert "top-secret" not in captured
@@ -200,9 +200,9 @@ def test_rejects_undeclared_capability_and_invalid_input(tmp_path: Path) -> None
         transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={})),
     )
     with pytest.raises(ExecutionError, match="not authorized"):
-        executor.execute("tickets.delete", {}, phase="intake")
+        executor.execute("tickets.delete", {}, step="intake")
     with pytest.raises(ExecutionError, match="required property"):
-        executor.execute("tickets.create", {}, phase="intake")
+        executor.execute("tickets.create", {}, step="intake")
 
 
 def test_rejects_absolute_operation_path(tmp_path: Path) -> None:

@@ -68,7 +68,7 @@ def test_a_file_shared_in_the_granted_channel_is_saved_for_the_agent(tmp_path, m
     executor, sent = _executor(tmp_path, monkeypatch, _info())
 
     result = executor.execute(
-        "slack.file", {"file": "F1"}, phase="draft", response_grants=_alternatives()
+        "slack.file", {"file": "F1"}, step="draft", response_grants=_alternatives()
     )
 
     file = result["output"]["file"]
@@ -87,7 +87,7 @@ def test_a_file_not_shared_in_the_granted_channel_is_never_downloaded(tmp_path, 
 
     with pytest.raises(IntegrationError, match="channel must be C1"):
         executor.execute(
-            "slack.file", {"file": "F1"}, phase="draft", response_grants=_alternatives()
+            "slack.file", {"file": "F1"}, step="draft", response_grants=_alternatives()
         )
 
     assert [request.url.path for request in sent] == ["/api/files.info"]
@@ -100,7 +100,7 @@ def test_a_download_from_another_host_is_refused(tmp_path, monkeypatch):
 
     with pytest.raises(IntegrationError, match="only from files.slack.com"):
         executor.execute(
-            "slack.file", {"file": "F1"}, phase="draft", response_grants=_alternatives()
+            "slack.file", {"file": "F1"}, step="draft", response_grants=_alternatives()
         )
 
     assert len(sent) == 1
@@ -119,7 +119,7 @@ def test_a_download_that_cannot_complete_fails(tmp_path, monkeypatch, response, 
 
     with pytest.raises(IntegrationError, match=message):
         executor.execute(
-            "slack.file", {"file": "F1"}, phase="draft", response_grants=_alternatives()
+            "slack.file", {"file": "F1"}, step="draft", response_grants=_alternatives()
         )
 
     assert not list((tmp_path / "attachments").glob("*"))
@@ -191,7 +191,7 @@ def test_the_broker_refuses_a_file_outside_the_granted_channel(tmp_path, monkeyp
     )
 
     with pytest.raises(IntegrationError, match="channel must be C1"):
-        policy.execute("slack.file", {"file": "F1"}, phase="draft")
+        policy.execute("slack.file", {"file": "F1"}, step="draft")
 
     assert [request.url.path for request in sent] == ["/api/files.info"]
 
@@ -209,7 +209,7 @@ def test_any_grant_that_holds_opens_the_file_and_is_recorded(tmp_path, monkeypat
         step_policy={"content": "Read attachments.", "policy": {}},
     )
 
-    result = policy.execute("slack.file", {"file": "F1"}, phase="draft")
+    result = policy.execute("slack.file", {"file": "F1"}, step="draft")
 
     assert Path(result["output"]["file"]["path"]).read_bytes() == IMAGE
     journal = json.loads((tmp_path / "broker" / "journal.json").read_text())

@@ -97,7 +97,7 @@ def test_github_write_refuses_merges_and_settings_before_sending(monkeypatch):
     monkeypatch.setattr(sentry.integrations, "_safe_destination", lambda url, allow: None)
     for method, path in [("PUT", "/repos/o/r/pulls/1/merge"), ("PATCH", "/repos/o/r")]:
         with pytest.raises(IntegrationError, match="does not allow"):
-            executor.execute("github.write", {"method": method, "path": path}, phase="fix")
+            executor.execute("github.write", {"method": method, "path": path}, step="fix")
     assert sent == []
 
 
@@ -376,7 +376,7 @@ def test_a_review_sees_earlier_requests_but_not_their_response_bodies(workflow, 
 
     receipts = reviews[0]["receipts"]
     assert receipts and all(
-        set(item) == {"capability", "phase", "status", "request"} for item in receipts
+        set(item) == {"capability", "step", "status", "request"} for item in receipts
     )
 
 
@@ -394,7 +394,7 @@ def test_a_review_sees_only_its_own_steps_requests(workflow, monkeypatch):
         if review["policy"]["content"].startswith("Step policy for fix:")
     ]
     assert fix
-    assert all(item["phase"] == "fix" for review in fix for item in review["receipts"])
+    assert all(item["step"] == "fix" for review in fix for item in review["receipts"])
 
 
 def _broker(tmp_path, monkeypatch, reviewer, responses):
@@ -437,11 +437,11 @@ def test_a_call_whose_review_failed_was_never_sent_and_can_run_again(tmp_path, m
         tmp_path, monkeypatch, reviewer, iter([httpx.Response(201, json={"ref": "x"})])
     )
     with pytest.raises(RuntimeError):
-        broker.execute("github.write", BRANCH, phase="fix")
+        broker.execute("github.write", BRANCH, step="fix")
     journal = json.loads((tmp_path / "journal.json").read_text())
     assert [call["status"] for call in journal["calls"].values()] == ["unsent"]
 
-    assert broker.execute("github.write", BRANCH, phase="fix")["ok"] is True
+    assert broker.execute("github.write", BRANCH, step="fix")["ok"] is True
 
 
 def test_a_write_whose_delivery_is_uncertain_is_never_sent_twice(tmp_path, monkeypatch):
@@ -452,9 +452,9 @@ def test_a_write_whose_delivery_is_uncertain_is_never_sent_twice(tmp_path, monke
     }
     broker = _broker(tmp_path, monkeypatch, allow, iter([httpx.Response(502, json={})]))
     with pytest.raises(IntegrationError):
-        broker.execute("github.write", BRANCH, phase="fix")
+        broker.execute("github.write", BRANCH, step="fix")
     with pytest.raises(IntegrationError, match="delivery is uncertain"):
-        broker.execute("github.write", BRANCH, phase="fix")
+        broker.execute("github.write", BRANCH, step="fix")
 
 
 def test_a_failed_read_can_run_again(tmp_path, monkeypatch):
@@ -462,8 +462,8 @@ def test_a_failed_read_can_run_again(tmp_path, monkeypatch):
     broker = _broker(tmp_path, monkeypatch, None, responses)
     read = {"method": "GET", "path": "/repos/outcomeci/cli/contents/missing.py"}
     with pytest.raises(IntegrationError):
-        broker.execute("github.write", read, phase="fix")
-    assert broker.execute("github.write", read, phase="fix")["ok"] is True
+        broker.execute("github.write", read, step="fix")
+    assert broker.execute("github.write", read, step="fix")["ok"] is True
 
 
 def _github(tmp_path, monkeypatch, handler):
@@ -521,7 +521,7 @@ def test_a_file_commit_is_reviewed_as_a_diff_against_its_branch(tmp_path, monkey
 
     broker, proposals = _github(tmp_path, monkeypatch, github)
     proposed = current.replace("app.run()\n", "print('bear down')\napp.run()\n")
-    broker.execute("github.write", _commit(proposed), phase="fix")
+    broker.execute("github.write", _commit(proposed), step="fix")
 
     (read,) = reads
     assert read.url.path == "/repos/outcomeci/cli/contents/app/main.py"
@@ -540,7 +540,7 @@ def test_a_new_file_is_reviewed_as_all_added(tmp_path, monkeypatch):
         return httpx.Response(201, json={"content": {"path": "app/main.py"}})
 
     broker, proposals = _github(tmp_path, monkeypatch, github)
-    broker.execute("github.write", _commit("print('hi')\n"), phase="fix")
+    broker.execute("github.write", _commit("print('hi')\n"), step="fix")
 
     assert "--- (a new file)" in proposals[0]["compared"]["diff"]
     assert "+print('hi')" in proposals[0]["compared"]["diff"]
@@ -550,7 +550,7 @@ def test_a_write_that_replaces_no_file_carries_no_diff(tmp_path, monkeypatch):
     broker, proposals = _github(
         tmp_path, monkeypatch, lambda request: httpx.Response(201, json={"ref": "x"})
     )
-    broker.execute("github.write", BRANCH, phase="fix")
+    broker.execute("github.write", BRANCH, step="fix")
 
     assert "compared" not in proposals[0]
 
@@ -581,7 +581,7 @@ def test_a_waiting_step_says_why_its_message_is_missing(tmp_path, status, events
     from outcomeci.v1_runtime import missing_call
 
     call = {
-        "phase": "triage",
+        "step": "triage",
         "capability": "slack.post",
         "sequence": 1,
         "status": status,
@@ -634,7 +634,7 @@ def test_a_denied_change_tells_the_agent_the_reviewers_reason(tmp_path, monkeypa
         policy.execute(
             "github.write",
             {"method": "POST", "path": "/repos/outcomeci/cli/pulls"},
-            phase="fix",
+            step="fix",
         )
 
     assert str(exc.value) == (

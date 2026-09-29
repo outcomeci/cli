@@ -265,8 +265,8 @@ def test_recorded_calls_carry_the_step_that_made_them(workflow, monkeypatch):
     journal = json.loads(
         (workflow / ".outcomeci" / ".broker" / result["run_id"] / "journal.json").read_text()
     )
-    phases = sorted({call["phase"] for call in journal["calls"].values()})
-    assert phases == ["announce", "fix", "triage"]
+    steps = sorted({call["step"] for call in journal["calls"].values()})
+    assert steps == ["announce", "fix", "triage"]
 
 
 def test_no_op_triage_skips_the_approval_fix_and_announcement(workflow, monkeypatch):

@@ -375,5 +375,5 @@ def test_the_reviewer_judges_a_step_against_its_approved_plan(workflow, monkeypa
     # The discussion revised the plan; the reviewer sees the revision, and not the
     # trigger's first wording, which this step does not take.
     assert inputs["plan"]["summary"] == "Add --json output and document it"
-    assert set(implement[0]["context"]) == {"inputs", "phase"}
+    assert set(implement[0]["context"]) == {"inputs", "step"}
     assert "context.inputs is everything this step was given" in implement[0]["policy"]["content"]

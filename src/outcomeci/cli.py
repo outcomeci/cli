@@ -624,7 +624,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result = (
                     invoke_integration(args.capability, inputs)
                     if os.environ.get("OUTCOMECI_CAPABILITY_SOCKET")
-                    else executor.execute(args.capability, inputs, phase=args.phase)
+                    else executor.execute(args.capability, inputs, step=args.phase)
                 )
                 _print_json(result, sort_keys=True)
         elif args.command == "integration" and args.integration_command == "slack":

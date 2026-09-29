@@ -59,10 +59,10 @@ def test_reviewed_requests_are_credential_blind_and_replayed(tmp_path):
 
     broker = executor(tmp_path, review, send)
     inputs = {"method": "POST", "path": "/api/chat.postMessage", "body": {"text": "Hi"}}
-    first = broker.execute("slack.request", {**inputs, "purpose": "Tell @izzy"}, phase="notify")
+    first = broker.execute("slack.request", {**inputs, "purpose": "Tell @izzy"}, step="notify")
     assert first["ok"] is True
     assert "private-token" not in json.dumps(proposals)
-    assert broker.execute("slack.request", {**inputs, "purpose": "Another reason"}, phase="notify")[
+    assert broker.execute("slack.request", {**inputs, "purpose": "Another reason"}, step="notify")[
         "replayed"
     ]
     assert len(calls) == 1
@@ -70,7 +70,7 @@ def test_reviewed_requests_are_credential_blind_and_replayed(tmp_path):
     restored = policy.PolicyExecutor(
         broker.executor, tmp_path / ".broker", {}, review, step_policy=STEP_POLICY
     )
-    assert restored.execute("slack.request", inputs, phase="notify")["replayed"]
+    assert restored.execute("slack.request", inputs, step="notify")["replayed"]
 
 
 @pytest.mark.parametrize("decision", ["deny", "revise", "allow-wrong-digest"])
@@ -81,7 +81,7 @@ def test_denied_proposals_never_resolve_credentials(tmp_path, decision):
         broker.execute(
             "slack.request",
             {"method": "POST", "path": "/api/chat.postMessage"},
-            phase="notify",
+            step="notify",
         )
 
 
@@ -99,9 +99,9 @@ def test_transport_failure_is_durable_and_not_replayed(tmp_path):
         "body": {"text": "Hello"},
     }
     with pytest.raises(IntegrationError):
-        broker.execute("slack.request", inputs, phase="notify")
+        broker.execute("slack.request", inputs, step="notify")
     with pytest.raises(IntegrationError, match="uncertain"):
-        broker.execute("slack.request", inputs, phase="notify")
+        broker.execute("slack.request", inputs, step="notify")
     assert len(calls) == 1
 
 
@@ -116,7 +116,7 @@ def test_integration_failure_records_the_http_status_as_detail(tmp_path):
         "body": {"text": "Hello"},
     }
     with pytest.raises(IntegrationError):
-        broker.execute("slack.request", inputs, phase="notify")
+        broker.execute("slack.request", inputs, step="notify")
 
     journal = json.loads((tmp_path / ".broker" / "journal.json").read_text())
     failed = next(e for e in journal["events"] if e["event_type"] == "integration.failed")
@@ -135,7 +135,7 @@ def test_integration_failure_detail_is_scrubbed_of_credential_shaped_text(tmp_pa
         "body": {"text": "Hello"},
     }
     with pytest.raises(ExecutionError):
-        broker.execute("slack.request", inputs, phase="notify")
+        broker.execute("slack.request", inputs, step="notify")
 
     journal = json.loads((tmp_path / ".broker" / "journal.json").read_text())
     failed = next(e for e in journal["events"] if e["event_type"] == "integration.failed")
@@ -150,7 +150,7 @@ def test_provider_errors_fail_safely(tmp_path):
         lambda _: httpx.Response(200, json={"ok": False, "error": "invalid_auth"})
     )
     with pytest.raises(IntegrationError, match=r"provider rejected.*invalid_auth"):
-        broker.execute("slack.request", {"method": "GET", "path": "/api/failure"}, phase="notify")
+        broker.execute("slack.request", {"method": "GET", "path": "/api/failure"}, step="notify")
 
     broker.executor.transport = httpx.MockTransport(
         lambda _: httpx.Response(
@@ -159,7 +159,7 @@ def test_provider_errors_fail_safely(tmp_path):
     )
     with pytest.raises(IntegrationError, match=r"provider rejected the request$"):
         broker.execute(
-            "slack.request", {"method": "GET", "path": "/api/unsafe-failure"}, phase="notify"
+            "slack.request", {"method": "GET", "path": "/api/unsafe-failure"}, step="notify"
         )
 
 
@@ -170,7 +170,7 @@ def test_provider_echo_cannot_disclose_injected_credential(tmp_path):
             200, json={"headers": {"Authorization": request.headers["Authorization"]}}
         ),
     )
-    result = broker.execute("slack.request", {"method": "GET", "path": "/api/echo"}, phase="notify")
+    result = broker.execute("slack.request", {"method": "GET", "path": "/api/echo"}, step="notify")
     assert "private-token" not in json.dumps(result)
     assert "credential withheld" in json.dumps(result)
 
@@ -185,13 +185,13 @@ def test_budget_methods_and_origin_cannot_be_expanded(tmp_path):
         {"method": "GET", "path": "https://evil.example/api"},
     ]:
         with pytest.raises(IntegrationError):
-            broker.execute("slack.request", inputs, phase="notify")
+            broker.execute("slack.request", inputs, step="notify")
     with pytest.raises(IntegrationError, match="budget"):
-        broker.execute("slack.request", {"method": "GET", "path": "/api/new"}, phase="notify")
+        broker.execute("slack.request", {"method": "GET", "path": "/api/new"}, step="notify")
 
 
 def test_reads_skip_the_step_policy_review(tmp_path):
     reviewed = []
     broker = executor(tmp_path, lambda proposal: reviewed.append(proposal) or allow(proposal))
-    broker.execute("slack.request", {"method": "GET", "path": "/api/users.list"}, phase="notify")
+    broker.execute("slack.request", {"method": "GET", "path": "/api/users.list"}, step="notify")
     assert reviewed == []

@@ -56,6 +56,6 @@ def test_local_vault_resolves_structured_credentials_for_executor(
         resolver=local_credential_resolver(tmp_path),
         transport=httpx.MockTransport(handler),
     )
-    result = executor.execute("tickets.create", {"title": "Test"}, phase="intake")
+    result = executor.execute("tickets.create", {"title": "Test"}, step="intake")
     assert seen["authorization"].startswith("Basic ")
     assert "secret" not in json.dumps(result)
