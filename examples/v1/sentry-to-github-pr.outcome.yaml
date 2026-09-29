@@ -46,7 +46,9 @@ steps:
         reason?: string
 
   - announce:
-      with: fix.pr
-      reason: "Reply in the alert's thread with the PR link and a one-line summary of the fix."
+      with: fix   # the PR, or the reason there is none
+      reason: >
+        Reply in the alert's thread with the PR link and a one-line summary of
+        the fix, or, if there is no PR, the reason.
       can:
         - slack.post: {channel: sentry, thread_ts: triage.calls.slack.post.ts}

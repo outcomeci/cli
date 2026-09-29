@@ -57,7 +57,10 @@ steps:
         reason?: string
 
   - announce:
-      with: implement.pr   # a list: one PR per repo
-      reason: "Post every PR link, with a one-line summary each, in the plan's thread."
+      # One result per repo, in the plan's order: a PR, or the reason there is none.
+      with: [implement, discuss.plan]
+      reason: >
+        Post one line per repository in the plan's thread: its PR link with a
+        one-line summary, or, where there is no PR, the reason.
       can:
         - slack.post: {channel: trigger.channel, thread_ts: trigger.ts}
