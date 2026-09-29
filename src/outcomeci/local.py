@@ -28,14 +28,10 @@ from .contracts import FORMAT_CHECKER, ContractError, validate_trigger_payload
 from .execution_events import event, safe_text
 from .integrations import CredentialResolver, IntegrationExecutor
 from .manifest import build_manifest
-from .outcome import (
-    _select_sessions,
-    _session_details,
-    _transcripts,
-    _validate_trajectory,
-)
+from .outcome import _validate_trajectory
 from .process import ExecutionError, invoke
 from .security import atomic_write_json
+from .transcripts import _select_sessions, _session_details, _transcripts
 
 
 @dataclass

@@ -5,16 +5,16 @@ import json
 import httpx
 import pytest
 import yaml
+from lowered import compile_file
 from test_typed_contracts import email_payload, typed_workflow
 
 from outcomeci import capability, local, policy
-from outcomeci.config import compile_workflow
 from outcomeci.integrations import IntegrationError, IntegrationExecutor
 from outcomeci.process import ExecutionError
 
 
 def executor(root, reviewer=None, handler=None):
-    compiled = compile_workflow(typed_workflow(root))
+    compiled = compile_file(typed_workflow(root))
     compiled["workflow"]["spec"]["connections"][0]["allow_private_network"] = True
     inner = IntegrationExecutor(
         compiled,

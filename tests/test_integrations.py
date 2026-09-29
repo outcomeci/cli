@@ -10,8 +10,9 @@ import pytest
 import yaml
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from lowered import compile_file
 
-from outcomeci.config import ConfigError, compile_workflow
+from outcomeci.config import ConfigError
 from outcomeci.integrations import (
     IntegrationError,
     IntegrationExecutor,
@@ -105,7 +106,7 @@ def workflow(tmp_path: Path) -> Path:
 
 
 def test_compiles_phase_scoped_capability(tmp_path: Path) -> None:
-    compiled = compile_workflow(workflow(tmp_path))
+    compiled = compile_file(workflow(tmp_path))
     assert compiled["instructions"]["phases"]["intake"]["capabilities"] == ["tickets.create"]
     assert compiled["instructions"]["phases"]["intake"]["humans"]["after"][0]["id"] == (
         "confirm_scope"
@@ -114,7 +115,7 @@ def test_compiles_phase_scoped_capability(tmp_path: Path) -> None:
 
 
 def test_operation_policy_is_discoverable_and_audited(tmp_path: Path) -> None:
-    compiled = compile_workflow(workflow(tmp_path))
+    compiled = compile_file(workflow(tmp_path))
     executor = IntegrationExecutor(
         compiled,
         resolver=lambda _reference: "secret",
@@ -130,7 +131,7 @@ def test_operation_policy_is_discoverable_and_audited(tmp_path: Path) -> None:
 
 
 def test_dry_run_includes_api_and_humans_without_credentials_or_io(tmp_path: Path) -> None:
-    result = IntegrationExecutor(compile_workflow(workflow(tmp_path))).dry_run("intake")
+    result = IntegrationExecutor(compile_file(workflow(tmp_path))).dry_run("intake")
     assert [item["name"] for item in result["api"]] == ["tickets.create"]
     assert result["humans"][0]["id"] == "confirm_scope"
     assert result["credentials_resolved"] is False
@@ -139,7 +140,7 @@ def test_dry_run_includes_api_and_humans_without_credentials_or_io(tmp_path: Pat
 
 
 def test_doctor_reports_credential_presence_without_value(tmp_path: Path, monkeypatch) -> None:
-    compiled = compile_workflow(workflow(tmp_path))
+    compiled = compile_file(workflow(tmp_path))
     assert doctor(compiled)["summary"] == {"passed": 0, "failed": 1}
     monkeypatch.setenv("TICKET_TOKEN", "top-secret")
     result = doctor(compiled)
@@ -159,7 +160,7 @@ def test_doctor_passes_basic_auth_type_with_preencoded_value_credential(
     }
     path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
 
-    result = doctor(compile_workflow(path), resolver=lambda _reference: {"value": "cGFpcg=="})
+    result = doctor(compile_file(path), resolver=lambda _reference: {"value": "cGFpcg=="})
 
     shape_check = next(check for check in result["checks"] if check["check"] == "credential_shape")
     assert shape_check["status"] == "pass"
@@ -175,7 +176,7 @@ def test_doctor_flags_basic_auth_type_paired_with_shapeless_credential(tmp_path:
     }
     path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
 
-    result = doctor(compile_workflow(path), resolver=lambda _reference: {"client_id": "abc"})
+    result = doctor(compile_file(path), resolver=lambda _reference: {"client_id": "abc"})
 
     shape_check = next(check for check in result["checks"] if check["check"] == "credential_shape")
     assert shape_check["status"] == "fail"
@@ -194,7 +195,7 @@ def test_doctor_passes_basic_auth_type_with_matching_username_password_credentia
     path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
 
     result = doctor(
-        compile_workflow(path),
+        compile_file(path),
         resolver=lambda _reference: {"username": "u", "password": "p"},
     )
 
@@ -211,7 +212,7 @@ def test_doctor_passes_bearer_auth_type_with_matching_credential(tmp_path: Path)
     }
     path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
 
-    result = doctor(compile_workflow(path), resolver=lambda _reference: {"value": "token"})
+    result = doctor(compile_file(path), resolver=lambda _reference: {"value": "token"})
 
     shape_check = next(check for check in result["checks"] if check["check"] == "credential_shape")
     assert shape_check["status"] == "pass"
@@ -219,7 +220,7 @@ def test_doctor_passes_bearer_auth_type_with_matching_credential(tmp_path: Path)
 
 def test_http_failure_has_stable_safe_taxonomy(tmp_path: Path) -> None:
     executor = IntegrationExecutor(
-        compile_workflow(workflow(tmp_path)),
+        compile_file(workflow(tmp_path)),
         resolver=lambda _reference: "secret",
         transport=httpx.MockTransport(lambda _request: httpx.Response(403, text="private")),
     )
@@ -251,7 +252,7 @@ def test_versioned_local_integration_package_is_merged_and_pinned(tmp_path: Path
     package.write_text(yaml.safe_dump(package_definition, sort_keys=False))
     value["spec"]["integration_packages"] = [{"path": ".outcomeci/integrations/tickets.yml"}]
     path.write_text(yaml.safe_dump(value, sort_keys=False))
-    compiled = compile_workflow(path)
+    compiled = compile_file(path)
     assert "tickets.create" in IntegrationExecutor(compiled).capabilities("intake")
     assert compiled["workflow"]["spec"]["integration_packages"][0]["version"] == "1.2.0"
 
@@ -268,7 +269,7 @@ def test_executes_with_credential_but_returns_only_projected_output(tmp_path: Pa
         )
 
     executor = IntegrationExecutor(
-        compile_workflow(workflow(tmp_path)),
+        compile_file(workflow(tmp_path)),
         resolver=lambda _reference: "top-secret",
         transport=httpx.MockTransport(handler),
     )
@@ -290,7 +291,7 @@ def test_execute_emits_diagnostic_markers_bracketing_the_network_call(
         return httpx.Response(201, json={"id": "T-1", "url": "https://example.test/T-1"})
 
     executor = IntegrationExecutor(
-        compile_workflow(workflow(tmp_path)),
+        compile_file(workflow(tmp_path)),
         resolver=lambda _reference: "top-secret",
         transport=httpx.MockTransport(handler),
     )
@@ -322,7 +323,7 @@ def test_bearer_auth_type_honors_credential_scheme_override(tmp_path: Path) -> N
         return httpx.Response(201, json={"id": "T-1", "url": "https://example.test/T-1"})
 
     executor = IntegrationExecutor(
-        compile_workflow(path),
+        compile_file(path),
         resolver=lambda _reference: {"value": "discord-bot-token", "scheme": "Bot"},
         transport=httpx.MockTransport(handler),
     )
@@ -346,7 +347,7 @@ def test_basic_auth_type_sends_preencoded_value_credential_unmodified(tmp_path: 
         return httpx.Response(201, json={"id": "T-1", "url": "https://example.test/T-1"})
 
     executor = IntegrationExecutor(
-        compile_workflow(path),
+        compile_file(path),
         resolver=lambda _reference: {"value": "ZW1haWwvdG9rZW46c2VjcmV0"},
         transport=httpx.MockTransport(handler),
     )
@@ -370,7 +371,7 @@ def test_basic_auth_type_still_encodes_username_password_credential(tmp_path: Pa
         return httpx.Response(201, json={"id": "T-1", "url": "https://example.test/T-1"})
 
     executor = IntegrationExecutor(
-        compile_workflow(path),
+        compile_file(path),
         resolver=lambda _reference: {"username": "user", "password": "pass"},
         transport=httpx.MockTransport(handler),
     )
@@ -381,7 +382,7 @@ def test_basic_auth_type_still_encodes_username_password_credential(tmp_path: Pa
 
 def test_rejects_undeclared_capability_and_invalid_input(tmp_path: Path) -> None:
     executor = IntegrationExecutor(
-        compile_workflow(workflow(tmp_path)),
+        compile_file(workflow(tmp_path)),
         resolver=lambda _reference: "secret",
         transport=httpx.MockTransport(lambda _request: httpx.Response(200, json={})),
     )
@@ -399,7 +400,7 @@ def test_rejects_absolute_operation_path(tmp_path: Path) -> None:
     )
     path.write_text(yaml.safe_dump(value), encoding="utf-8")
     with pytest.raises(ConfigError, match="relative absolute-path"):
-        compile_workflow(path)
+        compile_file(path)
 
 
 def test_oauth2_token_exchange_defaults_to_client_credentials_grant(tmp_path: Path) -> None:
@@ -421,7 +422,7 @@ def test_oauth2_token_exchange_defaults_to_client_credentials_grant(tmp_path: Pa
         return httpx.Response(201, json={"id": "T-1", "url": "https://example.test/T-1"})
 
     executor = IntegrationExecutor(
-        compile_workflow(path),
+        compile_file(path),
         resolver=lambda _reference: {"client_id": "abc", "client_secret": "shh"},
         transport=httpx.MockTransport(handler),
     )
@@ -454,7 +455,7 @@ def test_oauth2_token_exchange_passes_configured_grant_type_and_account_id(
         return httpx.Response(201, json={"id": "T-1", "url": "https://example.test/T-1"})
 
     executor = IntegrationExecutor(
-        compile_workflow(path),
+        compile_file(path),
         resolver=lambda _reference: {"client_id": "abc", "client_secret": "shh"},
         transport=httpx.MockTransport(handler),
     )
@@ -478,7 +479,7 @@ def test_oauth2_rejects_unsupported_grant_type(tmp_path: Path) -> None:
     }
     path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
     with pytest.raises(ConfigError, match="grant_type is unsupported"):
-        compile_workflow(path)
+        compile_file(path)
 
 
 def test_oauth2_refresh_token_grant_sends_credential_refresh_token(tmp_path: Path) -> None:
@@ -502,7 +503,7 @@ def test_oauth2_refresh_token_grant_sends_credential_refresh_token(tmp_path: Pat
         return httpx.Response(201, json={"id": "T-1", "url": "https://example.test/T-1"})
 
     executor = IntegrationExecutor(
-        compile_workflow(path),
+        compile_file(path),
         resolver=lambda _reference: {
             "client_id": "abc",
             "client_secret": "shh",
@@ -532,7 +533,7 @@ def test_oauth2_refresh_token_grant_requires_refresh_token_credential(tmp_path: 
     path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
 
     executor = IntegrationExecutor(
-        compile_workflow(path),
+        compile_file(path),
         resolver=lambda _reference: {"client_id": "abc", "client_secret": "shh"},
         transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={})),
     )
@@ -551,7 +552,7 @@ def test_oidc_rejects_unsupported_grant_type(tmp_path: Path) -> None:
     }
     path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
     with pytest.raises(ConfigError, match="grant_type is unsupported"):
-        compile_workflow(path)
+        compile_file(path)
 
 
 def test_oauth2_account_credentials_requires_account_id(tmp_path: Path) -> None:
@@ -565,7 +566,7 @@ def test_oauth2_account_credentials_requires_account_id(tmp_path: Path) -> None:
     }
     path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
     with pytest.raises(ConfigError, match="account_id is required"):
-        compile_workflow(path)
+        compile_file(path)
 
 
 def _decode_segment(segment: str) -> bytes:
@@ -600,7 +601,7 @@ def test_jwt_bearer_signs_assertion_and_exchanges_for_bearer_token(tmp_path: Pat
         return httpx.Response(201, json={"id": "T-1", "url": "https://example.test/T-1"})
 
     executor = IntegrationExecutor(
-        compile_workflow(path),
+        compile_file(path),
         resolver=lambda _reference: {
             "issuer": "sa@project.iam.gserviceaccount.com",
             "private_key": pem,
@@ -654,7 +655,7 @@ def test_jwt_bearer_includes_subject_for_domain_wide_delegation(tmp_path: Path) 
         return httpx.Response(201, json={"id": "T-1", "url": "https://example.test/T-1"})
 
     executor = IntegrationExecutor(
-        compile_workflow(path),
+        compile_file(path),
         resolver=lambda _reference: {
             "issuer": "consumer-key",
             "subject": "integration@example.com",
@@ -682,7 +683,7 @@ def test_jwt_bearer_rejects_unsupported_algorithm(tmp_path: Path) -> None:
     path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
 
     executor = IntegrationExecutor(
-        compile_workflow(path),
+        compile_file(path),
         resolver=lambda _reference: {"issuer": "sa@example.com", "algorithm": "HS256"},
         transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={})),
     )
@@ -712,7 +713,7 @@ def test_jwt_bearer_rejects_non_rsa_key(tmp_path: Path) -> None:
     path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
 
     executor = IntegrationExecutor(
-        compile_workflow(path),
+        compile_file(path),
         resolver=lambda _reference: {"issuer": "sa@example.com", "private_key": pem},
         transport=httpx.MockTransport(lambda _r: httpx.Response(200, json={})),
     )
@@ -731,7 +732,7 @@ def test_jwt_bearer_rejects_malformed_private_key(tmp_path: Path) -> None:
     path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
 
     executor = IntegrationExecutor(
-        compile_workflow(path),
+        compile_file(path),
         resolver=lambda _reference: {
             "issuer": "sa@example.com",
             "private_key": "not-a-pem-key",
@@ -751,7 +752,7 @@ def test_jwt_bearer_requires_token_url(tmp_path: Path) -> None:
     }
     path.write_text(yaml.safe_dump(value, sort_keys=False), encoding="utf-8")
     with pytest.raises(ConfigError, match="token_url is required"):
-        compile_workflow(path)
+        compile_file(path)
 
 
 def test_patch_has_lineage_and_requires_current_parent(tmp_path: Path) -> None:
@@ -801,7 +802,7 @@ def test_full_access_stays_inside_origin_and_method_policy(tmp_path: Path) -> No
         return httpx.Response(200, json={"items": [1, 2], "secret": "hidden"})
 
     executor = IntegrationExecutor(
-        compile_workflow(path),
+        compile_file(path),
         resolver=lambda _reference: "top-secret",
         transport=httpx.MockTransport(handler),
     )
@@ -834,7 +835,7 @@ def test_full_access_description_grounds_the_agent_in_the_real_origin(tmp_path: 
     }
     path.write_text(yaml.safe_dump(value), encoding="utf-8")
 
-    executor = IntegrationExecutor(compile_workflow(path), resolver=lambda _reference: "secret")
+    executor = IntegrationExecutor(compile_file(path), resolver=lambda _reference: "secret")
     description = executor.describe("tickets.request")["description"]
 
     assert "https://api.example.test" in description
@@ -884,4 +885,4 @@ def test_imports_allowlisted_openapi_operations_as_patch(tmp_path: Path) -> None
         transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=document)),
     )
     assert list(patch["spec"]["operations"]["add"]) == ["tickets.createticket"]
-    assert patch["metadata"]["parentRevision"] == compile_workflow(path)["workflow_revision"]
+    assert patch["metadata"]["parentRevision"] == compile_file(path)["workflow_revision"]

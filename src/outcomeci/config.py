@@ -453,8 +453,6 @@ def _triggers(value: Any) -> dict[str, dict[str, Any]]:
         if trigger_type not in TRIGGER_TYPES:
             raise ConfigError(f"{field}.type is unsupported")
         if trigger_type == "webhook.received":
-            from .webhooks import validate_delivery_config
-
             normalized[name] = {
                 "type": trigger_type,
                 **validate_delivery_config(trigger),
@@ -1400,9 +1398,20 @@ def _instructions(root: Path, value: Any, field: str) -> dict[str, Any]:
 
 
 def compile_workflow(path: Path) -> dict[str, Any]:
-    document = load(path)
+    return _compile(load(path), path.parent)
+
+
+def compile_lowered(document: dict[str, Any], path: Path) -> dict[str, Any]:
+    """Compile a document already in the lowered phase-graph shape.
+
+    `path` is where the document would live: instruction and schema files
+    resolve beside it."""
+    return _compile(validate_lowered(document, path, lowered=True), path.parent)
+
+
+def _compile(document: dict[str, Any], root: Path) -> dict[str, Any]:
     graph = document.pop("_graph")
-    spec, root = document["spec"], path.parent
+    spec = document["spec"]
     orchestrator_name = graph["orchestrator"]
     orchestrator_config = graph["orchestrator_config"]
     orchestrator = _instructions(
@@ -1511,3 +1520,27 @@ def compile_workflow(path: Path) -> dict[str, Any]:
         "workflow_revision": revision,
         **revision_input,
     }
+
+
+def validate_delivery_config(value: dict[str, Any]) -> dict[str, Any]:
+    if set(value) - {"type", "delivery", "receiver"} or value.get("delivery", "queued") != "queued":
+        raise ConfigError("Webhooks support asynchronous queued delivery only")
+    config: dict[str, Any] = {"type": "webhook.received", "delivery": "queued"}
+    receiver = value.get("receiver")
+    if receiver is not None:
+        # A provider that verifies and translates the request before it is
+        # queued: its name, the vault reference of its signing secret, and the
+        # events that start a run.
+        if (
+            not isinstance(receiver, dict)
+            or set(receiver) != {"uses", "secret", "events"}
+            or not isinstance(receiver["uses"], str)
+            or not isinstance(receiver["secret"], str)
+            or not receiver["secret"].startswith("vault:")
+            or not isinstance(receiver["events"], list)
+            or not receiver["events"]
+            or not all(isinstance(event, str) for event in receiver["events"])
+        ):
+            raise ConfigError("webhook receiver needs uses, a vault: secret and events")
+        config["receiver"] = dict(receiver)
+    return config

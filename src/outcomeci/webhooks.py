@@ -14,37 +14,12 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from .config import validate_delivery_config  # noqa: F401
 from .process import ExecutionError
 
 
 class ListenerUnavailable(ExecutionError):
     """Transient transport failure; safe to retry registration/claim only."""
-
-
-def validate_delivery_config(value: dict[str, Any]) -> dict[str, Any]:
-    from .config import ConfigError
-
-    if set(value) - {"type", "delivery", "receiver"} or value.get("delivery", "queued") != "queued":
-        raise ConfigError("Webhooks support asynchronous queued delivery only")
-    config: dict[str, Any] = {"type": "webhook.received", "delivery": "queued"}
-    receiver = value.get("receiver")
-    if receiver is not None:
-        # A provider that verifies and translates the request before it is
-        # queued: its name, the vault reference of its signing secret, and the
-        # events that start a run.
-        if (
-            not isinstance(receiver, dict)
-            or set(receiver) != {"uses", "secret", "events"}
-            or not isinstance(receiver["uses"], str)
-            or not isinstance(receiver["secret"], str)
-            or not receiver["secret"].startswith("vault:")
-            or not isinstance(receiver["events"], list)
-            or not receiver["events"]
-            or not all(isinstance(event, str) for event in receiver["events"])
-        ):
-            raise ConfigError("webhook receiver needs uses, a vault: secret and events")
-        config["receiver"] = dict(receiver)
-    return config
 
 
 def _save(path: Path, value: dict[str, Any]) -> None:

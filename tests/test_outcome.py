@@ -3,7 +3,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from outcomeci import outcome
+from outcomeci import outcome, transcripts
 from outcomeci import outcome as outcome_module
 from outcomeci.outcome import (
     _claim,
@@ -111,7 +111,7 @@ def test_interactive_transcript_captures_only_bytes_after_begin(
     session.write_text(prefix)
     offset = session.stat().st_size
     session.write_text(prefix + '{"usage":{"input_tokens":12,"output_tokens":4}}\n')
-    monkeypatch.setattr(outcome, "_sessions", lambda agent: [session])
+    monkeypatch.setattr(transcripts, "_sessions", lambda agent: [session])
 
     captured = _transcripts(
         "codex",
