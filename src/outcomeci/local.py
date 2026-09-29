@@ -881,7 +881,16 @@ def _step_invocations(
             result_path=result_path,
             grants=grants,
         )
-        invocations.append((prompt, {"bound": bound, "grants": grants}))
+        invocations.append(
+            (
+                prompt,
+                {
+                    "bound": bound,
+                    "grants": grants,
+                    "inputs": v1_runtime.inputs(root, state, step_block, bound),
+                },
+            )
+        )
     return invocations
 
 
@@ -1029,6 +1038,7 @@ def _run_phase(
                 policy_reviewer=policy_reviewer,
                 grants=(scope or {}).get("grants"),
                 container_isolated=_container_isolated,
+                inputs=(scope or {}).get("inputs"),
             ) as capability_env:
                 summaries.append(
                     invoke(
