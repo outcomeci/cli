@@ -18,8 +18,8 @@ def test_publish_uses_trusted_publishing() -> None:
     assert "id-token: write" in source
     assert "pypa/gh-action-pypi-publish@release/v1" in source
     assert "environment: pypi" in source
-    assert "outcomeci/spareparts-changelog@v0" in source
-    assert "releases/outcomeci-cli/" in source
+    assert "spareparts-changelog" not in source
+    assert "gh release create" in source and "--generate-notes" in source
     assert "codeartifact login --tool pip" in source
     assert "python -m build" not in source
     assert "gh workflow run homebrew.yml" in source
