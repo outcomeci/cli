@@ -67,12 +67,12 @@ def _continue(
     """With auto_continue, drive each ready step in turn."""
     from . import local
 
-    phase_count = len(compiled["instructions"]["phases"]) if auto_continue else 0
-    while auto_continue and len(result.get("completed_phases", [])) != phase_count:
-        if not result.get("ready_phases") or result.get("status") == "completed":
+    step_count = len(compiled["instructions"]["phases"]) if auto_continue else 0
+    while auto_continue and len(result.get("completed_steps", [])) != step_count:
+        if not result.get("ready_steps") or result.get("status") == "completed":
             break
-        next_phase = result["ready_phases"][0]
-        print(f"Continuing into step {next_phase!r}...", file=sys.stderr)
+        next_step = result["ready_steps"][0]
+        print(f"Continuing into step {next_step!r}...", file=sys.stderr)
         result = local.continue_run(root, config, result["run_id"], approve=True, options=options)
     return result
 

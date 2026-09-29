@@ -85,8 +85,8 @@ def _two_steps(monkeypatch):
     first = {
         "run_id": "run-1",
         "status": "awaiting_confirmation",
-        "completed_phases": ["resolve_analytics"],
-        "ready_phases": ["notify"],
+        "completed_steps": ["resolve_analytics"],
+        "ready_steps": ["notify"],
     }
     monkeypatch.setattr("outcomeci.local.trigger", lambda *args, **kwargs: first)
     return compiled
@@ -98,7 +98,7 @@ def test_auto_continue_drives_through_ready_steps(monkeypatch, tmp_path):
 
     def continue_run(root, config, run_id, *, approve, options):
         calls.append((run_id, approve, options))
-        return {"run_id": run_id, "status": "completed", "completed_phases": ["a", "b"]}
+        return {"run_id": run_id, "status": "completed", "completed_steps": ["a", "b"]}
 
     monkeypatch.setattr("outcomeci.local.continue_run", continue_run)
     options = object()
@@ -106,7 +106,7 @@ def test_auto_continue_drives_through_ready_steps(monkeypatch, tmp_path):
         tmp_path, tmp_path / "outcome.yml", compiled, "daily", {}, options, auto_continue=True
     )
 
-    assert result["completed_phases"] == ["a", "b"]
+    assert result["completed_steps"] == ["a", "b"]
     assert calls == [("run-1", True, options)]
 
 
@@ -118,7 +118,7 @@ def test_without_auto_continue_the_run_stops_after_the_first_step(monkeypatch, t
     result = run_container.execute(
         tmp_path, tmp_path / "outcome.yml", compiled, "daily", {}, object(), auto_continue=False
     )
-    assert result["completed_phases"] == ["resolve_analytics"]
+    assert result["completed_steps"] == ["resolve_analytics"]
 
 
 IMAGE_COMPILED = {
@@ -562,7 +562,7 @@ def test_retry_refuses_a_run_that_did_not_fail(monkeypatch, image_env):
 def test_resume_records_an_interrupted_run_before_retrying(monkeypatch, tmp_path):
     from outcomeci import local
 
-    local._write(tmp_path, {"run_id": "run-1", "status": "running", "phase": "implement"})
+    local._write(tmp_path, {"run_id": "run-1", "status": "running", "step": "implement"})
     retried = mock.Mock(return_value={"run_id": "run-1", "status": "completed"})
     monkeypatch.setattr(local, "retry", retried)
 

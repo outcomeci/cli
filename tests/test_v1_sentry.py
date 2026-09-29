@@ -217,8 +217,8 @@ def test_approved_alert_runs_every_step_inside_its_grants(workflow, monkeypatch)
     result = _run(workflow, agent, monkeypatch, reviews)
 
     assert result["status"] == "completed"
-    assert result["completed_phases"] == ["triage", "approve", "fix", "announce"]
-    assert result.get("skipped_phases", []) == []
+    assert result["completed_steps"] == ["triage", "approve", "fix", "announce"]
+    assert result.get("skipped_steps", []) == []
     posts = [
         json.loads(item.content) for item in services.sent("slack.com", "/api/chat.postMessage")
     ]
@@ -276,7 +276,7 @@ def test_no_op_triage_skips_the_approval_fix_and_announcement(workflow, monkeypa
     result = _run(workflow, Agent(decision="no_op"), monkeypatch)
 
     assert result["status"] == "completed"
-    assert result["skipped_phases"] == ["approve", "fix", "announce"]
+    assert result["skipped_steps"] == ["approve", "fix", "announce"]
     assert result["skip_reasons"]["announce"] == "reads skipped step fix"
     assert not services.sent("slack.com", "/api/reactions.get")
     assert len(services.sent("slack.com", "/api/chat.postMessage")) == 1
@@ -291,7 +291,7 @@ def test_an_expired_approval_skips_everything_after_it(workflow, monkeypatch):
     result = _run(workflow, Agent(), monkeypatch)
 
     assert result["status"] == "completed"
-    assert result["skipped_phases"] == ["approve", "fix", "announce"]
+    assert result["skipped_steps"] == ["approve", "fix", "announce"]
     assert not services.sent("api.github.com", "/repos/outcomeci/cli/pulls")
     interaction = json.loads(
         (

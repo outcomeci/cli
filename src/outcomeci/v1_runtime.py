@@ -158,7 +158,7 @@ def holds(root: Path, state: dict[str, Any], when: dict[str, Any] | None) -> boo
 def skip_reason(root: Path, state: dict[str, Any], phase_block: dict[str, Any]) -> str | None:
     """Why a step does not run: it reads a skipped step, reads an output an earlier
     step left out (an optional `?` output), or its `when:` fails."""
-    skipped = set(state.get("skipped_phases", []))
+    skipped = set(state.get("skipped_steps", []))
     upstream = sorted(skipped & set(phase_block.get("reads", [])))
     if upstream:
         return f"reads skipped step {upstream[0]}"

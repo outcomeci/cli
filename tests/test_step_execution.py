@@ -71,7 +71,7 @@ def test_the_run_keeps_the_exact_trigger_payload(tmp_path, workflow, monkeypatch
     state = local.trigger(tmp_path, workflow, "email", payload, options=OPTIONS)
     payload["subject"] = "Changed later"
     assert state["trigger"]["value"]["subject"] == "Receipt arrived"
-    assert state["phase"] == "summarize"
+    assert state["step"] == "summarize"
 
 
 def test_a_step_needs_a_scoped_credential_resolver(tmp_path, workflow):

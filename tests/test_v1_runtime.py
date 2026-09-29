@@ -136,7 +136,7 @@ def test_a_failed_await_is_retried_by_the_runtime_never_by_an_agent(workflow, mo
         sentry._run(workflow, agent, monkeypatch)
     run = next((workflow / ".outcomeci/outcomes").glob("*/run.json"))
     state = json.loads(run.read_text())
-    assert (state["status"], state["phase"]) == ("error", "approve")
+    assert (state["status"], state["step"]) == ("error", "approve")
 
     options = local.ExecutionOptions(
         credential_resolver=lambda ref: "xoxb-test-credential",
@@ -151,7 +151,7 @@ def test_a_failed_await_is_retried_by_the_runtime_never_by_an_agent(workflow, mo
     while state["status"] == "awaiting_confirmation":
         state = local.continue_run(workflow, config, state["run_id"], approve=True, options=options)
 
-    assert state["completed_phases"] == ["triage", "approve", "fix", "announce"]
+    assert state["completed_steps"] == ["triage", "approve", "fix", "announce"]
     assert "approve" not in agent.prompts
     interaction = (
         workflow / ".outcomeci/outcomes" / state["run_id"] / "interactions/approve/approve.json"
@@ -163,7 +163,7 @@ def test_an_agent_is_never_run_for_a_runtime_step(workflow, monkeypatch):
     services = sentry.Services()
     sentry._serve(monkeypatch, services)
     config = workflow / sentry.WORKFLOW
-    state = {"run_id": "r1", "phase": "approve", "status": "queued", "intent": "x"}
+    state = {"run_id": "r1", "step": "approve", "status": "queued", "intent": "x"}
     local._write(workflow, state)
     with pytest.raises(ExecutionError, match="driven by the runtime"):
         local._execute(
@@ -198,7 +198,7 @@ def test_a_fix_without_a_pull_request_announces_why(workflow, monkeypatch):
     result = sentry._run(workflow, agent, monkeypatch)
 
     assert result["status"] == "completed"
-    assert "announce" in result["completed_phases"]
+    assert "announce" in result["completed_steps"]
     inputs = {item["name"]: item["value"] for item in agent.prompts["announce"]["inputs"]}
     assert inputs["fix"] == {"reason": "unclear root cause"}
 
@@ -239,7 +239,7 @@ def test_a_reply_left_unanswered_by_a_crash_is_answered_on_retry(tmp_path, monke
     with pytest.raises(ExecutionError, match="converse turn"):
         slack_example._run(root, slack, Scripted([None, None]), monkeypatch)
     state = json.loads(next((root / ".outcomeci/outcomes").glob("*/run.json")).read_text())
-    assert (state["status"], state["phase"]) == ("error", "discuss")
+    assert (state["status"], state["step"]) == ("error", "discuss")
 
     agent = slack_example.Agent()
     monkeypatch.setattr(local, "invoke", agent)

@@ -368,7 +368,7 @@ class IntegrationExecutor:
         if policy is None:
             raise IntegrationError(
                 "integration.phase_not_found",
-                f"workflow has no phase {phase}",
+                f"workflow has no step {phase}",
                 category="configuration",
             )
         return list(policy.get("capabilities", []))
@@ -424,11 +424,11 @@ class IntegrationExecutor:
         }
 
     def dry_run(self, phase: str) -> dict[str, Any]:
-        """Describe the phase's authorized effects without resolving credentials or doing I/O."""
+        """Describe the step's authorized effects without resolving credentials or doing I/O."""
         if phase not in self.compiled["instructions"]["phases"]:
             raise IntegrationError(
                 "integration.phase_not_found",
-                f"workflow has no phase {phase}",
+                f"workflow has no step {phase}",
                 category="configuration",
             )
         return {
@@ -518,7 +518,7 @@ class IntegrationExecutor:
         if capability not in self.capabilities(phase):
             raise IntegrationError(
                 "integration.capability_denied",
-                f"capability {capability} is not authorized for phase {phase}",
+                f"capability {capability} is not authorized for step {phase}",
                 category="policy",
             )
         integration_name, operation_name = capability.split(".", 1)

@@ -317,13 +317,13 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
 
         result = execute_call(call_trigger)
         run_id = str(result["run_id"])
-        phase_count = len(compile_workflow(config)["instructions"]["phases"])
-        while len(result.get("completed_phases", [])) != phase_count:
+        step_count = len(compile_workflow(config)["instructions"]["phases"])
+        while len(result.get("completed_steps", [])) != step_count:
             if heartbeat_failure:
                 raise CoreError("policy_evidence_upload_failed", True)
             if result.get("status") == "error":
                 raise ContractError("workflow recorded an error")
-            if not result.get("ready_phases"):
+            if not result.get("ready_steps"):
                 raise ContractError("workflow requires a durable continuation")
             result = execute_call(call_continue)
         if heartbeat_failure:

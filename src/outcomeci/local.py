@@ -74,9 +74,9 @@ def _ready(compiled: dict[str, Any], completed: list[str]) -> list[str]:
     )
 
 
-def _phase_states(compiled: dict[str, Any], state: dict[str, Any]) -> dict[str, str]:
-    completed = set(state.get("completed_phases", []))
-    skipped = set(state.get("skipped_phases", []))
+def _step_states(compiled: dict[str, Any], state: dict[str, Any]) -> dict[str, str]:
+    completed = set(state.get("completed_steps", []))
+    skipped = set(state.get("skipped_steps", []))
     ready = set(_ready(compiled, list(completed)))
     return {
         name: (
@@ -86,7 +86,7 @@ def _phase_states(compiled: dict[str, Any], state: dict[str, Any]) -> dict[str, 
             if name in completed
             else (
                 "active"
-                if name == state.get("phase") and state.get("status") == "running"
+                if name == state.get("step") and state.get("status") == "running"
                 else "queued"
                 if name in ready
                 else "blocked"
@@ -318,7 +318,7 @@ def _finish_interaction(
     path.write_text(json.dumps(request, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     state.setdefault("interaction_history", []).append(
         {
-            "phase": phase,
+            "step": phase,
             "timing": timing,
             "id": definition["id"],
             "status": status,
@@ -389,7 +389,7 @@ def _execute(
     compiled = compile_workflow(config)
     if credential_resolver is None:
         raise ExecutionError("OutcomeCI execution requires a scoped credential resolver")
-    phase = state["phase"]
+    phase = state["step"]
     step_block = compiled["instructions"]["phases"][phase].get("v1")
     if step_block is None:
         raise ExecutionError(f"step {phase} is not an outcomeci.workflow/v1 step")
@@ -419,7 +419,7 @@ def _execute(
         )
     except ExecutionError as exc:
         state.update({"status": "error", "error": str(exc)})
-        state["phases"] = _phase_states(compiled, state)
+        state["steps"] = _step_states(compiled, state)
         _write(root, state)
         raise
     state.update(
@@ -677,14 +677,14 @@ def _run_phase(
             )
     except (ExecutionError, OSError, json.JSONDecodeError) as exc:
         state.update({"status": "error", "error": str(exc)})
-        state["phases"] = _phase_states(compiled, state)
+        state["steps"] = _step_states(compiled, state)
         _write(root, state)
         if isinstance(exc, ExecutionError):
             raise
         raise ExecutionError(f"invalid local outcome artifacts: {exc}") from exc
-    state["completed_phases"] = [*state.get("completed_phases", []), phase]
+    state["completed_steps"] = [*state.get("completed_steps", []), phase]
     state["status"] = (
-        "awaiting_confirmation" if _ready(compiled, state["completed_phases"]) else "completed"
+        "awaiting_confirmation" if _ready(compiled, state["completed_steps"]) else "completed"
     )
     state["summary"] = summary[-1000:]
     state["usage_records"] = transcripts["usage_records"]
@@ -710,8 +710,8 @@ def _run_phase(
     (outcome_root / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    state["ready_phases"] = _ready(compiled, state["completed_phases"])
-    state["phases"] = _phase_states(compiled, state)
+    state["ready_steps"] = _ready(compiled, state["completed_steps"])
+    state["steps"] = _step_states(compiled, state)
     _write(root, state)
     return state
 
@@ -724,10 +724,10 @@ def _new_run(
         "schema_version": 2,
         "run_id": _id(intent),
         "intent": intent,
-        "phase": _ready(compiled, [])[0],
+        "step": _ready(compiled, [])[0],
         "status": "queued",
-        "completed_phases": [],
-        "ready_phases": _ready(compiled, []),
+        "completed_steps": [],
+        "ready_steps": _ready(compiled, []),
         "created_at": datetime.now(UTC).isoformat(),
     }
     if trigger is not None:
@@ -735,10 +735,10 @@ def _new_run(
     return state
 
 
-def _skip(state: dict[str, Any], phase: str, reason: str) -> None:
-    state["completed_phases"] = [*state.get("completed_phases", []), phase]
-    state["skipped_phases"] = [*state.get("skipped_phases", []), phase]
-    state.setdefault("skip_reasons", {})[phase] = reason
+def _skip(state: dict[str, Any], step: str, reason: str) -> None:
+    state["completed_steps"] = [*state.get("completed_steps", []), step]
+    state["skipped_steps"] = [*state.get("skipped_steps", []), step]
+    state.setdefault("skip_reasons", {})[step] = reason
 
 
 def _settle(
@@ -749,56 +749,56 @@ def _settle(
 ) -> bool:
     """Resolve the v1 steps the runtime drives: skips, await steps and discussions.
 
-    Returns True with state["phase"] set when an agent step is next, or False
+    Returns True with state["step"] set when an agent step is next, or False
     once every step is done and the run is completed.
     """
     from . import v1_runtime
 
     while True:
-        ready = _ready(compiled, state.get("completed_phases", []))
+        ready = _ready(compiled, state.get("completed_steps", []))
         if not ready:
-            state.update({"status": "completed", "ready_phases": []})
-            state["phases"] = _phase_states(compiled, state)
+            state.update({"status": "completed", "ready_steps": []})
+            state["steps"] = _step_states(compiled, state)
             _write(root, state)
             return False
-        phase = ready[0]
-        step = v1_runtime.block(compiled, phase)
-        if step is None:
-            state["phase"] = phase
+        step = ready[0]
+        step_block = v1_runtime.block(compiled, step)
+        if step_block is None:
+            state["step"] = step
             return True
-        reason = v1_runtime.skip_reason(root, state, step)
+        reason = v1_runtime.skip_reason(root, state, step_block)
         if reason is not None:
-            _skip(state, phase, reason)
+            _skip(state, step, reason)
             continue
-        if step["kind"] == "agent":
-            state["phase"] = phase
+        if step_block["kind"] == "agent":
+            state["step"] = step
             return True
-        state.update({"phase": phase, "status": "running"})
+        state.update({"step": step, "status": "running"})
         _write(root, state)
         try:
-            if step["kind"] == "converse":
-                v1_runtime.run_converse(root, compiled, state, phase, options)
+            if step_block["kind"] == "converse":
+                v1_runtime.run_converse(root, compiled, state, step, options)
                 approved = True
             else:
                 approved = v1_runtime.run_await(
-                    root, compiled, state, phase, options.credential_resolver
+                    root, compiled, state, step, options.credential_resolver
                 )
         except (ExecutionError, OSError) as exc:
             # Recorded as an error so `retry` can resume the step; retry sends
             # runtime-driven steps back through here, never to an agent.
             state.update({"status": "error", "error": str(exc)})
-            state["phases"] = _phase_states(compiled, state)
+            state["steps"] = _step_states(compiled, state)
             _write(root, state)
             if isinstance(exc, ExecutionError):
                 raise
-            raise ExecutionError(f"step {phase} failed: {exc}") from exc
+            raise ExecutionError(f"step {step} failed: {exc}") from exc
         if approved:
-            state["completed_phases"] = [*state.get("completed_phases", []), phase]
+            state["completed_steps"] = [*state.get("completed_steps", []), step]
             continue
-        _skip(state, phase, "the await window expired without the signal")
+        _skip(state, step, "the await window expired without the signal")
         for name in compiled["instructions"]["phases"]:
-            if name not in state["completed_phases"]:
-                _skip(state, name, f"{phase} expired")
+            if name not in state["completed_steps"]:
+                _skip(state, name, f"{step} expired")
 
 
 def trigger(

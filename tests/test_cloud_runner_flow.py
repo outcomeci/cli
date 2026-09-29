@@ -266,7 +266,7 @@ class FlowTests(unittest.TestCase):
                 return {
                     "run_id": "run-1",
                     "status": "completed",
-                    "completed_phases": ["notify"],
+                    "completed_steps": ["notify"],
                 }
 
             with (
@@ -312,7 +312,7 @@ class FlowTests(unittest.TestCase):
         self.assertEqual(client.completed[0][2]["agent_credential"], {"token": "agent-secret"})
         self.assertEqual(client.heartbeats[0][1][0]["event_type"], "permission.reviewed")
 
-    def test_generic_workflow_auto_continues_through_ready_phases(self):
+    def test_generic_workflow_auto_continues_through_ready_steps(self):
         claim = {
             "content": "apiVersion: outcomeci.workflow/v1\nname: example\n",
             "files": {},
@@ -358,8 +358,8 @@ class FlowTests(unittest.TestCase):
                 return {
                     "run_id": "run-1",
                     "status": "awaiting_confirmation",
-                    "completed_phases": ["resolve_analytics"],
-                    "ready_phases": ["notify"],
+                    "completed_steps": ["resolve_analytics"],
+                    "ready_steps": ["notify"],
                 }
 
             def continue_run(root_arg, config_arg, run_id, *, approve, options):
@@ -371,7 +371,7 @@ class FlowTests(unittest.TestCase):
                 return {
                     "run_id": run_id,
                     "status": "completed",
-                    "completed_phases": ["resolve_analytics", "notify"],
+                    "completed_steps": ["resolve_analytics", "notify"],
                 }
 
             with (
@@ -468,8 +468,8 @@ class FlowTests(unittest.TestCase):
                 return {
                     "run_id": run_id,
                     "status": "awaiting_confirmation",
-                    "completed_phases": ["resolve_analytics"],
-                    "ready_phases": ["notify"],
+                    "completed_steps": ["resolve_analytics"],
+                    "ready_steps": ["notify"],
                 }
 
             def continue_run(root_arg, config_arg, run_id, *, approve, options):
@@ -480,7 +480,7 @@ class FlowTests(unittest.TestCase):
                 return {
                     "run_id": run_id,
                     "status": "completed",
-                    "completed_phases": ["resolve_analytics", "notify"],
+                    "completed_steps": ["resolve_analytics", "notify"],
                 }
 
             with (
@@ -1303,7 +1303,7 @@ class MultiRunnerTests(unittest.TestCase):
                 outcome = root / ".outcomeci" / "outcomes" / "run-1"
                 outcome.mkdir(parents=True)
                 (outcome / "run.json").write_text("{}")
-                return {"run_id": "run-1", "completed_phases": ["only"], "status": "completed"}
+                return {"run_id": "run-1", "completed_steps": ["only"], "status": "completed"}
 
             with (
                 mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),

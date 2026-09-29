@@ -243,7 +243,7 @@ def test_a_discussed_plan_becomes_one_pull_request_per_repository(workflow, monk
     result = _run(workflow, slack, agent, monkeypatch)
 
     assert result["status"] == "completed"
-    assert result["completed_phases"] == ["draft", "discuss", "implement", "announce"]
+    assert result["completed_steps"] == ["draft", "discuss", "implement", "announce"]
     consultation = _consultation(workflow, result["run_id"])
     assert consultation["status"] == "converged"
     assert consultation["current_version"] == 2
@@ -290,7 +290,7 @@ def test_a_discussion_that_never_converges_is_capped_and_nothing_is_built(workfl
     result = _run(workflow, slack, agent, monkeypatch)
 
     assert result["status"] == "completed"
-    assert result["skipped_phases"] == ["implement", "announce"]
+    assert result["skipped_steps"] == ["implement", "announce"]
     consultation = _consultation(workflow, result["run_id"])
     assert consultation["status"] == "capped"
     assert len(consultation["turns"]) >= 12
@@ -305,7 +305,7 @@ def test_a_discussion_nobody_answers_times_out(workflow, monkeypatch):
     result = _run(workflow, slack, Agent(), monkeypatch)
 
     assert _consultation(workflow, result["run_id"])["status"] == "timed_out"
-    assert result["skipped_phases"] == ["implement", "announce"]
+    assert result["skipped_steps"] == ["implement", "announce"]
     outputs = json.loads(
         (workflow / ".outcomeci/outcomes" / result["run_id"] / "discuss/outputs.json").read_text()
     )

@@ -20,7 +20,7 @@ def test_continue_run_forwards_the_cloud_execution_context(tmp_path: Path, monke
     state = {
         "run_id": "run-1",
         "status": "awaiting_confirmation",
-        "completed_phases": ["resolve_analytics"],
+        "completed_steps": ["resolve_analytics"],
     }
     local._write(tmp_path, state)
     monkeypatch.setattr(
