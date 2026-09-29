@@ -721,7 +721,7 @@ def _new_run(
 ) -> dict[str, Any]:
     """The initial queued-run state trigger() builds for every trigger type."""
     state = {
-        "schema_version": 2,
+        "schema_version": 3,
         "run_id": _id(intent),
         "intent": intent,
         "step": _ready(compiled, [])[0],
