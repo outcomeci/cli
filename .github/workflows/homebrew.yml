@@ -52,6 +52,19 @@ jobs:
           if [ ! -f "$F" ]; then cp source/packaging/outcomeci-cli.rb "$F"; fi
           sed -i -E "s#^  url \".*\"#  url \"${URL}\"#" "$F"
           sed -i -E "s#^  sha256 \".*\"#  sha256 \"${SHA}\"#" "$F"
+          # The formula's description and homepage follow the template here.
+          python3 - "$F" source/packaging/outcomeci-cli.rb <<'PY'
+          import re, sys
+          formula, template = sys.argv[1], sys.argv[2]
+          wanted = {
+              m.group(1): m.group(0)
+              for m in re.finditer(r"^  (desc|homepage) .*$", open(template).read(), re.M)
+          }
+          text = open(formula).read()
+          for field, line in wanted.items():
+              text = re.sub(rf"^  {field} .*$", lambda _: line, text, count=1, flags=re.M)
+          open(formula, "w").write(text)
+          PY
           python3 source/scripts/refresh-homebrew-resources.py "$F" "$VERSION"
           git -C tap config user.name "github-actions[bot]"
           git -C tap config user.email "github-actions[bot]@users.noreply.github.com"
@@ -65,4 +78,13 @@ jobs:
           if [ -z "$url" ]; then
             url="$(gh pr create --repo outcomeci/homebrew-tap --base main --head "$branch" --title "outcomeci-cli ${VERSION}" --body "Update the Homebrew formula for outcomeci-cli ${VERSION}.")"
           fi
-          gh pr merge --repo outcomeci/homebrew-tap "$url" --squash
+          # The tap requires its checks to pass before a merge; they start when
+          # the pull request opens, so retry for up to ten minutes.
+          for _ in $(seq 1 30); do
+            if gh pr merge --repo outcomeci/homebrew-tap "$url" --squash; then
+              exit 0
+            fi
+            sleep 20
+          done
+          echo "::error::could not merge $url after its checks"
+          exit 1
