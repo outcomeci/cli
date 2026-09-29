@@ -46,6 +46,26 @@ def test_the_sentry_example_compiles_to_a_linear_graph():
     assert phases["approve"]["capabilities"] == ["slack.post", "slack.reactions"]
 
 
+def test_a_connection_names_its_credential_and_the_kinds_its_connector_accepts(tmp_path):
+    compiled = compile_workflow(_write(tmp_path, [_step("a", can=["github.read"])]))
+    connections = {item["ref"]: item for item in compiled["workflow"]["spec"]["connections"]}
+    github = connections["github"]["auth"]
+    assert github["connector"] == "github"
+    assert github["credential"] == "vault:github/pat"
+    assert [entry["kind"] for entry in github["accepts"]] == ["token", "app_installation"]
+    assert [entry["kind"] for entry in connections["slack"]["auth"]["accepts"]] == [
+        "token",
+        "oauth2",
+    ]
+    assert "type" not in github
+
+
+def test_a_connector_that_needs_a_credential_requires_auth(tmp_path):
+    path = _write(tmp_path, [_step("a")], apis={"github": {"uses": "github"}})
+    with pytest.raises(ConfigError, match="apis.github.auth is required"):
+        compile_workflow(path)
+
+
 def test_a_changed_connector_changes_the_revision(monkeypatch):
     from outcomeci import v1
 

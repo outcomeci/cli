@@ -1,7 +1,7 @@
 """Compile lowered phase-graph fixtures, the shape every workflow compiles to.
 
 Executor tests describe integrations directly in this shape, so they cover
-auth types and access modes no connector exposes yet.
+credential kinds and access modes no connector exposes yet.
 """
 
 from __future__ import annotations
@@ -72,7 +72,18 @@ def email_notify(root: Path) -> Path:
                 "slack": {
                     "provider": "http",
                     "base_url": "https://slack.com",
-                    "auth": {"type": "bearer", "credential": "vault:slack/bot-token"},
+                    "auth": {
+                        "connector": "slack",
+                        "credential": "vault:slack/bot-token",
+                        "accepts": [
+                            {
+                                "kind": "token",
+                                "header": "Authorization",
+                                "scheme": "Bearer",
+                                "credential": ["value"],
+                            }
+                        ],
+                    },
                 }
             },
             "integrations": {

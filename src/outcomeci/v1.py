@@ -379,22 +379,24 @@ def _apis(document: dict[str, Any]) -> tuple[dict[str, Any], list[dict], dict[st
             raise ConfigError(
                 f"{field}: connector contract {contract['schema_version']} is unsupported"
             )
+        accepts = contract["auth"]["accepts"]
+        keyless = [item["kind"] for item in accepts] == ["none"]
         auth = binding.get("auth")
-        if auth is None and contract["auth"]["type"] != "none":
+        if auth is None and not keyless:
             raise ConfigError(f"{field}.auth is required, such as secrets.{name}")
+        if auth is not None and keyless:
+            raise ConfigError(f"{field}.auth is not used: {found.name} takes no credential")
+        connection_auth: dict[str, Any] = {"connector": found.name, "accepts": accepts}
         if auth is not None:
             secret = _secret(auth, secrets, f"{field}.auth", f"such as secrets.{name}")
+            connection_auth["credential"] = secrets[secret]
         apis[name] = {"uses": found.name, "contract": contract, "digest": found.digest()}
         connections.append(
             {
                 "ref": name,
                 "provider": "http",
                 "base_url": contract["base_url"],
-                "auth": (
-                    {"type": contract["auth"]["type"], "credential": secrets[secret]}
-                    if auth is not None
-                    else {"type": "none"}
-                ),
+                "auth": connection_auth,
             }
         )
         integrations[name] = {

@@ -37,7 +37,13 @@ def test_local_vault_resolves_structured_credentials_for_executor(
     value = yaml.safe_load(config.read_text())
     auth = value["spec"]["connections"]["tickets"]["auth"]
     auth.clear()
-    auth.update({"type": "basic", "credential": "vault:tickets/auth"})
+    auth.update(
+        {
+            "connector": "tickets",
+            "credential": "vault:tickets/auth",
+            "accepts": [{"kind": "basic", "credential": ["username", "password"]}],
+        }
+    )
     config.write_text(yaml.safe_dump(value, sort_keys=False))
     seen = {}
 

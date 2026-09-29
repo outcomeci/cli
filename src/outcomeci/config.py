@@ -17,6 +17,16 @@ from . import __version__
 from .security import private_path
 
 RUNNERS = {"codex", "claude", "opencode"}
+AUTH_KINDS = {
+    "none",
+    "token",
+    "api_key",
+    "basic",
+    "oauth2",
+    "oidc",
+    "jwt_bearer",
+    "app_installation",
+}
 HTTP_METHODS = {"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"}
 SIDE_EFFECTS = {"read", "create", "update", "delete", "execute"}
 APPROVAL_POLICIES = {"none", "required", "inherit"}
@@ -266,44 +276,30 @@ def _http_origin(value: Any, field: str) -> str:
 
 
 def _http_auth(value: Any, field: str) -> dict[str, Any]:
-    auth = _mapping(value or {"type": "none"}, field)
-    kind = auth.get("type", "none")
-    if kind not in {"none", "api_key", "basic", "bearer", "oauth2", "oidc", "jwt_bearer"}:
-        raise ConfigError(f"{field}.type is unsupported")
-    result = {"type": kind}
-    if kind != "none":
-        result["credential"] = _non_empty_str(
-            auth.get("credential"), f"{field}.credential is required"
-        ).strip()
-    for key in (
-        "header",
-        "query",
-        "scheme",
-        "token_url",
-        "discovery_url",
-        "scope",
-        "audience",
-        "grant_type",
-        "account_id",
-    ):
-        if auth.get(key) is not None:
-            result[key] = _non_empty_str(auth[key], f"{field}.{key} must be non-empty").strip()
-    if kind == "api_key" and not (result.get("header") or result.get("query")):
-        result["header"] = "Authorization"
-        result["scheme"] = "Bearer"
-    if kind in {"oauth2", "jwt_bearer"} and "token_url" not in result:
-        raise ConfigError(f"{field}.token_url is required")
-    if kind == "oidc" and "discovery_url" not in result:
-        raise ConfigError(f"{field}.discovery_url is required")
-    if kind in {"oauth2", "oidc"}:
-        grant_type = result.get("grant_type", "client_credentials")
-        if grant_type not in {"client_credentials", "account_credentials", "refresh_token"}:
-            raise ConfigError(f"{field}.grant_type is unsupported")
-        result["grant_type"] = grant_type
-        if grant_type == "account_credentials" and "account_id" not in result:
-            raise ConfigError(
-                f"{field}.account_id is required for the account_credentials grant type"
-            )
+    """A connection's auth: the Vault credential it names and the kinds its
+    connector accepts. The runtime picks the accepted kind that matches the
+    credential; a connector that takes no credential accepts only `none`."""
+    auth = _mapping(value, field)
+    connector = _non_empty_str(auth.get("connector"), f"{field}.connector is required")
+    accepts = auth.get("accepts")
+    if not isinstance(accepts, list) or not accepts:
+        raise ConfigError(f"{field}.accepts must be a non-empty list")
+    kinds = []
+    for index, entry in enumerate(accepts):
+        entry = _mapping(entry, f"{field}.accepts[{index}]")
+        if entry.get("kind") not in AUTH_KINDS:
+            raise ConfigError(f"{field}.accepts[{index}].kind is unsupported")
+        kinds.append(entry["kind"])
+    if len(set(kinds)) != len(kinds) or ("none" in kinds and len(kinds) > 1):
+        raise ConfigError(f"{field}.accepts lists a kind twice or mixes none with others")
+    result: dict[str, Any] = {"connector": connector, "accepts": accepts}
+    if kinds == ["none"]:
+        if auth.get("credential") is not None:
+            raise ConfigError(f"{field}.credential is not used: {connector} takes no credential")
+        return result
+    result["credential"] = _non_empty_str(
+        auth.get("credential"), f"{field}.credential is required"
+    ).strip()
     return result
 
 
