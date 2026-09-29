@@ -135,15 +135,6 @@ def test_integration_dry_run_and_doctor_are_machine_readable(tmp_path: Path, cap
     assert json.loads(capsys.readouterr().out)["ok"] is True
 
 
-def test_outcome_lock_commands(tmp_path: Path, capsys) -> None:
-    initialize(tmp_path, "filesystem")
-    config, lock = tmp_path / "outcome.yml", tmp_path / "outcome.lock"
-    assert main(["outcome", "lock", str(config), "--output", str(lock)]) == 0
-    assert json.loads(capsys.readouterr().out)["lock"] == str(lock)
-    assert main(["outcome", "verify-lock", str(config), "--lock", str(lock)]) == 0
-    assert json.loads(capsys.readouterr().out)["valid"] is True
-
-
 def test_local_vault_commands_are_offline_and_never_print_values(
     tmp_path: Path, capsys, monkeypatch
 ) -> None:

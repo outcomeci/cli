@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import copy
 import difflib
 import hashlib
 import ipaddress
@@ -21,11 +20,9 @@ from urllib.parse import quote, urljoin, urlsplit
 
 import httpx
 import jsonschema
-import yaml
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from .config import ConfigError, compile_workflow
 from .process import ExecutionError
 
 CredentialResolver = Callable[[str], Mapping[str, str] | str]
@@ -985,181 +982,4 @@ def doctor(
         "checks": checks,
         "summary": {"passed": len(checks) - failed, "failed": failed},
         "credentials_exposed": False,
-    }
-
-
-def propose_patch(
-    config: Path,
-    integration: str,
-    operation: str,
-    definition: Mapping[str, Any],
-    *,
-    reason: str,
-    run: str,
-    phase: str,
-    agent: str,
-) -> dict[str, Any]:
-    compiled = compile_workflow(config)
-    return {
-        "apiVersion": "outcomeci.workflow/v1alpha1",
-        "kind": "OutcomeWorkflowPatch",
-        "metadata": {
-            "workflow": compiled["workflow"]["metadata"]["name"],
-            "parentRevision": compiled["workflow_revision"],
-            "parentContentSha256": hashlib.sha256(config.read_bytes()).hexdigest(),
-            "derivedFrom": {"run": run, "phase": phase, "agent": agent},
-            "reason": reason,
-        },
-        "spec": {"operations": {"add": {f"{integration}.{operation}": dict(definition)}}},
-    }
-
-
-def import_openapi(
-    config: Path,
-    integration_name: str,
-    *,
-    transport: httpx.BaseTransport | None = None,
-) -> dict[str, Any]:
-    compiled = compile_workflow(config)
-    integration = compiled["workflow"]["spec"].get("integrations", {}).get(integration_name)
-    if integration is None or integration["access"]["mode"] != "openapi":
-        raise ConfigError(f"integration {integration_name} is not configured for OpenAPI")
-    source = integration["access"]["source"]
-    connection = next(
-        item
-        for item in compiled["workflow"]["spec"]["connections"]
-        if item["ref"] == integration["connection"]
-    )
-    _safe_destination(source, connection["allow_private_network"])
-    try:
-        with httpx.Client(transport=transport, timeout=30, follow_redirects=False) as client:
-            response = client.get(source)
-            response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise ExecutionError("OpenAPI document could not be fetched", retryable=True) from exc
-    try:
-        document = yaml.safe_load(response.text)
-    except yaml.YAMLError as exc:
-        raise ConfigError("OpenAPI document is not valid JSON or YAML") from exc
-    if not isinstance(document, dict) or not str(document.get("openapi", "")).startswith("3."):
-        raise ConfigError("only OpenAPI 3 documents are supported")
-    wanted = set(integration["access"]["operations"])
-    found: dict[str, Any] = {}
-    for path, path_item in document.get("paths", {}).items():
-        if not isinstance(path_item, dict):
-            continue
-        shared_parameters = path_item.get("parameters", [])
-        for method, operation in path_item.items():
-            if method.upper() not in {"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"}:
-                continue
-            if not isinstance(operation, dict) or operation.get("operationId") not in wanted:
-                continue
-            operation_id = operation["operationId"]
-            name = re.sub(r"[^a-z0-9_-]+", "_", operation_id.lower()).strip("_")
-            parameters = [
-                item
-                for item in [*shared_parameters, *operation.get("parameters", [])]
-                if isinstance(item, dict) and "$ref" not in item
-            ]
-            path_properties = {
-                item["name"]: item.get("schema", {})
-                for item in parameters
-                if item.get("in") == "path" and isinstance(item.get("name"), str)
-            }
-            path_required = [
-                item["name"]
-                for item in parameters
-                if item.get("in") == "path" and item.get("required")
-            ]
-            rendered_path = path
-            for parameter in path_properties:
-                rendered_path = rendered_path.replace(
-                    "{" + parameter + "}", "{{ input.path." + parameter + " }}"
-                )
-            input_properties: dict[str, Any] = {
-                "path": {
-                    "type": "object",
-                    "properties": path_properties,
-                    "required": path_required,
-                    "additionalProperties": False,
-                },
-                "query": {"type": "object", "additionalProperties": True},
-            }
-            required = ["path", "query"]
-            request: dict[str, Any] = {
-                "method": method.upper(),
-                "path": rendered_path,
-                "query": "{{ input.query }}",
-            }
-            body = operation.get("requestBody")
-            if isinstance(body, dict):
-                body_schema = (
-                    body.get("content", {})
-                    .get("application/json", {})
-                    .get("schema", {"type": "object"})
-                )
-                input_properties["body"] = body_schema
-                request["body"] = "{{ input.body }}"
-                if body.get("required"):
-                    required.append("body")
-            found[name] = {
-                "description": operation.get("summary")
-                or operation.get("description")
-                or operation_id,
-                "input": {
-                    "type": "object",
-                    "properties": input_properties,
-                    "required": required,
-                    "additionalProperties": False,
-                },
-                "request": request,
-                "response": {"expose": {"result": "body"}},
-            }
-            wanted.remove(operation_id)
-    if wanted:
-        raise ConfigError(f"OpenAPI operations were not found: {', '.join(sorted(wanted))}")
-    return {
-        "apiVersion": "outcomeci.workflow/v1alpha1",
-        "kind": "OutcomeWorkflowPatch",
-        "metadata": {
-            "workflow": compiled["workflow"]["metadata"]["name"],
-            "parentRevision": compiled["workflow_revision"],
-            "parentContentSha256": hashlib.sha256(config.read_bytes()).hexdigest(),
-            "derivedFrom": {"source": source, "agent": "oci"},
-            "reason": f"Import allowlisted operations for {integration_name}",
-        },
-        "spec": {
-            "operations": {
-                "add": {
-                    f"{integration_name}.{operation}": definition
-                    for operation, definition in found.items()
-                }
-            }
-        },
-    }
-
-
-def apply_patch(config: Path, patch_path: Path, output: Path) -> dict[str, Any]:
-    compiled = compile_workflow(config)
-    patch = yaml.safe_load(patch_path.read_text(encoding="utf-8"))
-    if patch.get("kind") != "OutcomeWorkflowPatch":
-        raise ConfigError("patch kind must be OutcomeWorkflowPatch")
-    if patch.get("metadata", {}).get("parentRevision") != compiled["workflow_revision"]:
-        raise ConfigError("patch parent revision is stale")
-    document = copy.deepcopy(compiled["workflow"])
-    for name, definition in patch.get("spec", {}).get("operations", {}).get("add", {}).items():
-        integration, separator, operation = name.partition(".")
-        if not separator or integration not in document["spec"].get("integrations", {}):
-            raise ConfigError(f"patch operation has unknown integration: {name}")
-        operations = document["spec"]["integrations"][integration].setdefault("operations", {})
-        if operation in operations:
-            raise ConfigError(f"patch operation already exists: {name}")
-        operations[operation] = definition
-    output.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
-    child = compile_workflow(output)
-    return {
-        "parent_revision": compiled["workflow_revision"],
-        "workflow_revision": child["workflow_revision"],
-        "output": str(output),
-        "provenance": patch["metadata"].get("derivedFrom", {}),
     }

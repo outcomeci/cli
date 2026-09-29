@@ -16,10 +16,7 @@ from outcomeci.config import ConfigError
 from outcomeci.integrations import (
     IntegrationError,
     IntegrationExecutor,
-    apply_patch,
     doctor,
-    import_openapi,
-    propose_patch,
 )
 from outcomeci.process import ExecutionError
 
@@ -755,36 +752,6 @@ def test_jwt_bearer_requires_token_url(tmp_path: Path) -> None:
         compile_file(path)
 
 
-def test_patch_has_lineage_and_requires_current_parent(tmp_path: Path) -> None:
-    path = workflow(tmp_path)
-    definition = {
-        "input": {"type": "object", "additionalProperties": False},
-        "request": {"method": "GET", "path": "/v1/tickets"},
-        "response": {"expose": {"items": "body.items"}},
-    }
-    patch_value = propose_patch(
-        path,
-        "tickets",
-        "list",
-        definition,
-        reason="Pin a successful discovery",
-        run="run-1",
-        phase="intake",
-        agent="codex",
-    )
-    patch_path = tmp_path / "patch.yml"
-    patch_path.write_text(yaml.safe_dump(patch_value, sort_keys=False), encoding="utf-8")
-    child = tmp_path / "outcome.next.yml"
-    result = apply_patch(path, patch_path, child)
-    assert result["parent_revision"] != result["workflow_revision"]
-    assert result["provenance"] == {"run": "run-1", "phase": "intake", "agent": "codex"}
-    assert (
-        "list" in yaml.safe_load(child.read_text())["spec"]["integrations"]["tickets"]["operations"]
-    )
-    with pytest.raises(ConfigError, match="stale"):
-        apply_patch(child, patch_path, tmp_path / "outcome.stale.yml")
-
-
 def test_full_access_stays_inside_origin_and_method_policy(tmp_path: Path) -> None:
     path = workflow(tmp_path)
     value = yaml.safe_load(path.read_text())
@@ -840,49 +807,3 @@ def test_full_access_description_grounds_the_agent_in_the_real_origin(tmp_path: 
 
     assert "https://api.example.test" in description
     assert "secret" not in description
-
-
-def test_imports_allowlisted_openapi_operations_as_patch(tmp_path: Path) -> None:
-    path = workflow(tmp_path)
-    value = yaml.safe_load(path.read_text())
-    value["spec"]["integrations"]["tickets"]["access"] = {
-        "mode": "openapi",
-        "source": "https://spec.example.test/openapi.json",
-        "operations": ["createTicket"],
-    }
-    value["spec"]["integrations"]["tickets"]["operations"] = {}
-    value["spec"]["agents"]["phases"]["intake"]["integrations"] = [
-        {"type": "api", "capability": "tickets.createticket"}
-    ]
-    value["spec"]["agents"]["phases"]["intake"]["capabilities"] = ["tickets.createticket"]
-    path.write_text(yaml.safe_dump(value), encoding="utf-8")
-    document = {
-        "openapi": "3.1.0",
-        "paths": {
-            "/v1/tickets": {
-                "post": {
-                    "operationId": "createTicket",
-                    "summary": "Create a ticket",
-                    "requestBody": {
-                        "required": True,
-                        "content": {
-                            "application/json": {
-                                "schema": {
-                                    "type": "object",
-                                    "required": ["title"],
-                                    "properties": {"title": {"type": "string"}},
-                                }
-                            }
-                        },
-                    },
-                }
-            }
-        },
-    }
-    patch = import_openapi(
-        path,
-        "tickets",
-        transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=document)),
-    )
-    assert list(patch["spec"]["operations"]["add"]) == ["tickets.createticket"]
-    assert patch["metadata"]["parentRevision"] == compile_file(path)["workflow_revision"]

@@ -11,7 +11,6 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-import yaml
 from outcomeci_connectors.providers.slack.setup import SlackError
 from outcomeci_connectors.providers.slack.setup import manifest as slack_manifest
 from outcomeci_connectors.providers.slack.setup import setup as setup_slack
@@ -26,7 +25,6 @@ from .cloud import login as cloud_login
 from .cloud import login_with_key as cloud_login_with_key
 from .cloud import logout as cloud_logout
 from .config import ConfigError, compile_workflow
-from .conformance import run as run_conformance
 from .contracts import ContractError, render_reference, validate_contract
 from .humans import accept as accept_human_input
 from .humans import assign as assign_human_hook
@@ -36,11 +34,8 @@ from .integrations import (
     IntegrationError,
     IntegrationExecutor,
     doctor,
-    import_openapi,
     local_credential_resolver,
 )
-from .integrations import apply_patch as apply_integration_patch
-from .integrations import propose_patch as propose_integration_patch
 from .local import ExecutionOptions, compile_context, validate_artifacts
 from .local import advance as advance_local_outcome
 from .local import begin as begin_local_outcome
@@ -55,8 +50,6 @@ from .local import trigger as trigger_local_outcome
 from .local_vault import initialize as initialize_local_vault
 from .local_vault import list_entries as list_local_vault_entries
 from .local_vault import put as put_local_vault_entry
-from .locking import verify_lock, write_lock
-from .mcp_server import serve as serve_mcp
 from .outcome import run as run_outcome
 from .process import ExecutionError
 from .proof_runner import bundled_definition, bundled_proof_names
@@ -64,7 +57,6 @@ from .proof_runner import run as run_simulation
 from .publication import prepare_publication
 from .repository import RepositoryError, initialize, update, validate
 from .schema import export_schema, load_schema, schema_path
-from .twin import TwinError, search
 
 AGENT_CHOICES = ("codex", "claude")
 
@@ -129,10 +121,6 @@ def parser() -> argparse.ArgumentParser:
         required=True,
     )
     schema_export.add_argument("output", type=Path)
-    conformance = commands.add_parser(
-        "conformance", help="Run the portable OutcomeCI runtime contract checks"
-    )
-    conformance.add_argument("--workflow", type=Path)
     auth = commands.add_parser("auth", help="Authenticate with OutcomeCI Cloud")
     auth_commands = auth.add_subparsers(dest="auth_command", required=True)
     auth_login = auth_commands.add_parser("login")
@@ -259,9 +247,6 @@ def parser() -> argparse.ArgumentParser:
     workflow_sync.add_argument("file", type=Path)
     workflow_sync.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     workflow_sync.add_argument("--name")
-    workflow_sync.add_argument(
-        "--patch", type=Path, help="OutcomeWorkflowPatch that produced this version"
-    )
     workflow_mode = workflow_sync.add_mutually_exclusive_group(required=True)
     workflow_mode.add_argument("--create", action="store_true")
     workflow_mode.add_argument("--version", action="store_true")
@@ -359,14 +344,6 @@ def parser() -> argparse.ArgumentParser:
             item.add_argument("--phase")
             item.add_argument("--run")
             item.add_argument("--workspace", type=Path, default=Path.cwd())
-    lock_command = outcome_commands.add_parser("lock", help="Pin resolved workflow contracts")
-    lock_command.add_argument("config", nargs="?", type=Path, default=Path("outcome.yml"))
-    lock_command.add_argument("--output", type=Path, default=Path("outcome.lock"))
-    verify_lock_command = outcome_commands.add_parser(
-        "verify-lock", help="Verify outcome.lock against the current workflow"
-    )
-    verify_lock_command.add_argument("config", nargs="?", type=Path, default=Path("outcome.yml"))
-    verify_lock_command.add_argument("--lock", type=Path, default=Path("outcome.lock"))
     run = outcome_commands.add_parser("run")
     run.add_argument("--claim", required=True, type=Path)
     run.add_argument("--workspace", type=Path, default=Path("/workspace"))
@@ -450,13 +427,6 @@ def parser() -> argparse.ArgumentParser:
     human_accept.add_argument("--approve", action="store_true")
     human_accept.add_argument("--reject", action="store_true")
     _add_workflow_arguments(human_accept)
-    twin = commands.add_parser("twin")
-    twin_commands = twin.add_subparsers(dest="twin_command", required=True)
-    twin_search = twin_commands.add_parser("search")
-    twin_search.add_argument("query")
-    twin_search.add_argument("--repository-id", action="append", default=[])
-    twin_search.add_argument("--limit", type=int, default=10)
-    twin_search.add_argument("--component-limit", type=int, default=20)
     integration = commands.add_parser("integration")
     integration_commands = integration.add_subparsers(dest="integration_command", required=True)
     integration_list = integration_commands.add_parser(
@@ -489,34 +459,6 @@ def parser() -> argparse.ArgumentParser:
         "--connectivity", action="store_true", help="Also check configured HTTP origins"
     )
     _add_workflow_arguments(integration_doctor)
-    integration_mcp = integration_commands.add_parser(
-        "mcp", help="Serve phase-authorized integrations as MCP tools over stdio"
-    )
-    integration_mcp.add_argument("--phase", required=True)
-    _add_workflow_arguments(integration_mcp)
-    integration_import = integration_commands.add_parser(
-        "import-openapi", help="Propose declared operations from an OpenAPI allowlist"
-    )
-    integration_import.add_argument("integration")
-    integration_import.add_argument("--output", type=Path, required=True)
-    _add_workflow_arguments(integration_import)
-    integration_patch = integration_commands.add_parser(
-        "patch", help="Create or apply a version-producing workflow patch"
-    )
-    patch_commands = integration_patch.add_subparsers(dest="patch_command", required=True)
-    patch_propose = patch_commands.add_parser("propose")
-    patch_propose.add_argument("capability")
-    patch_propose.add_argument("--definition", type=Path, required=True)
-    patch_propose.add_argument("--reason", required=True)
-    patch_propose.add_argument("--run", required=True)
-    patch_propose.add_argument("--phase", required=True)
-    patch_propose.add_argument("--agent", required=True)
-    patch_propose.add_argument("--output", type=Path, required=True)
-    _add_workflow_arguments(patch_propose)
-    patch_apply = patch_commands.add_parser("apply")
-    patch_apply.add_argument("patch", type=Path)
-    patch_apply.add_argument("--output", type=Path, required=True)
-    _add_workflow_arguments(patch_apply)
     slack = integration_commands.add_parser("slack")
     slack_commands = slack.add_subparsers(dest="slack_command", required=True)
     slack_setup = slack_commands.add_parser("setup")
@@ -596,10 +538,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             else:
                 print(export_schema(args.output, args.type))
             return 0
-        if args.command == "conformance":
-            result = run_conformance(args.workflow.resolve() if args.workflow else None)
-            _print_json(result, sort_keys=True)
-            return 0 if result["conformant"] else 2
         if args.command == "auth":
             if args.auth_command == "login":
                 if args.key_stdin:
@@ -707,7 +645,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.workspace_id,
                 args.name,
                 "create" if args.create else "version",
-                patch_path=args.patch,
             )
             _print_json(result)
             return 0
@@ -831,17 +768,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                         },
                     }
             _print_json(result, sort_keys=True)
-        elif args.command == "outcome" and args.outcome_command == "lock":
-            result = write_lock(args.config.resolve(), args.output.resolve())
-            _print_json(
-                {
-                    "lock": str(args.output.resolve()),
-                    "workflow_revision": result["workflow_revision"],
-                },
-                sort_keys=True,
-            )
-        elif args.command == "outcome" and args.outcome_command == "verify-lock":
-            _print_json(verify_lock(args.config.resolve(), args.lock.resolve()), sort_keys=True)
         elif args.command == "outcome" and args.outcome_command == "run":
             _print_json(run_outcome(args.claim, args.workspace), compact=True)
         elif args.command == "outcome" and args.outcome_command == "start":
@@ -1029,18 +955,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                 )
                 _print_json(result, sort_keys=True)
-        elif args.command == "twin" and args.twin_command == "search":
-            _print_json(
-                search(args.query, args.repository_id, args.limit, args.component_limit),
-                sort_keys=True,
-            )
         elif args.command == "integration" and args.integration_command in {
             "list",
             "describe",
             "execute",
             "dry-run",
             "doctor",
-            "mcp",
         }:
             compiled = compile_workflow(_workflow_path(args))
             executor = IntegrationExecutor(
@@ -1060,8 +980,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 _print_json(result, sort_keys=True)
                 return 0 if result["ok"] else 2
-            elif args.integration_command == "mcp":
-                serve_mcp(executor, args.phase)
             else:
                 raw = sys.stdin.read() if args.input_stdin else args.input
                 try:
@@ -1076,50 +994,6 @@ def main(argv: Sequence[str] | None = None) -> int:
                     else executor.execute(args.capability, inputs, phase=args.phase)
                 )
                 _print_json(result, sort_keys=True)
-        elif args.command == "integration" and args.integration_command == "import-openapi":
-            result = import_openapi(_workflow_path(args), args.integration)
-            args.output.write_text(yaml.safe_dump(result, sort_keys=False), encoding="utf-8")
-            _print_json(
-                {
-                    "patch": str(args.output),
-                    "parent_revision": result["metadata"]["parentRevision"],
-                    "operations": sorted(result["spec"]["operations"]["add"]),
-                },
-                sort_keys=True,
-            )
-        elif args.command == "integration" and args.integration_command == "patch":
-            config = _workflow_path(args)
-            if args.patch_command == "propose":
-                try:
-                    definition = yaml.safe_load(args.definition.read_text(encoding="utf-8"))
-                except (OSError, yaml.YAMLError) as exc:
-                    raise ExecutionError(f"could not read operation definition: {exc}") from exc
-                if not isinstance(definition, dict):
-                    raise ExecutionError("operation definition must be a YAML mapping")
-                integration_name, separator, operation_name = args.capability.partition(".")
-                if not separator:
-                    raise ExecutionError("capability must be integration.operation")
-                result = propose_integration_patch(
-                    config,
-                    integration_name,
-                    operation_name,
-                    definition,
-                    reason=args.reason,
-                    run=args.run,
-                    phase=args.phase,
-                    agent=args.agent,
-                )
-                args.output.write_text(yaml.safe_dump(result, sort_keys=False), encoding="utf-8")
-                _print_json(
-                    {
-                        "patch": str(args.output),
-                        "parent_revision": result["metadata"]["parentRevision"],
-                    }
-                )
-            else:
-                _print_json(
-                    apply_integration_patch(config, args.patch, args.output), sort_keys=True
-                )
         elif args.command == "integration" and args.integration_command == "slack":
             if args.slack_command == "setup":
                 _print_json(
@@ -1152,7 +1026,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except IntegrationError as exc:
         print(json.dumps({"error": exc.as_dict()}, sort_keys=True), file=sys.stderr)
         return 1 if exc.retryable else 2
-    except (ConfigError, RepositoryError, TwinError, ExecutionError, SlackError) as exc:
+    except (ConfigError, RepositoryError, ExecutionError, SlackError) as exc:
         print(f"oci: {exc}", file=sys.stderr)
         return 1 if isinstance(exc, ExecutionError) and exc.retryable else 2
 
