@@ -39,11 +39,11 @@ def test_the_sentry_example_compiles_to_a_linear_graph():
     assert compiled["graph"]["levels"] == [["triage"], ["approve"], ["fix"], ["announce"]]
     assert compiled["source"]["apiVersion"] == "outcomeci.workflow/v1"
     assert set(compiled["connectors"]) == {"slack", "github"}
-    phases = compiled["instructions"]["phases"]
-    assert phases["triage"]["path"] == ".outcomeci/instructions/triage-and-notify.md"
-    assert phases["announce"]["content"].startswith("Reply in the alert's thread")
-    assert phases["fix"]["v1"]["policy"].startswith("One new branch")
-    assert phases["approve"]["capabilities"] == ["slack.post", "slack.reactions"]
+    steps = compiled["instructions"]["steps"]
+    assert steps["triage"]["path"] == ".outcomeci/instructions/triage-and-notify.md"
+    assert steps["announce"]["content"].startswith("Reply in the alert's thread")
+    assert steps["fix"]["v1"]["policy"].startswith("One new branch")
+    assert steps["approve"]["capabilities"] == ["slack.post", "slack.reactions"]
 
 
 def test_a_connection_names_its_credential_and_the_kinds_its_connector_accepts(tmp_path):
@@ -157,9 +157,9 @@ def test_literal_repos_and_as_names_compile(tmp_path):
         _step("b", **{"with": "a.calls.plan_post"}, can=[{"github.write": {"repo": "o/r"}}]),
     ]
     compiled = compile_workflow(_write(tmp_path, steps))
-    grant = compiled["instructions"]["phases"]["b"]["v1"]["grants"][0]
+    grant = compiled["instructions"]["steps"]["b"]["v1"]["grants"][0]
     assert grant["args"]["repo"] == {"literal": {"owner": "o", "name": "r"}}
-    assert compiled["instructions"]["phases"]["b"]["v1"]["inputs"] == [
+    assert compiled["instructions"]["steps"]["b"]["v1"]["inputs"] == [
         {"name": "plan_post", "ref": "a.calls.plan_post"}
     ]
 

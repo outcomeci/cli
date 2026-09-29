@@ -193,7 +193,7 @@ def test_validate_and_compile_read_the_workflow_in_a_directory(tmp_path: Path, c
     assert main(["workflow", "compile", *config, "--step", "plan"]) == 0
     compiled = json.loads(capsys.readouterr().out)
     assert compiled["workflow_revision"] == revision
-    assert compiled["instructions"]["phase"]["path"] == ".outcomeci/instructions/plan.md"
+    assert compiled["instructions"]["step"]["path"] == ".outcomeci/instructions/plan.md"
     assert main(["workflow", "compile", *config, "--step", "missing"]) == 2
 
 

@@ -317,7 +317,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
 
         result = execute_call(call_trigger)
         run_id = str(result["run_id"])
-        step_count = len(compile_workflow(config)["instructions"]["phases"])
+        step_count = len(compile_workflow(config)["instructions"]["steps"])
         while len(result.get("completed_steps", [])) != step_count:
             if heartbeat_failure:
                 raise CoreError("policy_evidence_upload_failed", True)

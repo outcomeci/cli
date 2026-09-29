@@ -61,7 +61,7 @@ class Broker:
         run_directory = root / ".outcomeci" / "outcomes" / run_id
         state_path = run_directory / "run.json"
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
-        step = compiled["instructions"]["phases"][phase]
+        step = compiled["instructions"]["steps"][phase]
         step_policy = None
         if "v1" in step:
             # A v1 step's grants are resolved by the caller before its agent

@@ -31,7 +31,7 @@ MISSING = object()
 
 
 def block(compiled: dict[str, Any], phase: str) -> dict[str, Any] | None:
-    return compiled["instructions"]["phases"][phase].get("v1")
+    return compiled["instructions"]["steps"][phase].get("v1")
 
 
 def _lookup(value: Any, parts: list[str]) -> Any:
@@ -709,7 +709,7 @@ def _turn(root, compiled, state, phase, spec, consultation, runner, model, optio
     )
     turn_path.parent.mkdir(parents=True, exist_ok=True)
     prompt = TURN_TASK.format(
-        instructions=compiled["instructions"]["phases"][phase]["content"],
+        instructions=compiled["instructions"]["steps"][phase]["content"],
         api=spec["api"],
         path=turn_path,
         schema=json.dumps(spec["plan_schema"], separators=(",", ":")),

@@ -142,11 +142,11 @@ def test_a_response_grant_becomes_a_check_for_the_executor(tmp_path):
 
 def test_the_slack_example_lets_its_draft_step_open_the_requests_files():
     compiled = compile_workflow(slack_example.EXAMPLES / slack_example.WORKFLOW)
-    phases = compiled["instructions"]["phases"]
+    steps = compiled["instructions"]["steps"]
 
-    assert "slack.file" in phases["draft"]["capabilities"]
-    assert "slack.file" in phases["discuss"]["capabilities"]
-    assert phases["discuss"]["v1"]["converse"]["attachment"] == "file"
+    assert "slack.file" in steps["draft"]["capabilities"]
+    assert "slack.file" in steps["discuss"]["capabilities"]
+    assert steps["discuss"]["v1"]["converse"]["attachment"] == "file"
 
 
 def test_a_reply_file_is_fetched_only_within_its_threads_conversation(tmp_path, monkeypatch):

@@ -34,7 +34,7 @@ def workflow(tmp_path: Path, accepts: list[dict], *, echo: bool = False) -> dict
             "instructions": {"workflow": {"content": "Call the API."}},
             "agents": {
                 "default": {"runner": "codex"},
-                "phases": {
+                "steps": {
                     "call": {
                         "instructions": {"content": "Call it."},
                         "needs": [],

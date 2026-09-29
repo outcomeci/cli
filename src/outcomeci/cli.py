@@ -417,14 +417,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             if args.workflow_command == "compile":
                 result = compile_workflow((args.dir / args.config).resolve())
                 if args.step:
-                    phase = result["instructions"]["phases"].get(args.step)
-                    if phase is None:
+                    step = result["instructions"]["steps"].get(args.step)
+                    if step is None:
                         raise ExecutionError(f"workflow has no step {args.step}")
                     result = {
                         **result,
                         "instructions": {
                             "orchestrator": result["instructions"]["orchestrator"],
-                            "phase": phase,
+                            "step": step,
                         },
                     }
                 _print_json(result, sort_keys=True)

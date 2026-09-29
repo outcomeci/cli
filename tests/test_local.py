@@ -28,7 +28,7 @@ def test_continue_run_forwards_the_cloud_execution_context(tmp_path: Path, monke
         "compile_workflow",
         lambda config: {
             "instructions": {
-                "phases": {
+                "steps": {
                     "resolve_analytics": {"needs": []},
                     "notify": {"needs": ["resolve_analytics"]},
                 }
@@ -57,10 +57,10 @@ def test_continue_run_forwards_the_cloud_execution_context(tmp_path: Path, monke
     assert captured["options"]._container_isolated is True
 
 
-def test_ready_set_supports_parallel_phases_and_join() -> None:
+def test_ready_set_supports_parallel_steps_and_join() -> None:
     compiled = {
         "instructions": {
-            "phases": {
+            "steps": {
                 "intake": {"needs": []},
                 "product_review": {"needs": ["intake"]},
                 "technical_review": {"needs": ["intake"]},
@@ -129,7 +129,7 @@ def test_write_effect_receipts_reports_provider_override_as_not_ok(tmp_path: Pat
 def test_declared_json_schema_is_enforced(tmp_path: Path) -> None:
     initialize(tmp_path)
     compiled = local.compile_workflow(tmp_path / "outcome.yml")
-    contract = compiled["instructions"]["phases"]["investigate"]["expects"]["outputs"][0]
+    contract = compiled["instructions"]["steps"]["investigate"]["expects"]["outputs"][0]
     outcome = tmp_path / ".outcomeci" / "outcomes" / "test"
     artifact = outcome / contract["path"]
     artifact.parent.mkdir(parents=True)

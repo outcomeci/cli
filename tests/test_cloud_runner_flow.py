@@ -91,7 +91,7 @@ class FlowTests(unittest.TestCase):
                 mock.patch(
                     "outcomeci.config.compile_workflow",
                     return_value={
-                        "instructions": {"phases": {"resolve_analytics": {}}},
+                        "instructions": {"steps": {"resolve_analytics": {}}},
                         "workflow": {"spec": {"agents": {"default": {}}}},
                     },
                 ),
@@ -279,7 +279,7 @@ class FlowTests(unittest.TestCase):
                 mock.patch(
                     "outcomeci.config.compile_workflow",
                     return_value={
-                        "instructions": {"phases": {"notify": {}}},
+                        "instructions": {"steps": {"notify": {}}},
                         "workflow": {"spec": {"agents": {"default": {}}}},
                     },
                 ),
@@ -385,7 +385,7 @@ class FlowTests(unittest.TestCase):
                 mock.patch(
                     "outcomeci.config.compile_workflow",
                     return_value={
-                        "instructions": {"phases": {"resolve_analytics": {}, "notify": {}}},
+                        "instructions": {"steps": {"resolve_analytics": {}, "notify": {}}},
                         "workflow": {"spec": {"agents": {"default": {}}}},
                     },
                 ),
@@ -495,7 +495,7 @@ class FlowTests(unittest.TestCase):
                 mock.patch(
                     "outcomeci.config.compile_workflow",
                     return_value={
-                        "instructions": {"phases": {"resolve_analytics": {}, "notify": {}}},
+                        "instructions": {"steps": {"resolve_analytics": {}, "notify": {}}},
                         "workflow": {
                             "spec": {
                                 "agents": {
@@ -596,7 +596,7 @@ class FlowTests(unittest.TestCase):
                 mock.patch(
                     "outcomeci.config.compile_workflow",
                     return_value={
-                        "instructions": {"phases": {"resolve_analytics": {}, "notify": {}}},
+                        "instructions": {"steps": {"resolve_analytics": {}, "notify": {}}},
                         "workflow": {
                             "spec": {
                                 "agents": {
@@ -677,7 +677,7 @@ class FlowTests(unittest.TestCase):
                 mock.patch(
                     "outcomeci.config.compile_workflow",
                     return_value={
-                        "instructions": {"phases": {"resolve_analytics": {}}},
+                        "instructions": {"steps": {"resolve_analytics": {}}},
                         "workflow": {"spec": {"agents": {"default": {}}}},
                     },
                 ),
@@ -758,7 +758,7 @@ class FlowTests(unittest.TestCase):
                 mock.patch(
                     "outcomeci.config.compile_workflow",
                     return_value={
-                        "instructions": {"phases": {"notify": {}}},
+                        "instructions": {"steps": {"notify": {}}},
                         "workflow": {
                             "spec": {
                                 "agents": {
@@ -839,7 +839,7 @@ class FlowTests(unittest.TestCase):
                 mock.patch(
                     "outcomeci.config.compile_workflow",
                     return_value={
-                        "instructions": {"phases": {"notify": {}}},
+                        "instructions": {"steps": {"notify": {}}},
                         "workflow": {"spec": {"agents": {"default": {}}}},
                     },
                 ),
@@ -1312,7 +1312,7 @@ class MultiRunnerTests(unittest.TestCase):
                 mock.patch(
                     "outcomeci.config.compile_workflow",
                     return_value={
-                        "instructions": {"phases": {"only": {}}},
+                        "instructions": {"steps": {"only": {}}},
                         "workflow": {"spec": {"agents": {"default": {}}}},
                     },
                 ),

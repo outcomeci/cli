@@ -53,7 +53,7 @@ def _id(intent: str) -> str:
 def _policy(
     compiled: dict[str, Any], phase: str, agent: str | None, model: str | None
 ) -> tuple[str, str | None]:
-    selected = compiled["instructions"]["phases"].get(phase, {}).get("policy", {})
+    selected = compiled["instructions"]["steps"].get(phase, {}).get("policy", {})
     runner = agent or selected.get("runner")
     chosen_model = model or selected.get("model")
     if runner not in {"codex", "claude", "opencode"}:
@@ -69,8 +69,8 @@ def _ready(compiled: dict[str, Any], completed: list[str]) -> list[str]:
     done = set(completed)
     return sorted(
         name
-        for name, phase in compiled["instructions"]["phases"].items()
-        if name not in done and set(phase["needs"]) <= done
+        for name, step in compiled["instructions"]["steps"].items()
+        if name not in done and set(step["needs"]) <= done
     )
 
 
@@ -92,7 +92,7 @@ def _step_states(compiled: dict[str, Any], state: dict[str, Any]) -> dict[str, s
                 else "blocked"
             )
         )
-        for name in compiled["instructions"]["phases"]
+        for name in compiled["instructions"]["steps"]
     }
 
 
@@ -109,7 +109,7 @@ def _prepare_writable_artifacts(
     compiled: dict[str, Any], outcome_root: Path, phase: str
 ) -> list[Path]:
     paths = []
-    for contract in compiled["instructions"]["phases"][phase]["expects"]["outputs"]:
+    for contract in compiled["instructions"]["steps"][phase]["expects"]["outputs"]:
         path = _artifact_path(outcome_root, contract)
         if contract["media_type"] == "inode/directory":
             path.mkdir(parents=True, exist_ok=True)
@@ -121,7 +121,7 @@ def _prepare_writable_artifacts(
 
 
 def _validate_outputs(compiled: dict[str, Any], outcome_root: Path, phase: str) -> None:
-    for contract in compiled["instructions"]["phases"][phase]["expects"]["outputs"]:
+    for contract in compiled["instructions"]["steps"][phase]["expects"]["outputs"]:
         path = _artifact_path(outcome_root, contract)
         if not path.exists():
             if contract["required"]:
@@ -181,7 +181,7 @@ def _validate_required_effects(
     root: Path, compiled: dict[str, Any], run_id: str, phase: str
 ) -> None:
     """Require broker-confirmed evidence for effects declared as mandatory."""
-    required = compiled["instructions"]["phases"][phase].get("required_capabilities", [])
+    required = compiled["instructions"]["steps"][phase].get("required_capabilities", [])
     if not required:
         return
     journal = root / ".outcomeci" / ".broker" / run_id / "journal.json"
@@ -256,7 +256,7 @@ def _repair_outputs(
     container_isolated: bool,
 ) -> str:
     """Run one output-only repair with no capability socket or provider credentials."""
-    contracts = compiled["instructions"]["phases"][phase]["expects"]["outputs"]
+    contracts = compiled["instructions"]["steps"][phase]["expects"]["outputs"]
     prompt = (
         "Repair the declared workflow output artifacts only. External effects may already "
         "have completed and must not be repeated. You have no integration or human "
@@ -390,7 +390,7 @@ def _execute(
     if credential_resolver is None:
         raise ExecutionError("OutcomeCI execution requires a scoped credential resolver")
     phase = state["step"]
-    step_block = compiled["instructions"]["phases"][phase].get("v1")
+    step_block = compiled["instructions"]["steps"][phase].get("v1")
     if step_block is None:
         raise ExecutionError(f"step {phase} is not an outcomeci.workflow/v1 step")
     if step_block["kind"] != "agent":
@@ -535,7 +535,7 @@ def _step_prompt(
         "inputs": v1_runtime.inputs(root, state, step_block, bound),
         "capabilities": [
             describer.describe(name)
-            for name in compiled["instructions"]["phases"][phase].get("capabilities", [])
+            for name in compiled["instructions"]["steps"][phase].get("capabilities", [])
         ],
         "grants": grants,
         "policy": step_block.get("policy"),
@@ -545,7 +545,7 @@ def _step_prompt(
     }
     return templates.V1_STEP_TASK.format(
         shared=compiled["instructions"]["orchestrator"]["content"],
-        instructions=compiled["instructions"]["phases"][phase]["content"],
+        instructions=compiled["instructions"]["steps"][phase]["content"],
         environment=environment,
         outcome_root=outcome_root,
         phase=phase,
@@ -705,7 +705,7 @@ def _run_phase(
         runner=runner,
         model=chosen_model,
         transcript=transcripts,
-        phase_contract=compiled["instructions"]["phases"][phase]["expects"],
+        phase_contract=compiled["instructions"]["steps"][phase]["expects"],
     )
     (outcome_root / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
@@ -796,7 +796,7 @@ def _settle(
             state["completed_steps"] = [*state.get("completed_steps", []), step]
             continue
         _skip(state, step, "the await window expired without the signal")
-        for name in compiled["instructions"]["phases"]:
+        for name in compiled["instructions"]["steps"]:
             if name not in state["completed_steps"]:
                 _skip(state, name, f"{step} expired")
 

@@ -67,7 +67,7 @@ def _continue(
     """With auto_continue, drive each ready step in turn."""
     from . import local
 
-    step_count = len(compiled["instructions"]["phases"]) if auto_continue else 0
+    step_count = len(compiled["instructions"]["steps"]) if auto_continue else 0
     while auto_continue and len(result.get("completed_steps", [])) != step_count:
         if not result.get("ready_steps") or result.get("status") == "completed":
             break

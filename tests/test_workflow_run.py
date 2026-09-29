@@ -80,7 +80,7 @@ def test_the_lease_resolver_refuses_an_expired_lease():
 def _two_steps(monkeypatch):
     compiled = {
         "triggers": {"daily": {"type": "cron"}},
-        "instructions": {"phases": {"resolve_analytics": {}, "notify": {}}},
+        "instructions": {"steps": {"resolve_analytics": {}, "notify": {}}},
     }
     first = {
         "run_id": "run-1",
@@ -124,7 +124,7 @@ def test_without_auto_continue_the_run_stops_after_the_first_step(monkeypatch, t
 IMAGE_COMPILED = {
     **COMPILED,
     "workflow": {"spec": {"agents": {"default": {"runner": "codex"}}}},
-    "instructions": {"phases": {"run": {}}},
+    "instructions": {"steps": {"run": {}}},
 }
 CODEX_LOGIN = {"tokens": {"refresh_token": "rt-1"}}
 ROTATED = {"tokens": {"refresh_token": "rt-2"}}
@@ -482,7 +482,7 @@ def test_image_run_joins_the_requested_docker_network(monkeypatch, image_env):
 STEP_RUNNERS = {
     **IMAGE_COMPILED,
     "instructions": {
-        "phases": {
+        "steps": {
             "draft": {"policy": {"runner": "codex"}},
             "implement": {"policy": {"runner": "claude"}},
         }
@@ -569,7 +569,7 @@ def test_resume_records_an_interrupted_run_before_retrying(monkeypatch, tmp_path
     run_container.resume(
         tmp_path,
         tmp_path / "w.yaml",
-        {"instructions": {"phases": {}}},
+        {"instructions": {"steps": {}}},
         "run-1",
         None,
         auto_continue=False,

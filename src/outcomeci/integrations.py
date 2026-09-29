@@ -364,7 +364,7 @@ class IntegrationExecutor:
         )
         if phase is None:
             return all_names
-        policy = self.compiled["instructions"]["phases"].get(phase)
+        policy = self.compiled["instructions"]["steps"].get(phase)
         if policy is None:
             raise IntegrationError(
                 "integration.phase_not_found",
@@ -425,7 +425,7 @@ class IntegrationExecutor:
 
     def dry_run(self, phase: str) -> dict[str, Any]:
         """Describe the step's authorized effects without resolving credentials or doing I/O."""
-        if phase not in self.compiled["instructions"]["phases"]:
+        if phase not in self.compiled["instructions"]["steps"]:
             raise IntegrationError(
                 "integration.phase_not_found",
                 f"workflow has no step {phase}",

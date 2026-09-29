@@ -7,16 +7,6 @@ from typing import Any, Literal, Protocol
 from urllib.parse import urlparse
 
 Provider = Literal["codex", "claude", "opencode"]
-OUTCOME_PHASES = (
-    "intake",
-    "repository_selection",
-    "specify",
-    "plan",
-    "tasks",
-    "implementation",
-    "validation",
-    "publication",
-)
 
 
 class ContractError(ValueError):

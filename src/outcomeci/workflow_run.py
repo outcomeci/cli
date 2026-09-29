@@ -101,8 +101,8 @@ def _runners(compiled: dict[str, Any], agent: str | None) -> list[str]:
     if agent:
         return [agent]
     found = [_default_agent(compiled)]
-    for phase in (compiled.get("instructions") or {}).get("phases", {}).values():
-        runner = (phase.get("policy") or {}).get("runner")
+    for step in (compiled.get("instructions") or {}).get("steps", {}).values():
+        runner = (step.get("policy") or {}).get("runner")
         if runner and runner not in found:
             found.append(runner)
     return found

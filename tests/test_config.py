@@ -66,10 +66,10 @@ def test_steps_run_in_order_with_their_own_agents(tmp_path: Path) -> None:
     compiled = compile_workflow(_workflow(tmp_path))
     assert compiled["graph"]["levels"] == [["intake"], ["review"], ["plan"]]
     assert compiled["triggers"] == {"manual": {"type": "manual"}}
-    phases = compiled["instructions"]["phases"]
-    assert phases["review"]["policy"] == {"runner": "claude", "model": "claude-review"}
-    assert phases["plan"]["policy"] == {"runner": "codex", "model": "gpt-default"}
-    assert phases["intake"]["expects"]["outputs"][0]["path"] == "intake/outputs.json"
+    steps = compiled["instructions"]["steps"]
+    assert steps["review"]["policy"] == {"runner": "claude", "model": "claude-review"}
+    assert steps["plan"]["policy"] == {"runner": "codex", "model": "gpt-default"}
+    assert steps["intake"]["expects"]["outputs"][0]["path"] == "intake/outputs.json"
 
 
 def test_a_fallback_agent_reaches_the_compiled_workflow(tmp_path: Path) -> None:

@@ -1,4 +1,4 @@
-"""Compile lowered phase-graph fixtures, the shape every workflow compiles to.
+"""Compile lowered step-graph fixtures, the shape every workflow compiles to.
 
 Executor tests describe integrations directly in this shape, so they cover
 credential kinds and access modes no connector exposes yet.
@@ -28,7 +28,7 @@ def email_payload() -> dict[str, Any]:
 
 
 def email_notify(root: Path) -> Path:
-    """A lowered workflow whose `notify` phase may call a budgeted Slack API.
+    """A lowered workflow whose `notify` step may call a budgeted Slack API.
 
     `slack.request` takes any GET or POST under the origin, as a connector
     operation does; broker tests add a step policy to review its changes."""
@@ -43,7 +43,7 @@ def email_notify(root: Path) -> Path:
             "instructions": {"workflow": {"content": "Notify the requester."}},
             "agents": {
                 "default": {"runner": "codex", "model": "default-model"},
-                "phases": {
+                "steps": {
                     "notify": {
                         "needs": [],
                         "instructions": {"content": "Notify the recipient."},

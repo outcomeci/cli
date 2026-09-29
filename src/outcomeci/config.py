@@ -544,9 +544,9 @@ def _inline_content(value: Any) -> bool:
     )
 
 
-# Every phase carries these keys so a compiled workflow has one shape; a
+# Every step carries these keys so a compiled workflow has one shape; a
 # lowered v1 step fills only its needs, outputs and capabilities.
-PHASE_DEFAULTS = {
+STEP_DEFAULTS = {
     "type": "agent",
     "with": {},
     "inputs": [],
@@ -556,9 +556,9 @@ PHASE_DEFAULTS = {
 
 
 def validate_lowered(root: dict[str, Any], path: Path) -> dict[str, Any]:
-    """Validate a lowered workflow document and attach its phase graph.
+    """Validate a lowered workflow document and attach its step graph.
 
-    `v1.lower` turns an outcomeci.workflow/v1 file into this shape: one phase
+    `v1.lower` turns an outcomeci.workflow/v1 file into this shape: one step
     per step, HTTP connections and schema integrations for its APIs, and
     inline orchestrator and step instructions. Every run executes it."""
     if root.get("kind") != "OutcomeWorkflow":
@@ -603,15 +603,15 @@ def validate_lowered(root: dict[str, Any], path: Path) -> dict[str, Any]:
                 "spec.agents.default.fallback.runner must differ from the default runner"
             )
         default["fallback"] = fallback
-    phases = _mapping(agents.get("phases", {}), "spec.agents.phases")
-    if not phases:
-        raise ConfigError("spec.agents.phases must define at least one phase")
+    steps = _mapping(agents.get("steps", {}), "spec.agents.steps")
+    if not steps:
+        raise ConfigError("spec.agents.steps must define at least one step")
     output_paths: set[str] = set()
-    normalized_phases: dict[str, Any] = {}
-    for phase_name, raw_policy in phases.items():
-        if not isinstance(phase_name, str) or not IDENTIFIER.fullmatch(phase_name):
-            raise ConfigError(f"invalid outcome phase: {phase_name}")
-        field = f"spec.agents.phases.{phase_name}"
+    normalized_steps: dict[str, Any] = {}
+    for step_name, raw_policy in steps.items():
+        if not isinstance(step_name, str) or not IDENTIFIER.fullmatch(step_name):
+            raise ConfigError(f"invalid outcome step: {step_name}")
+        field = f"spec.agents.steps.{step_name}"
         policy = _mapping(raw_policy, field)
         if not isinstance(policy.get("instructions"), str) and not _inline_content(
             policy.get("instructions")
@@ -624,25 +624,25 @@ def validate_lowered(root: dict[str, Any], path: Path) -> dict[str, Any]:
             or not all(isinstance(item, str) for item in needs)
             or len(needs) != len(set(needs))
         ):
-            raise ConfigError(f"{field}.needs must be a list of unique phase names")
+            raise ConfigError(f"{field}.needs must be a list of unique step names")
         for dependency in needs:
-            if dependency == phase_name:
-                raise ConfigError(f"phase {phase_name} cannot depend on itself")
-            if dependency not in phases:
-                raise ConfigError(f"phase {phase_name} needs unknown phase {dependency}")
+            if dependency == step_name:
+                raise ConfigError(f"step {step_name} cannot depend on itself")
+            if dependency not in steps:
+                raise ConfigError(f"step {step_name} needs unknown step {dependency}")
         expects = _mapping(policy.get("expects", {}), f"{field}.expects")
         if expects.get("inputs"):
             raise ConfigError(f"{field}.expects.inputs must be empty")
         raw_outputs = expects.get("outputs", [])
         if not isinstance(raw_outputs, list):
             raise ConfigError(f"{field}.expects.outputs must be a list")
-        phase_outputs = [
+        step_outputs = [
             _contract(item, f"{field}.expects.outputs[{index}]")
             for index, item in enumerate(raw_outputs)
         ]
-        if len({item["name"] for item in phase_outputs}) != len(phase_outputs):
+        if len({item["name"] for item in step_outputs}) != len(step_outputs):
             raise ConfigError(f"{field} contract names must be unique")
-        for item in phase_outputs:
+        for item in step_outputs:
             if item["path"] in output_paths:
                 raise ConfigError(f"duplicate output path: {item['path']}")
             output_paths.add(item["path"])
@@ -651,25 +651,25 @@ def validate_lowered(root: dict[str, Any], path: Path) -> dict[str, Any]:
             isinstance(capability, str) and capability.strip() for capability in capabilities
         ):
             raise ConfigError(f"{field}.capabilities must be a list of names")
-        normalized_phases[phase_name] = {
-            **json.loads(json.dumps(PHASE_DEFAULTS)),
+        normalized_steps[step_name] = {
+            **json.loads(json.dumps(STEP_DEFAULTS)),
             "needs": needs,
-            "outputs": phase_outputs,
+            "outputs": step_outputs,
             "capabilities": sorted(set(capabilities)),
         }
 
-    indegree = {name: len(value["needs"]) for name, value in normalized_phases.items()}
-    remaining = set(normalized_phases)
+    indegree = {name: len(value["needs"]) for name, value in normalized_steps.items()}
+    remaining = set(normalized_steps)
     levels: list[list[str]] = []
     while remaining:
         ready = sorted(name for name in remaining if indegree[name] == 0)
         if not ready:
-            raise ConfigError("outcome phase graph contains a cycle")
+            raise ConfigError("outcome step graph contains a cycle")
         levels.append(ready)
         remaining.difference_update(ready)
         for name in remaining:
             indegree[name] -= sum(
-                dependency in ready for dependency in normalized_phases[name]["needs"]
+                dependency in ready for dependency in normalized_steps[name]["needs"]
             )
 
     connections = _named_items(spec.get("connections", []), "spec.connections")
@@ -696,17 +696,17 @@ def validate_lowered(root: dict[str, Any], path: Path) -> dict[str, Any]:
         for integration, value in normalized_integrations.items()
         for operation in value["operations"]
     }
-    for phase_name, phase in normalized_phases.items():
-        unknown_capabilities = set(phase["capabilities"]) - available_capabilities
+    for step_name, step in normalized_steps.items():
+        unknown_capabilities = set(step["capabilities"]) - available_capabilities
         if unknown_capabilities:
             raise ConfigError(
-                f"phase {phase_name} references unknown capabilities: {', '.join(sorted(unknown_capabilities))}"
+                f"step {step_name} references unknown capabilities: {', '.join(sorted(unknown_capabilities))}"
             )
     root["_graph"] = {
         "orchestrator": orchestrator_name,
         "orchestrator_config": orchestrator,
         "levels": levels,
-        "phases": normalized_phases,
+        "steps": normalized_steps,
         "default_policy": default,
         "triggers": triggers,
     }
@@ -747,7 +747,7 @@ def compile_workflow(path: Path) -> dict[str, Any]:
 
 
 def compile_lowered(document: dict[str, Any], path: Path) -> dict[str, Any]:
-    """Compile a document already in the lowered phase-graph shape.
+    """Compile a document already in the lowered step-graph shape.
 
     `path` is where the document would live: instruction and schema files
     resolve beside it."""
@@ -768,15 +768,15 @@ def _compile(document: dict[str, Any], root: Path) -> dict[str, Any]:
         "runner": orchestrator_config.get("runner", default.get("runner")),
         "model": orchestrator_config.get("model", default.get("model")),
     }
-    phases: dict[str, Any] = {}
+    steps: dict[str, Any] = {}
     schemas: dict[str, Any] = {}
-    for phase_name, contract in graph["phases"].items():
-        policy = spec["agents"]["phases"][phase_name]
-        phases[phase_name] = {
+    for step_name, contract in graph["steps"].items():
+        policy = spec["agents"]["steps"][step_name]
+        steps[step_name] = {
             **_instructions(
                 root,
                 policy["instructions"],
-                f"spec.agents.phases.{phase_name}.instructions",
+                f"spec.agents.steps.{step_name}.instructions",
             ),
             "needs": contract["needs"],
             "type": contract["type"],
@@ -795,7 +795,7 @@ def _compile(document: dict[str, Any], root: Path) -> dict[str, Any]:
             if isinstance(item.get("schema"), (dict, bool)):
                 value = item["schema"]
                 content = json.dumps(value, sort_keys=True, separators=(",", ":"))
-                key = f"inline:{phase_name}:outputs:{item['name']}"
+                key = f"inline:{step_name}:outputs:{item['name']}"
                 schemas[key] = {
                     "content": content,
                     "sha256": hashlib.sha256(content.encode()).hexdigest(),
@@ -809,7 +809,7 @@ def _compile(document: dict[str, Any], root: Path) -> dict[str, Any]:
     normalized = json.loads(json.dumps(document, sort_keys=True, separators=(",", ":")))
     resolved = {
         "orchestrator": orchestrator,
-        "phases": phases,
+        "steps": steps,
         "schemas": schemas,
         # Integration-level reviewers are gone; the key keeps revisions stable.
         "integration_policies": {},

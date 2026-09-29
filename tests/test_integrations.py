@@ -28,7 +28,7 @@ def workflow(tmp_path: Path) -> Path:
             "instructions": {"workflow": {"content": "Deliver the outcome."}},
             "agents": {
                 "default": {"runner": "codex"},
-                "phases": {
+                "steps": {
                     "intake": {
                         "instructions": {"content": "Create the ticket."},
                         "needs": [],
@@ -85,9 +85,9 @@ def workflow(tmp_path: Path) -> Path:
     return path
 
 
-def test_compiles_phase_scoped_capability(tmp_path: Path) -> None:
+def test_compiles_step_scoped_capability(tmp_path: Path) -> None:
     compiled = compile_file(workflow(tmp_path))
-    assert compiled["instructions"]["phases"]["intake"]["capabilities"] == ["tickets.create"]
+    assert compiled["instructions"]["steps"]["intake"]["capabilities"] == ["tickets.create"]
     assert "secret" not in json.dumps(compiled).lower()
 
 
