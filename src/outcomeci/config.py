@@ -511,18 +511,10 @@ def _integrations(spec: dict[str, Any], connections: dict[str, dict[str, Any]]) 
         if connection not in connections or connections[connection].get("provider") != "http":
             raise ConfigError(f"{field}.connection must reference an HTTP connection")
         access = _mapping(item.get("access", {"mode": "schema"}), f"{field}.access")
-        if set(access) - {
-            "mode",
-            "source",
-            "operations",
-            "methods",
-            "expose",
-            "max_requests",
-            "opaque_identifiers",
-        }:
+        if set(access) - {"mode", "max_requests"}:
             raise ConfigError(f"{field}.access contains unsupported fields")
         mode = access.get("mode", "schema")
-        if mode not in {"schema", "openapi", "full"}:
+        if mode != "schema":
             raise ConfigError(f"{field}.access.mode is unsupported")
         normalized_access: dict[str, Any] = {"mode": mode}
         if "max_requests" in access:
@@ -530,57 +522,18 @@ def _integrations(spec: dict[str, Any], connections: dict[str, dict[str, Any]]) 
             if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 1000:
                 raise ConfigError(f"{field}.access.max_requests must be an integer from 1 to 1000")
             normalized_access["max_requests"] = limit
-        if "opaque_identifiers" in access:
-            if not isinstance(access["opaque_identifiers"], bool):
-                raise ConfigError(f"{field}.access.opaque_identifiers must be true or false")
-            normalized_access["opaque_identifiers"] = access["opaque_identifiers"]
-        reviewer = item.get("policy")
-        if reviewer is not None:
-            reviewer = _mapping(reviewer, f"{field}.policy")
-            if set(reviewer) - {"instructions", "runner", "model"}:
-                raise ConfigError(f"{field}.policy contains unsupported fields")
-            if (
-                not isinstance(reviewer.get("instructions"), str)
-                or not reviewer["instructions"].strip()
-            ):
-                raise ConfigError(f"{field}.policy.instructions is required")
-            _agent_policy(reviewer, f"{field}.policy")
-        if mode == "openapi":
-            source = access.get("source")
-            allow = access.get("operations", [])
-            if not isinstance(source, str) or not source.startswith(("https://", "http://")):
-                raise ConfigError(f"{field}.access.source must be an HTTP URL")
-            if not isinstance(allow, list) or not all(isinstance(value, str) for value in allow):
-                raise ConfigError(f"{field}.access.operations must be a string list")
-            normalized_access.update({"source": source, "operations": sorted(set(allow))})
-        if mode == "full":
-            methods = access.get("methods", sorted(HTTP_METHODS))
-            if not isinstance(methods, list) or not methods:
-                raise ConfigError(f"{field}.access.methods must be a non-empty list")
-            methods = [str(method).upper() for method in methods]
-            if any(method not in HTTP_METHODS for method in methods):
-                raise ConfigError(f"{field}.access.methods contains an unsupported method")
-            normalized_access["methods"] = sorted(set(methods))
-            expose = access.get("expose", {"result": "body"})
-            expose = _mapping(expose, f"{field}.access.expose")
-            if not all(
-                isinstance(key, str) and isinstance(path, str) for key, path in expose.items()
-            ):
-                raise ConfigError(f"{field}.access.expose must map output names to paths")
-            normalized_access["expose"] = expose
         operations = {
             operation_name: _operation(operation, f"{field}.operations.{operation_name}")
             for operation_name, operation in _mapping(
                 item.get("operations", {}), f"{field}.operations"
             ).items()
         }
-        if mode == "schema" and not operations:
+        if not operations:
             raise ConfigError(f"{field}.operations must define at least one operation")
         result[name] = {
             "connection": connection,
             "access": normalized_access,
             "operations": operations,
-            **({"policy": reviewer} if reviewer is not None else {}),
         }
     return result
 
@@ -742,24 +695,11 @@ def validate_lowered(root: dict[str, Any], path: Path) -> dict[str, Any]:
         item["allow_private_network"] = allow_private
     normalized_integrations = _integrations(spec, {item["ref"]: item for item in connections})
     spec["integrations"] = normalized_integrations
-    available_capabilities = (
-        {
-            f"{integration}.{operation}"
-            for integration, value in normalized_integrations.items()
-            for operation in value["operations"]
-        }
-        | {
-            f"{integration}.request"
-            for integration, value in normalized_integrations.items()
-            if value["access"]["mode"] == "full"
-        }
-        | {
-            f"{integration}.{re.sub(r'[^a-z0-9_-]+', '_', operation.lower()).strip('_')}"
-            for integration, value in normalized_integrations.items()
-            if value["access"]["mode"] == "openapi"
-            for operation in value["access"]["operations"]
-        }
-    )
+    available_capabilities = {
+        f"{integration}.{operation}"
+        for integration, value in normalized_integrations.items()
+        for operation in value["operations"]
+    }
     for phase_name, phase in normalized_phases.items():
         unknown_capabilities = set(phase["capabilities"]) - available_capabilities
         if unknown_capabilities:
@@ -871,26 +811,12 @@ def _compile(document: dict[str, Any], root: Path) -> dict[str, Any]:
                     root, item["schema"], "artifact schema", json_value=True
                 )
     normalized = json.loads(json.dumps(document, sort_keys=True, separators=(",", ":")))
-    reviewers = {}
-    for name, integration in spec.get("integrations", {}).items():
-        if integration.get("policy"):
-            reviewer = integration["policy"]
-            reviewers[name] = {
-                **_reference(
-                    root,
-                    reviewer["instructions"],
-                    f"spec.integrations.{name}.policy.instructions",
-                ),
-                "policy": {
-                    "runner": reviewer.get("runner", default.get("runner")),
-                    "model": reviewer.get("model", default.get("model")),
-                },
-            }
     resolved = {
         "orchestrator": orchestrator,
         "phases": phases,
         "schemas": schemas,
-        "integration_policies": reviewers,
+        # Integration-level reviewers are gone; the key keeps revisions stable.
+        "integration_policies": {},
     }
     revision_input = {
         **({"source": graph["source"]} if "source" in graph else {}),

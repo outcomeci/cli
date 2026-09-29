@@ -23,8 +23,18 @@ def executor(root, reviewer=None, handler=None):
         reviewed=True,
     )
     return policy.PolicyExecutor(
-        inner, root / ".broker", {"trigger": email_payload()}, reviewer or allow
+        inner,
+        root / ".broker",
+        {"trigger": email_payload()},
+        reviewer or allow,
+        step_policy=STEP_POLICY,
     )
+
+
+STEP_POLICY = {
+    "content": "Step policy for notify: only message the email's requester.",
+    "policy": {"runner": "codex", "model": None},
+}
 
 
 def allow(proposal):
@@ -48,16 +58,18 @@ def test_reviewed_requests_are_credential_blind_and_replayed(tmp_path):
         return httpx.Response(200, json={"ok": True, "user": {"id": "U0123456789", "name": "izzy"}})
 
     broker = executor(tmp_path, review, send)
-    inputs = {"method": "GET", "path": "/api/users.list", "purpose": "Find @izzy"}
-    first = broker.execute("slack.request", inputs, phase="notify")
-    assert "U0123456789" not in json.dumps(first)
+    inputs = {"method": "POST", "path": "/api/chat.postMessage", "body": {"text": "Hi"}}
+    first = broker.execute("slack.request", {**inputs, "purpose": "Tell @izzy"}, phase="notify")
+    assert first["ok"] is True
     assert "private-token" not in json.dumps(proposals)
-    assert first["output"]["result"]["user"]["id"] == "ref:izzy:id"
     assert broker.execute("slack.request", {**inputs, "purpose": "Another reason"}, phase="notify")[
         "replayed"
     ]
     assert len(calls) == 1
-    restored = policy.PolicyExecutor(broker.executor, tmp_path / ".broker", {}, review)
+    assert len(proposals) == 1
+    restored = policy.PolicyExecutor(
+        broker.executor, tmp_path / ".broker", {}, review, step_policy=STEP_POLICY
+    )
     assert restored.execute("slack.request", inputs, phase="notify")["replayed"]
 
 
@@ -132,34 +144,8 @@ def test_integration_failure_detail_is_scrubbed_of_credential_shaped_text(tmp_pa
     assert "connect failed" in failed["detail"]
 
 
-def test_ambiguous_names_and_provider_errors_fail_safely(tmp_path):
-    broker = executor(
-        tmp_path,
-        handler=lambda _: httpx.Response(
-            200,
-            json={
-                "ok": True,
-                "members": [
-                    {"name": "izzy", "id": "U0123456789"},
-                    {"name": "izzy", "id": "U0987654321"},
-                ],
-            },
-        ),
-    )
-    result = broker.execute(
-        "slack.request", {"method": "GET", "path": "/api/users.list"}, phase="notify"
-    )
-    assert "U0123456789" not in json.dumps(result)
-    with pytest.raises(IntegrationError, match="ambiguous"):
-        broker.execute(
-            "slack.request",
-            {
-                "method": "POST",
-                "path": "/api/conversations.open",
-                "body": {"users": "ref:izzy:id"},
-            },
-            phase="notify",
-        )
+def test_provider_errors_fail_safely(tmp_path):
+    broker = executor(tmp_path)
     broker.executor.transport = httpx.MockTransport(
         lambda _: httpx.Response(200, json={"ok": False, "error": "invalid_auth"})
     )
@@ -189,7 +175,7 @@ def test_provider_echo_cannot_disclose_injected_credential(tmp_path):
     assert "credential withheld" in json.dumps(result)
 
 
-def test_budget_methods_origin_and_identifiers_cannot_be_expanded(tmp_path):
+def test_budget_methods_and_origin_cannot_be_expanded(tmp_path):
     broker = executor(tmp_path)
     broker.executor.compiled["workflow"]["spec"]["integrations"]["slack"]["access"][
         "max_requests"
@@ -197,9 +183,15 @@ def test_budget_methods_origin_and_identifiers_cannot_be_expanded(tmp_path):
     for inputs in [
         {"method": "DELETE", "path": "/api/users"},
         {"method": "GET", "path": "https://evil.example/api"},
-        {"method": "POST", "path": "/api/test", "body": {"user": "U0123456789"}},
     ]:
         with pytest.raises(IntegrationError):
             broker.execute("slack.request", inputs, phase="notify")
     with pytest.raises(IntegrationError, match="budget"):
         broker.execute("slack.request", {"method": "GET", "path": "/api/new"}, phase="notify")
+
+
+def test_reads_skip_the_step_policy_review(tmp_path):
+    reviewed = []
+    broker = executor(tmp_path, lambda proposal: reviewed.append(proposal) or allow(proposal))
+    broker.execute("slack.request", {"method": "GET", "path": "/api/users.list"}, phase="notify")
+    assert reviewed == []

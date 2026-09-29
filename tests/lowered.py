@@ -28,11 +28,10 @@ def email_payload() -> dict[str, Any]:
 
 
 def email_notify(root: Path) -> Path:
-    """A lowered workflow whose `notify` phase may call a reviewed Slack API.
+    """A lowered workflow whose `notify` phase may call a budgeted Slack API.
 
-    The integration uses full access, a request budget, opaque identifiers and
-    an integration-level policy reviewer, so broker tests reach every guard."""
-    (root / "policy.md").write_text("Review only authorized email notification requests.\n")
+    `slack.request` takes any GET or POST under the origin, as a connector
+    operation does; broker tests add a step policy to review its changes."""
     document = {
         "apiVersion": "outcomeci.workflow/v1",
         "kind": "OutcomeWorkflow",
@@ -79,13 +78,18 @@ def email_notify(root: Path) -> Path:
             "integrations": {
                 "slack": {
                     "connection": "slack",
-                    "access": {
-                        "mode": "full",
-                        "methods": ["GET", "POST"],
-                        "max_requests": 8,
-                        "opaque_identifiers": True,
+                    "access": {"mode": "schema", "max_requests": 8},
+                    "operations": {
+                        "request": {
+                            "description": "Call the Slack Web API.",
+                            "request": {"methods": ["GET", "POST"]},
+                            "policy": {
+                                "side_effect": "execute",
+                                "approval": "inherit",
+                                "idempotency": "none",
+                            },
+                        }
                     },
-                    "policy": {"instructions": "policy.md"},
                 }
             },
         },

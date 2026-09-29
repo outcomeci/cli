@@ -1,7 +1,7 @@
-"""Run-scoped policy review, opaque references and durable effect receipts.
+"""Run-scoped grants, step policy review and durable effect receipts.
 
-No provider-specific endpoints: the workflow fixes the origin and methods, the
-policy agent reviews intent, and only the broker resolves references/credentials.
+No provider-specific endpoints: the workflow fixes the origin and methods, a
+step's policy reviewer checks intent, and only the broker resolves credentials.
 """
 
 from __future__ import annotations
@@ -10,7 +10,6 @@ import fcntl
 import hashlib
 import json
 import os
-import re
 import secrets
 import tempfile
 from collections.abc import Callable, Mapping
@@ -128,68 +127,6 @@ class PolicyExecutor:
                 self.event_sink(events[self._event_cursor])
                 self._event_cursor += 1
 
-    @staticmethod
-    def _resolve(value: Any, references: dict[str, str]) -> Any:
-        if isinstance(value, dict):
-            return {key: PolicyExecutor._resolve(item, references) for key, item in value.items()}
-        if isinstance(value, list):
-            return [PolicyExecutor._resolve(item, references) for item in value]
-        if isinstance(value, str):
-            if value in references:
-                if references[value] is None:
-                    raise IntegrationError(
-                        "integration.reference_ambiguous",
-                        "reference is ambiguous; clarify the intended recipient",
-                        category="validation",
-                    )
-                return references[value]
-            # References are values, not arbitrary URL/text substitution.
-            if value.startswith("ref:"):
-                raise IntegrationError(
-                    "integration.reference_unknown",
-                    "unknown or ambiguous reference",
-                    category="validation",
-                )
-        return value
-
-    @staticmethod
-    def _opaque(value: Any, references: dict[str, str], label: str = "resource") -> Any:
-        if isinstance(value, list):
-            return [PolicyExecutor._opaque(item, references, label) for item in value]
-        if isinstance(value, dict):
-            name = value.get("name") or value.get("username") or label
-            result = {}
-            for key, item in value.items():
-                if (
-                    isinstance(item, (str, int))
-                    and not isinstance(item, bool)
-                    and (
-                        key == "id"
-                        or key.endswith("_id")
-                        or key in {"ts", "next_cursor", "cursor"}
-                        or (isinstance(item, str) and re.fullmatch(r"[UCDTWB][A-Z0-9]{8,}", item))
-                    )
-                ):
-                    if not item:
-                        result[key] = item
-                        continue
-                    existing = next((ref for ref, raw in references.items() if raw == item), None)
-                    reference = existing or f"ref:{name}:{key}"
-                    if reference in references and references[reference] != item:
-                        if value.get("name") or value.get("username"):
-                            references[reference] = None
-                            result[key] = reference
-                            continue
-                        reference = f"ref:{name}:{key}:{len(references) + 1}"
-                    references[reference] = item
-                    result[key] = reference
-                else:
-                    result[key] = PolicyExecutor._opaque(item, references, str(name))
-            return result
-        if isinstance(value, str) and re.search(r"[UCDTWB][A-Z0-9]{8,}", value):
-            return "[provider reference withheld]"
-        return value
-
     def _event(
         self,
         state: dict[str, Any],
@@ -302,14 +239,7 @@ class PolicyExecutor:
                     )
                     self._deny(state, phase, capability, str(exc))
                 raise
-        if (
-            not integration.get("policy")
-            and not self.step_policy
-            and not (
-                integration["access"].get("max_requests")
-                or integration["access"].get("opaque_identifiers")
-            )
-        ):
+        if not self.step_policy and not integration["access"].get("max_requests"):
             return self.executor.execute(
                 capability,
                 inputs,
@@ -367,26 +297,6 @@ class PolicyExecutor:
                     "integration request budget exhausted",
                     category="policy",
                 )
-            if integration["access"].get("opaque_identifiers") and re.search(
-                r'"[UCDTWB][A-Z0-9]{8,}"', json.dumps(request)
-            ):
-                self._deny(
-                    state,
-                    phase,
-                    capability,
-                    "Use broker references instead of raw provider identifiers",
-                )
-                raise IntegrationError(
-                    "integration.raw_identifier_denied",
-                    "use broker references, not provider identifiers",
-                    category="policy",
-                )
-            references = state["references"].setdefault(capability.split(".")[0], {})
-            try:
-                actual = self._resolve(request, references)
-            except IntegrationError:
-                self._deny(state, phase, capability, "Provider reference is unknown or ambiguous")
-                raise
             call = {
                 "capability": capability,
                 "phase": phase,
@@ -417,14 +327,10 @@ class PolicyExecutor:
                 ),
             )
             self._save(state)
-            policy = self.step_policy or (
-                self.executor.compiled["instructions"]
-                .get("integration_policies", {})
-                .get(capability.split(".")[0])
-            )
+            policy = self.step_policy
             try:
-                reviewed = bool(integration.get("policy")) or (
-                    self.step_policy is not None and not self._reads_only(capability, request)
+                reviewed = self.step_policy is not None and not self._reads_only(
+                    capability, request
                 )
                 if reviewed:
                     compared = self.executor.compared(capability, actual, phase=phase)
@@ -496,15 +402,13 @@ class PolicyExecutor:
                 self._save(state)
                 result = self.executor.execute(
                     capability,
-                    actual,
+                    request,
                     phase=phase,
                     response_grants=[checks for _, checks in alternatives],
                 )
                 granted_by = result.get("audit", {}).get("grant")
                 if granted_by is not None:
                     call["as"] = alternatives[granted_by][0]
-                if integration["access"].get("opaque_identifiers"):
-                    result = self._opaque(result, references)
                 result["receipt"] = fingerprint
                 call.update(status="confirmed", result=result)
                 provider = (

@@ -60,7 +60,7 @@ def test_invalid_review_never_records_untrusted_reason(tmp_path):
     )
     with pytest.raises(IntegrationError):
         broker.execute(
-            "slack.request", {"method": "GET", "path": "/api/users.list"}, phase="notify"
+            "slack.request", {"method": "POST", "path": "/api/chat.postMessage"}, phase="notify"
         )
     assert events(broker)[-1]["decision"] == "error"
     assert "private-review-content" not in json.dumps(events(broker))

@@ -470,11 +470,6 @@ class IntegrationExecutor:
             for integration, value in integrations.items()
             for operation in value["operations"]
         )
-        all_names.extend(
-            f"{integration}.request"
-            for integration, value in integrations.items()
-            if value["access"]["mode"] == "full"
-        )
         if phase is None:
             return all_names
         policy = self.compiled["instructions"]["phases"].get(phase)
@@ -504,47 +499,6 @@ class IntegrationExecutor:
                 category="configuration",
             )
         operation = integration["operations"].get(operation_name)
-        if operation_name == "request" and integration["access"]["mode"] == "full":
-            connection = next(
-                (
-                    item
-                    for item in self.compiled["workflow"]["spec"]["connections"]
-                    if item["ref"] == integration["connection"]
-                ),
-                None,
-            )
-            base_url = connection["base_url"] if connection else "the integration's fixed origin"
-            return {
-                "name": capability,
-                "description": (
-                    f"Make an authorized request against {base_url}. path is relative to this "
-                    "exact origin, starting with a single leading slash. This tool cannot "
-                    "guess the target API's own routing conventions (e.g. some APIs nest every "
-                    "operation under a prefix like /api/ or /v1/ that isn't part of the "
-                    "documented endpoint name) -- confirm the exact path from that API's own "
-                    "documentation before calling, rather than retrying variations against the "
-                    "live integration."
-                ),
-                "input": {
-                    "type": "object",
-                    "required": ["method", "path"],
-                    "properties": {
-                        "method": {"enum": integration["access"]["methods"]},
-                        "path": {"type": "string", "pattern": "^/[^/].*|^/$"},
-                        "query": {"type": "object"},
-                        "headers": {"type": "object"},
-                        "body": {},
-                        "purpose": {"type": "string", "minLength": 1},
-                    },
-                    "additionalProperties": False,
-                },
-                "output": sorted(integration["access"]["expose"]),
-                "policy": {
-                    "side_effect": "execute",
-                    "approval": "inherit",
-                    "idempotency": "none",
-                },
-            }
         if operation is None:
             raise IntegrationError(
                 "integration.capability_not_found",
@@ -678,11 +632,7 @@ class IntegrationExecutor:
         integration_name, operation_name = capability.split(".", 1)
         spec = self.compiled["workflow"]["spec"]
         integration = spec["integrations"][integration_name]
-        if not self.reviewed and (
-            integration.get("policy")
-            or "max_requests" in integration["access"]
-            or integration["access"].get("opaque_identifiers")
-        ):
+        if not self.reviewed and "max_requests" in integration["access"]:
             raise IntegrationError(
                 "integration.policy_runtime_unavailable",
                 "policy-reviewed execution is not wired yet; no request was sent",
@@ -700,26 +650,6 @@ class IntegrationExecutor:
                     **({"body": inputs["body"]} if "body" in inputs else {}),
                     "timeout_seconds": 30,
                     "_dynamic": True,
-                },
-            }
-        if operation_name == "request" and integration["access"]["mode"] == "full":
-            operation = {
-                "description": "Dynamic request inside an authorized origin.",
-                "input": self.describe(capability)["input"],
-                "request": {
-                    "method": inputs.get("method"),
-                    "path": inputs.get("path"),
-                    "headers": inputs.get("headers", {}),
-                    "query": inputs.get("query", {}),
-                    **({"body": inputs["body"]} if "body" in inputs else {}),
-                    "timeout_seconds": 30,
-                    "_dynamic": True,
-                },
-                "response": {"expose": integration["access"]["expose"]},
-                "policy": {
-                    "side_effect": "execute",
-                    "approval": "inherit",
-                    "idempotency": "none",
                 },
             }
         if operation is not None and operation.get("deny"):
