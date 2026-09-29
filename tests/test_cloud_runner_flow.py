@@ -1,4 +1,5 @@
 import base64
+import io
 import json
 import os
 import stat
@@ -627,7 +628,7 @@ class FlowTests(unittest.TestCase):
         self.assertIsNone(values["agent_credential"])
         self.assertEqual(values["expected_credential_version"], 9)
 
-    def test_a_rejected_completion_report_is_captured_instead_of_silently_swallowed(self):
+    def test_a_rejected_completion_report_is_logged_instead_of_silently_swallowed(self):
         claim = {
             "content": "apiVersion: outcomeci.workflow/v1\nname: example\n",
             "files": {},
@@ -681,7 +682,7 @@ class FlowTests(unittest.TestCase):
                         "workflow": {"spec": {"agents": {"default": {}}}},
                     },
                 ),
-                mock.patch("outcomeci.cloud_runner.main.capture_exception") as capture,
+                mock.patch("sys.stderr", new_callable=io.StringIO) as stderr,
                 self.assertRaises(ExecutionError),
             ):
                 execute_workflow(
@@ -693,12 +694,21 @@ class FlowTests(unittest.TestCase):
                     ),
                     client,
                 )
-        capture.assert_called_once()
-        (reported_error,), kwargs = capture.call_args
-        self.assertIsInstance(reported_error, CoreError)
-        self.assertEqual(reported_error.category, "core_conflict")
-        self.assertEqual(kwargs["event"], "workflow_completion_report_failed")
-        self.assertEqual(kwargs["original_category"], "agent_process_failed")
+        reports = [
+            json.loads(line)
+            for line in stderr.getvalue().splitlines()
+            if "workflow_completion_report_failed" in line
+        ]
+        self.assertEqual(
+            reports,
+            [
+                {
+                    "event": "workflow_completion_report_failed",
+                    "report_category": "core_conflict",
+                    "original_category": "agent_process_failed",
+                }
+            ],
+        )
 
     def test_non_usage_limit_failure_never_triggers_the_fallback(self):
         claim = {

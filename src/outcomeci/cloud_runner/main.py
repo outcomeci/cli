@@ -26,7 +26,6 @@ from ..publication import REPORT, REQUIREMENTS, prepare_publication
 from ..security import private_path
 from .client import CoreClient, CoreError
 from .models import ContractError, Launch
-from .monitoring import capture_exception, init_exception_monitoring
 from .process import PTY_COLUMNS, PTY_ROWS, run
 from .providers import ADAPTERS
 from .providers.codex import FILE_AUTH_CONFIG as CODEX_FILE_AUTH_CONFIG
@@ -371,11 +370,6 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 ),
                 file=sys.stderr,
             )
-            capture_exception(
-                completion_error,
-                event="workflow_completion_report_failed",
-                original_category=workflow_failure_category(exc),
-            )
         raise
     finally:
         stop.set()
@@ -677,7 +671,6 @@ def main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
     if args and args[0] == "oci":
         os.execvp("oci", args)
-    init_exception_monitoring()
     exception_type: str | None = None
     try:
         launch = Launch.from_env(dict(os.environ))
@@ -687,22 +680,17 @@ def main(argv: list[str] | None = None) -> int:
         if launch.mode == "workflow":
             return execute_workflow(launch, client)
         return execute_publication(launch, client)
-    except TimeoutError as error:
+    except TimeoutError:
         category, retryable = "agent_timeout", True
-        capture_exception(error, category=category)
     except CoreError as error:
         category, retryable = error.category, error.retryable
-        capture_exception(error, category=category)
-    except (ContractError, KeyError, json.JSONDecodeError) as error:
+    except (ContractError, KeyError, json.JSONDecodeError):
         category, retryable = "invalid_job", False
-        capture_exception(error, category=category)
     except ExecutionError as error:
         category, retryable = workflow_failure_category(error), error.retryable
-        capture_exception(error, category=category)
     except Exception as error:
         category, retryable = "internal_failure", True
         exception_type = type(error).__name__
-        capture_exception(error, category=category)
     payload = {
         "event": "outcome_runner_failed",
         "category": category,
