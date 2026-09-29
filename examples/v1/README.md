@@ -1,8 +1,8 @@
 # outcomeci.workflow/v1 examples
 
-Two workflows written in the `outcomeci.workflow/v1` format. `oci` compiles them
-like any workflow file, and `oci workflow debug --image` runs them in the
-runner container against a cloud workspace's vault.
+Two workflows written in the `outcomeci.workflow/v1` format. `oci validate`
+compiles them, and `oci workflow run` runs them in the runner container, with
+the local Vault or, with `--cloud`, a cloud workspace's Vault.
 
 | File | What it does |
 | --- | --- |
