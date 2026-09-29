@@ -162,7 +162,7 @@ def test_get_workflow_reads_the_latest_revision(monkeypatch) -> None:
             "workflow_id": "00000000-0000-0000-0000-000000000001",
             "name": "code-outcome",
             "revision": 3,
-            "content": "apiVersion: outcomeci.workflow/v1alpha1\n",
+            "content": "apiVersion: outcomeci.workflow/v1\n",
             "content_sha256": "deadbeef",
             "content_type": "yaml",
             "source_filename": "outcome.yml",

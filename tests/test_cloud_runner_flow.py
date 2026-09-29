@@ -42,7 +42,7 @@ class FlowTests(unittest.TestCase):
 
     def test_a_retryable_conflict_is_reported_as_retryable_on_complete(self):
         claim = {
-            "content": "apiVersion: outcomeci.workflow/v1alpha1\nkind: OutcomeWorkflow\n",
+            "content": "apiVersion: outcomeci.workflow/v1\nname: example\n",
             "files": {},
             "trigger_name": "inbound",
             "input": {"subject": "hello"},
@@ -191,7 +191,7 @@ class FlowTests(unittest.TestCase):
 
     def test_generic_workflow_uses_scoped_vault_values_and_completes(self):
         claim = {
-            "content": "apiVersion: outcomeci.workflow/v1alpha1\nkind: OutcomeWorkflow\n",
+            "content": "apiVersion: outcomeci.workflow/v1\nname: example\n",
             "files": {},
             "trigger_name": "inbound",
             "input": {"subject": "hello"},
@@ -314,7 +314,7 @@ class FlowTests(unittest.TestCase):
 
     def test_generic_workflow_auto_continues_through_ready_phases(self):
         claim = {
-            "content": "apiVersion: outcomeci.workflow/v1alpha1\nkind: OutcomeWorkflow\n",
+            "content": "apiVersion: outcomeci.workflow/v1\nname: example\n",
             "files": {},
             "trigger_name": "inbound",
             "input": {"subject": "hello"},
@@ -409,7 +409,7 @@ class FlowTests(unittest.TestCase):
 
     def test_usage_limit_swaps_to_the_declared_fallback_agent_and_stays_on_it(self):
         claim = {
-            "content": "apiVersion: outcomeci.workflow/v1alpha1\nkind: OutcomeWorkflow\n",
+            "content": "apiVersion: outcomeci.workflow/v1\nname: example\n",
             "files": {},
             "trigger_name": "inbound",
             "input": {"subject": "hello"},
@@ -533,7 +533,7 @@ class FlowTests(unittest.TestCase):
 
     def test_fallback_failure_does_not_attach_a_stale_codex_credential_writeback(self):
         claim = {
-            "content": "apiVersion: outcomeci.workflow/v1alpha1\nkind: OutcomeWorkflow\n",
+            "content": "apiVersion: outcomeci.workflow/v1\nname: example\n",
             "files": {},
             "trigger_name": "inbound",
             "input": {"subject": "hello"},
@@ -629,7 +629,7 @@ class FlowTests(unittest.TestCase):
 
     def test_a_rejected_completion_report_is_captured_instead_of_silently_swallowed(self):
         claim = {
-            "content": "apiVersion: outcomeci.workflow/v1alpha1\nkind: OutcomeWorkflow\n",
+            "content": "apiVersion: outcomeci.workflow/v1\nname: example\n",
             "files": {},
             "trigger_name": "inbound",
             "input": {"subject": "hello"},
@@ -702,7 +702,7 @@ class FlowTests(unittest.TestCase):
 
     def test_non_usage_limit_failure_never_triggers_the_fallback(self):
         claim = {
-            "content": "apiVersion: outcomeci.workflow/v1alpha1\nkind: OutcomeWorkflow\n",
+            "content": "apiVersion: outcomeci.workflow/v1\nname: example\n",
             "files": {},
             "trigger_name": "inbound",
             "input": {"subject": "hello"},
@@ -786,7 +786,7 @@ class FlowTests(unittest.TestCase):
 
     def test_generic_workflow_failure_reports_a_redacted_detail(self):
         claim = {
-            "content": "apiVersion: outcomeci.workflow/v1alpha1\nkind: OutcomeWorkflow\n",
+            "content": "apiVersion: outcomeci.workflow/v1\nname: example\n",
             "files": {},
             "trigger_name": "inbound",
             "input": {"subject": "hello"},
@@ -1076,7 +1076,7 @@ def publication_claim(agent="codex"):
             "agent": agent,
             "model": None,
             "source_filename": "outcome.yml",
-            "content": "apiVersion: outcomeci.workflow/v1alpha1\nkind: OutcomeWorkflow\n",
+            "content": "apiVersion: outcomeci.workflow/v1\nname: example\n",
             "files": {},
             "sensitive_terms": [],
         },
@@ -1114,9 +1114,7 @@ class PublicationClient:
 
 def _fake_prepare_publication_writing_output(source, destination, **_options):
     destination.mkdir(parents=True, exist_ok=True)
-    (destination / "outcome.yml").write_text(
-        "apiVersion: outcomeci.workflow/v1alpha1\nkind: OutcomeWorkflow\n"
-    )
+    (destination / "outcome.yml").write_text("apiVersion: outcomeci.workflow/v1\nname: example\n")
     return {
         "package_digest": "digest-1",
         "workflow_revision": "rev-1",

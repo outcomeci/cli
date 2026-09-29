@@ -7,7 +7,7 @@ from typing import Any
 
 from .security import private_path
 
-SCHEMA_VERSION = "outcomeci.outcome-manifest/v1alpha1"
+SCHEMA_VERSION = "outcomeci.run-manifest/v1"
 
 
 def build_manifest(

@@ -831,7 +831,7 @@ def _compile(document: dict[str, Any], root: Path) -> dict[str, Any]:
         json.dumps(revision_input, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
     return {
-        "schema_version": "outcomeci.workflow/v1alpha1",
+        "schema_version": "outcomeci.workflow/v1",
         "api_version": document["apiVersion"],
         "engine_version": "2",
         "engine_package_version": __version__,
