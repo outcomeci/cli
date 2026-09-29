@@ -7,41 +7,12 @@ import httpx
 
 from outcomeci.cloud_runner.client import CoreClient, CoreError
 from outcomeci.cloud_runner.main import classify_failure, safe_env, safe_verification
-from outcomeci.cloud_runner.models import ContractError, ExecutionClaim, Launch
-
-
-def outcome_claim(provider: str = "codex") -> ExecutionClaim:
-    hydration = {"provider": provider}
-    hydration["auth_json" if provider == "codex" else "oauth_token"] = (
-        {"auth_mode": "chatgpt", "refresh_token": "secret"}
-        if provider == "codex"
-        else "claude-secret"
-    )
-    return ExecutionClaim.parse(
-        {
-            "job": {
-                "job_id": "job_1",
-                "kind": "outcome",
-                "repositories": ["owner/state", "owner/product"],
-                "agent": provider,
-            },
-            "lease_id": "lease_1",
-            "credential_version": 3,
-            "lease_expires_at": "2026-08-20T00:00:00Z",
-            "completion_token": "completion",
-            "core_job_token": "job-token",
-            "command": ["oci", "outcome", "run"],
-            "github_token": "github-token",
-            "hydration": hydration,
-            "timeout_seconds": 60,
-            "outcome": {"phase": "plan"},
-        }
-    )
+from outcomeci.cloud_runner.models import ContractError, Launch
 
 
 class ContractTests(unittest.TestCase):
     def test_runner_accepts_only_known_modes(self):
-        for mode in ("authorize", "outcome", "workflow", "publication"):
+        for mode in ("authorize", "workflow", "publication"):
             launch = Launch.from_env(
                 {
                     "AGENT_RUNNER_MODE": mode,
@@ -54,33 +25,12 @@ class ContractTests(unittest.TestCase):
         with self.assertRaises(ContractError):
             Launch.from_env(
                 {
-                    "AGENT_RUNNER_MODE": "execute",
+                    "AGENT_RUNNER_MODE": "outcome",
                     "AGENT_JOB_ID": "job",
                     "AGENT_BOOTSTRAP_TOKEN": "opaque",
                     "OUTCOMECI_API_URL": "https://api.outcomeci.com",
                 }
             )
-
-    def test_outcome_claim_requires_outcome_binding(self):
-        self.assertEqual(outcome_claim().outcome, {"phase": "plan"})
-        raw = {
-            "job": {
-                "job_id": "job",
-                "kind": "outcome",
-                "repositories": ["owner/repo"],
-                "agent": "codex",
-            },
-            "lease_id": "lease",
-            "credential_version": 1,
-            "lease_expires_at": "soon",
-            "completion_token": "complete",
-            "core_job_token": "job-token",
-            "command": ["oci", "outcome", "run"],
-            "github_token": "github",
-            "hydration": {"provider": "codex", "auth_json": {}},
-        }
-        with self.assertRaisesRegex(ContractError, "outcome binding"):
-            ExecutionClaim.parse(raw)
 
     def test_client_posts_json_and_returns_the_parsed_body(self):
         captured = {}
@@ -106,7 +56,7 @@ class ContractTests(unittest.TestCase):
         oversized = json.dumps({"padding": "x" * (1024 * 1024)})
         transport = httpx.MockTransport(lambda request: httpx.Response(200, text=oversized))
         client = CoreClient(
-            "https://api.outcomeci.com", "job", "bootstrap", "outcome", transport=transport
+            "https://api.outcomeci.com", "job", "bootstrap", "authorize", transport=transport
         )
         with self.assertRaises(CoreError) as raised:
             client.claim_workflow()
@@ -115,7 +65,7 @@ class ContractTests(unittest.TestCase):
     def test_client_treats_401_as_claim_rejected(self):
         transport = httpx.MockTransport(lambda request: httpx.Response(401, text="unauthorized"))
         client = CoreClient(
-            "https://api.outcomeci.com", "job", "bootstrap", "outcome", transport=transport
+            "https://api.outcomeci.com", "job", "bootstrap", "workflow", transport=transport
         )
         with self.assertRaises(CoreError) as raised:
             client.claim_workflow()
@@ -129,7 +79,7 @@ class ContractTests(unittest.TestCase):
             "https://api.outcomeci.com",
             "job",
             "bootstrap",
-            "outcome",
+            "workflow",
             transport=httpx.MockTransport(handler),
         )
         with self.assertRaises(CoreError) as raised:
@@ -137,13 +87,13 @@ class ContractTests(unittest.TestCase):
         self.assertEqual(raised.exception.category, "core_unavailable")
         self.assertTrue(raised.exception.retryable)
 
-    def test_client_uses_outcome_job_endpoint_and_classifies_conflicts(self):
+    def test_client_classifies_conflicts_as_retryable(self):
         transport = httpx.MockTransport(lambda request: httpx.Response(409, text="error"))
         client = CoreClient(
-            "https://api.outcomeci.com", "job", "bootstrap", "outcome", transport=transport
+            "https://api.outcomeci.com", "job", "bootstrap", "workflow", transport=transport
         )
         with self.assertRaises(CoreError) as raised:
-            client.claim_execution()
+            client.claim_workflow()
         self.assertEqual(raised.exception.category, "core_conflict")
         self.assertTrue(raised.exception.retryable)
 

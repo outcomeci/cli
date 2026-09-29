@@ -210,22 +210,6 @@ def _authorized_request(
     return status, value
 
 
-def start_email_trigger_proof(workspace_id: str) -> dict[str, Any]:
-    status, value = _authorized_request(
-        f"/workspaces/{workspace_id}/email-trigger-proofs", method="POST", body={}
-    )
-    _raise_for_status(status, value, 202, "could not start email trigger proof", require_dict=True)
-    return value
-
-
-def get_email_trigger_proof(workspace_id: str, proof_id: str) -> dict[str, Any]:
-    status, value = _authorized_request(
-        f"/workspaces/{workspace_id}/email-trigger-proofs/{proof_id}"
-    )
-    _raise_for_status(status, value, 200, "could not read email trigger proof", require_dict=True)
-    return value
-
-
 def get_workflow(workspace_id: str, workflow_id: str) -> dict[str, Any]:
     status, value = _authorized_request(
         f"/workspaces/{workspace_id}/workflow-revisions/{workflow_id}/latest"
@@ -239,8 +223,6 @@ def sync_workflow(
     workspace_id: str,
     name: str | None,
     mode: str,
-    *,
-    patch_path: Path | None = None,
 ) -> dict[str, Any]:
     path = path.resolve()
     if not path.is_file():
@@ -259,28 +241,6 @@ def sync_workflow(
         raise ExecutionError(
             "workflow name is required; set name (v1) or metadata.name, or pass --name"
         )
-    lineage: dict[str, Any] = {}
-    expected_parent_sha256 = None
-    if patch_path is not None:
-        if mode != "version":
-            raise ExecutionError("a lineage patch can only be synced as a new version")
-        try:
-            patch = yaml.safe_load(patch_path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError) as exc:
-            raise ExecutionError(f"could not read workflow patch: {exc}") from exc
-        if not isinstance(patch, dict) or patch.get("kind") != "OutcomeWorkflowPatch":
-            raise ExecutionError("lineage patch must be an OutcomeWorkflowPatch")
-        metadata = patch.get("metadata", {})
-        expected_parent_sha256 = metadata.get("parentContentSha256")
-        if not isinstance(expected_parent_sha256, str):
-            raise ExecutionError("lineage patch has no parent content digest")
-        lineage = {
-            "type": "learned_operation",
-            "parent_workflow_revision": metadata.get("parentRevision"),
-            "patch": patch_path.name,
-            "reason": metadata.get("reason"),
-            "derived_from": metadata.get("derivedFrom", {}),
-        }
     files: dict[str, str] = {}
     support_root = path.parent / ".outcomeci"
     if support_root.is_dir():
@@ -311,8 +271,6 @@ def sync_workflow(
             "content_type": "json" if suffix == ".json" else "yaml",
             "source_filename": path.name,
             "files": files,
-            "expected_parent_sha256": expected_parent_sha256,
-            "lineage": lineage,
         },
     )
     _raise_for_status(status, value, 201, "workflow synchronization failed", require_dict=True)
@@ -323,7 +281,6 @@ def issue_debug_lease(
     workspace_id: str,
     workflow_id: str,
     *,
-    invocation_id: str | None = None,
     ttl_seconds: int = 600,
     agent_provider: str | None = None,
 ) -> dict[str, Any]:
@@ -332,7 +289,7 @@ def issue_debug_lease(
     With agent_provider, the lease also carries the workspace's agent credential
     for that provider, held exclusively until complete_debug_agent_lease().
     """
-    body: dict[str, Any] = {"invocation_id": invocation_id, "ttl_seconds": ttl_seconds}
+    body: dict[str, Any] = {"ttl_seconds": ttl_seconds}
     if agent_provider is not None:
         body["agent_provider"] = agent_provider
     status, value = _authorized_request(
@@ -379,15 +336,26 @@ def complete_debug_agent_lease(
     _raise_for_status(status, value, 200, "could not release the debug agent lease")
 
 
-def complete_debug_lease(
-    workspace_id: str, workflow_id: str, invocation_id: str, status_value: str
-) -> None:
+def rotate_debug_vault_credential(
+    workspace_id: str,
+    workflow_id: str,
+    lease_id: str,
+    path: str,
+    expected_version: int,
+    secrets: dict[str, str],
+) -> int:
+    """Save secret fields a provider rotated during a run with this Vault lease.
+
+    Returns the credential's new version; a stale `expected_version` is refused
+    so a concurrent rotation is never overwritten.
+    """
     status, value = _authorized_request(
-        f"/workspaces/{workspace_id}/workflows/{workflow_id}/debug-lease/{invocation_id}/complete",
+        f"/workspaces/{workspace_id}/workflows/{workflow_id}/debug-lease/vault/{lease_id}/rotate",
         method="POST",
-        body={"status": status_value},
+        body={"path": path, "expected_version": expected_version, "secrets": secrets},
     )
-    _raise_for_status(status, value, 200, "could not resolve the debug-claimed invocation")
+    _raise_for_status(status, value, 200, f"could not save the rotated secret for {path}")
+    return int(value["version"])
 
 
 def vault_request(workspace_id: str, operation: str, **values: Any) -> dict[str, Any] | list[Any]:
@@ -404,43 +372,15 @@ def vault_request(workspace_id: str, operation: str, **values: Any) -> dict[str,
             "workflow_ids": values.get("workflow_ids", []),
         }
     elif operation == "put_credential":
-        credential_type = values["credential_type"]
-        inferred_secret = {
-            "api_key": "api_key",
-            "auth_header": "value",
-            "oauth2": "client_secret",
-            "oidc": "client_secret",
-        }[credential_type]
-        configuration = {
-            key: values.get(key)
-            for key in (
-                "header_name",
-                "prefix",
-                "scheme",
-                "token_url",
-                "issuer_url",
-                "client_id",
-                "grant_type",
-                "audience",
-            )
-            if values.get(key) is not None
-        }
-        if credential_type == "auth_header":
-            configuration.setdefault("header_name", "Authorization")
-            configuration.setdefault("scheme", "Bearer")
-        elif credential_type == "api_key":
-            configuration.setdefault("header_name", "X-API-Key")
-        if values.get("scopes"):
-            configuration["scopes"] = values["scopes"]
         method, path, expected = "POST", f"{base}/credentials", {201}
+        credential = values["credential"]
         body = {
             "path": values["path"],
             "display_name": values["display_name"],
             "service": values["provider"],
-            "credential_type": credential_type,
-            "configuration": configuration,
-            "secrets": values.get("secrets")
-            or {values.get("secret_name") or inferred_secret: values["value"]},
+            "credential_type": credential["credential_type"],
+            "configuration": credential["configuration"],
+            "secrets": credential["secrets"],
             "workflow_ids": values.get("workflow_ids", []),
         }
     elif operation == "rotate":

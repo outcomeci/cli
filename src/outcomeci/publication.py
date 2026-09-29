@@ -165,7 +165,7 @@ def _consumer_values(source: Path) -> list[str]:
             candidate = value.strip()
             if (
                 parent in CONSUMER_KEYS
-                or candidate.startswith("vault://")
+                or candidate.startswith("vault:")
                 or candidate.startswith("https://")
                 or candidate.startswith("http://")
                 or EMAIL.fullmatch(candidate)

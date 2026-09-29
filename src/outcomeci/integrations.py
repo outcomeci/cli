@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import copy
 import difflib
 import hashlib
 import ipaddress
@@ -21,11 +20,8 @@ from urllib.parse import quote, urljoin, urlsplit
 
 import httpx
 import jsonschema
-import yaml
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from .config import ConfigError, compile_workflow
+from .auth import Authenticator, AuthError, shape_check
 from .process import ExecutionError
 
 CredentialResolver = Callable[[str], Mapping[str, str] | str]
@@ -82,15 +78,30 @@ def environment_resolver(reference: str) -> Mapping[str, str] | str:
     return value
 
 
-def local_credential_resolver(root: Path) -> CredentialResolver:
-    def resolve(reference: str) -> Mapping[str, str] | str:
+class LocalCredentialResolver:
+    """Resolve `vault:` references from the checkout's local Vault, else the
+    environment, and write a rotated secret back to the local Vault."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+
+    def __call__(self, reference: str) -> Mapping[str, Any] | str:
         if reference.startswith("vault:"):
             from .local_vault import resolve as resolve_local_vault
 
-            return resolve_local_vault(root, reference)
+            return resolve_local_vault(self.root, reference)
         return environment_resolver(reference)
 
-    return resolve
+    def rotate(self, reference: str, secrets: dict[str, str]) -> None:
+        if not reference.startswith("vault:"):
+            raise ExecutionError("only a local Vault credential can store a rotated secret")
+        from .local_vault import rotate as rotate_local_vault
+
+        rotate_local_vault(self.root, reference, secrets)
+
+
+def local_credential_resolver(root: Path) -> CredentialResolver:
+    return LocalCredentialResolver(root)
 
 
 def _lookup(value: Any, path: str) -> Any:
@@ -153,130 +164,6 @@ def _safe_destination(url: str, allow_private: bool) -> None:
                 "integration destination resolves to a non-public address",
                 category="policy",
             )
-
-
-def _credential_mapping(value: Mapping[str, str] | str) -> dict[str, str]:
-    if isinstance(value, Mapping) and isinstance(value.get("secrets"), Mapping):
-        secrets = value["secrets"]
-        configuration = value.get("configuration", {})
-        return {
-            **configuration,
-            **secrets,
-            "value": secrets.get("api_key", secrets.get("value", "")),
-        }
-    return dict(value) if isinstance(value, Mapping) else {"value": value}
-
-
-def _b64url(raw: bytes) -> str:
-    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
-
-
-def _jwt_bearer_assertion(auth: dict[str, Any], credential: dict[str, str]) -> str:
-    algorithm = credential.get("algorithm", "RS256")
-    if algorithm != "RS256":
-        raise ExecutionError(f"jwt_bearer algorithm '{algorithm}' is unsupported")
-    if not credential.get("issuer"):
-        raise ExecutionError("jwt_bearer credential is missing issuer")
-    try:
-        private_key = serialization.load_pem_private_key(
-            credential.get("private_key", "").encode(), password=None
-        )
-    except ValueError as exc:
-        raise ExecutionError("jwt_bearer private_key is not a valid PEM private key") from exc
-    if not isinstance(private_key, rsa.RSAPrivateKey):
-        raise ExecutionError("jwt_bearer private_key must be an RSA key")
-    now = int(time.time())
-    header = {"alg": "RS256", "typ": "JWT"}
-    claims = {
-        "iss": credential["issuer"],
-        "aud": auth.get("audience") or auth.get("token_url", ""),
-        "iat": now,
-        "exp": now + 300,
-    }
-    if auth.get("scope"):
-        claims["scope"] = auth["scope"]
-    if credential.get("subject"):
-        claims["sub"] = credential["subject"]
-    signing_input = (
-        f"{_b64url(json.dumps(header, separators=(',', ':')).encode())}"
-        f".{_b64url(json.dumps(claims, separators=(',', ':')).encode())}"
-    )
-    signature = private_key.sign(signing_input.encode(), padding.PKCS1v15(), hashes.SHA256())
-    return f"{signing_input}.{_b64url(signature)}"
-
-
-def _token(
-    client: httpx.Client,
-    auth: dict[str, Any],
-    credential: dict[str, str],
-) -> str:
-    token_url = auth.get("token_url")
-    if auth["type"] == "oidc":
-        discovery = client.get(auth["discovery_url"])
-        discovery.raise_for_status()
-        token_url = discovery.json().get("token_endpoint")
-    if not isinstance(token_url, str):
-        raise ExecutionError("authorization server did not provide a token endpoint")
-    if auth["type"] == "jwt_bearer":
-        data = {
-            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
-            "assertion": _jwt_bearer_assertion(auth, credential),
-        }
-        response = client.post(token_url, data=data)
-    else:
-        grant_type = auth.get("grant_type", "client_credentials")
-        data = {"grant_type": grant_type}
-        if auth.get("scope"):
-            data["scope"] = auth["scope"]
-        if auth.get("audience"):
-            data["audience"] = auth["audience"]
-        if auth.get("account_id"):
-            data["account_id"] = auth["account_id"]
-        if grant_type == "refresh_token":
-            if not credential.get("refresh_token"):
-                raise ExecutionError("refresh_token grant requires a refresh_token credential")
-            data["refresh_token"] = credential["refresh_token"]
-        response = client.post(
-            token_url,
-            data=data,
-            auth=(credential.get("client_id", ""), credential.get("client_secret", "")),
-        )
-    response.raise_for_status()
-    value = response.json().get("access_token")
-    if not isinstance(value, str):
-        raise ExecutionError("authorization server returned no access token")
-    return value
-
-
-def _apply_auth(
-    client: httpx.Client,
-    auth: dict[str, Any],
-    resolved: Mapping[str, str] | str | None,
-    headers: dict[str, str],
-    query: dict[str, Any],
-) -> None:
-    if auth["type"] == "none":
-        return
-    credential = _credential_mapping(resolved or "")
-    if auth["type"] == "api_key":
-        value = credential.get("value", "")
-        if auth.get("header"):
-            prefix = f"{auth.get('scheme')} " if auth.get("scheme") else ""
-            headers[auth["header"]] = prefix + value
-        else:
-            query[auth["query"]] = value
-    elif auth["type"] == "basic":
-        if "username" in credential or "password" in credential:
-            pair = f"{credential.get('username', '')}:{credential.get('password', '')}"
-            encoded = base64.b64encode(pair.encode()).decode()
-        else:
-            encoded = credential.get("value", "")
-        headers["Authorization"] = f"Basic {encoded}"
-    elif auth["type"] == "bearer":
-        scheme = credential.get("scheme") or "Bearer"
-        headers["Authorization"] = f"{scheme} {credential.get('value', '')}"
-    else:
-        headers["Authorization"] = f"Bearer {_token(client, auth, credential)}"
 
 
 def attachments_path(root: Path, run_id: str) -> Path:
@@ -400,6 +287,8 @@ class IntegrationExecutor:
         agent to open; an operation that downloads fails without it."""
         self.compiled = compiled
         self.resolver = resolver
+        # A resolver that can write a rotated secret back exposes `rotate`.
+        self.authenticator = Authenticator(rotate=getattr(resolver, "rotate", None))
         self.transport = transport
         self.reviewed = reviewed
         self.downloads = downloads
@@ -466,25 +355,20 @@ class IntegrationExecutor:
             "bytes": len(received),
         }
 
-    def capabilities(self, phase: str | None = None) -> list[str]:
+    def capabilities(self, step: str | None = None) -> list[str]:
         integrations = self.compiled["workflow"]["spec"].get("integrations", {})
         all_names = sorted(
             f"{integration}.{operation}"
             for integration, value in integrations.items()
             for operation in value["operations"]
         )
-        all_names.extend(
-            f"{integration}.request"
-            for integration, value in integrations.items()
-            if value["access"]["mode"] == "full"
-        )
-        if phase is None:
+        if step is None:
             return all_names
-        policy = self.compiled["instructions"]["phases"].get(phase)
+        policy = self.compiled["instructions"]["steps"].get(step)
         if policy is None:
             raise IntegrationError(
-                "integration.phase_not_found",
-                f"workflow has no phase {phase}",
+                "integration.step_not_found",
+                f"workflow has no step {step}",
                 category="configuration",
             )
         return list(policy.get("capabilities", []))
@@ -507,47 +391,6 @@ class IntegrationExecutor:
                 category="configuration",
             )
         operation = integration["operations"].get(operation_name)
-        if operation_name == "request" and integration["access"]["mode"] == "full":
-            connection = next(
-                (
-                    item
-                    for item in self.compiled["workflow"]["spec"]["connections"]
-                    if item["ref"] == integration["connection"]
-                ),
-                None,
-            )
-            base_url = connection["base_url"] if connection else "the integration's fixed origin"
-            return {
-                "name": capability,
-                "description": (
-                    f"Make an authorized request against {base_url}. path is relative to this "
-                    "exact origin, starting with a single leading slash. This tool cannot "
-                    "guess the target API's own routing conventions (e.g. some APIs nest every "
-                    "operation under a prefix like /api/ or /v1/ that isn't part of the "
-                    "documented endpoint name) -- confirm the exact path from that API's own "
-                    "documentation before calling, rather than retrying variations against the "
-                    "live integration."
-                ),
-                "input": {
-                    "type": "object",
-                    "required": ["method", "path"],
-                    "properties": {
-                        "method": {"enum": integration["access"]["methods"]},
-                        "path": {"type": "string", "pattern": "^/[^/].*|^/$"},
-                        "query": {"type": "object"},
-                        "headers": {"type": "object"},
-                        "body": {},
-                        "purpose": {"type": "string", "minLength": 1},
-                    },
-                    "additionalProperties": False,
-                },
-                "output": sorted(integration["access"]["expose"]),
-                "policy": {
-                    "side_effect": "execute",
-                    "approval": "inherit",
-                    "idempotency": "none",
-                },
-            }
         if operation is None:
             raise IntegrationError(
                 "integration.capability_not_found",
@@ -580,30 +423,24 @@ class IntegrationExecutor:
             "policy": operation["policy"],
         }
 
-    def dry_run(self, phase: str) -> dict[str, Any]:
-        """Describe the phase's authorized effects without resolving credentials or doing I/O."""
-        phase_policy = self.compiled["instructions"]["phases"].get(phase)
-        if phase_policy is None:
+    def dry_run(self, step: str) -> dict[str, Any]:
+        """Describe the step's authorized effects without resolving credentials or doing I/O."""
+        if step not in self.compiled["instructions"]["steps"]:
             raise IntegrationError(
-                "integration.phase_not_found",
-                f"workflow has no phase {phase}",
+                "integration.step_not_found",
+                f"workflow has no step {step}",
                 category="configuration",
             )
         return {
-            "phase": phase,
+            "step": step,
             "workflow_revision": self.compiled["workflow_revision"],
-            "api": [self.describe(name) for name in self.capabilities(phase)],
-            "humans": [
-                {"timing": timing, **hook}
-                for timing in ("before", "during", "after")
-                for hook in phase_policy["humans"][timing]
-            ],
+            "api": [self.describe(name) for name in self.capabilities(step)],
             "credentials_resolved": False,
             "requests_executed": False,
         }
 
     def compared(
-        self, capability: str, inputs: Mapping[str, Any], *, phase: str
+        self, capability: str, inputs: Mapping[str, Any], *, step: str
     ) -> dict[str, Any] | None:
         """A write that replaces a file, as a policy reviewer sees it: a unified
         diff against the file's current copy, which this reads with a GET to the
@@ -635,7 +472,7 @@ class IntegrationExecutor:
                     "path": path,
                     **({"query": {"ref": ref}} if isinstance(ref, str) and ref else {}),
                 },
-                phase=phase,
+                step=step,
             )
             current = _decoded(
                 _found(result["output"].get("result"), rule["current"]), rule["encoding"]
@@ -670,7 +507,7 @@ class IntegrationExecutor:
         capability: str,
         inputs: Mapping[str, Any],
         *,
-        phase: str,
+        step: str,
         response_grants: list[list[dict[str, Any]]] | None = None,
     ) -> dict[str, Any]:
         """Send one authorized request. `response_grants` are the grants a
@@ -678,20 +515,16 @@ class IntegrationExecutor:
         used: alternatives, one list of `{name, paths, granted}` checks per
         grant, of which one must hold entirely (`granted` in a list at one of
         `paths`). The result's audit names the alternative that held."""
-        if capability not in self.capabilities(phase):
+        if capability not in self.capabilities(step):
             raise IntegrationError(
                 "integration.capability_denied",
-                f"capability {capability} is not authorized for phase {phase}",
+                f"capability {capability} is not authorized for step {step}",
                 category="policy",
             )
         integration_name, operation_name = capability.split(".", 1)
         spec = self.compiled["workflow"]["spec"]
         integration = spec["integrations"][integration_name]
-        if not self.reviewed and (
-            integration.get("policy")
-            or "max_requests" in integration["access"]
-            or integration["access"].get("opaque_identifiers")
-        ):
+        if not self.reviewed and "max_requests" in integration["access"]:
             raise IntegrationError(
                 "integration.policy_runtime_unavailable",
                 "policy-reviewed execution is not wired yet; no request was sent",
@@ -709,26 +542,6 @@ class IntegrationExecutor:
                     **({"body": inputs["body"]} if "body" in inputs else {}),
                     "timeout_seconds": 30,
                     "_dynamic": True,
-                },
-            }
-        if operation_name == "request" and integration["access"]["mode"] == "full":
-            operation = {
-                "description": "Dynamic request inside an authorized origin.",
-                "input": self.describe(capability)["input"],
-                "request": {
-                    "method": inputs.get("method"),
-                    "path": inputs.get("path"),
-                    "headers": inputs.get("headers", {}),
-                    "query": inputs.get("query", {}),
-                    **({"body": inputs["body"]} if "body" in inputs else {}),
-                    "timeout_seconds": 30,
-                    "_dynamic": True,
-                },
-                "response": {"expose": integration["access"]["expose"]},
-                "policy": {
-                    "side_effect": "execute",
-                    "approval": "inherit",
-                    "idempotency": "none",
                 },
             }
         if operation is not None and operation.get("deny"):
@@ -789,33 +602,25 @@ class IntegrationExecutor:
             }
         )
         query = request.get("query", {}) if dynamic else _render(request.get("query", {}), inputs)
-        resolved = (
-            self.resolver(connection["auth"]["credential"])
-            if connection["auth"]["type"] != "none"
-            else None
-        )
+        credential = connection["auth"].get("credential")
+        resolved = self.resolver(credential) if credential else None
         started = time.monotonic()
-        sensitive = list(_credential_mapping(resolved).values()) if resolved else []
         try:
             with httpx.Client(
                 transport=self.transport,
                 timeout=request["timeout_seconds"],
                 follow_redirects=False,
             ) as client:
-                _apply_auth(client, connection["auth"], resolved, headers, query)
-                if connection["auth"]["type"] != "none":
-                    sensitive.extend(
-                        value
-                        for key, value in headers.items()
-                        if key.lower() == "authorization" or key == connection["auth"].get("header")
+                try:
+                    sensitive = self.authenticator.apply(
+                        client, connection["auth"], resolved, headers, query
                     )
-                    authorization = headers.get("Authorization", "")
-                    if " " in authorization:
-                        sensitive.append(authorization.split(" ", 1)[1])
+                except AuthError as exc:
+                    raise IntegrationError(exc.code, str(exc), category=exc.category) from exc
                 _diagnostic(
                     "integration_request_sending",
                     capability=capability,
-                    phase=phase,
+                    step=step,
                     method=request["method"],
                 )
                 response = client.request(
@@ -834,7 +639,7 @@ class IntegrationExecutor:
                 _diagnostic(
                     "integration_request_received",
                     capability=capability,
-                    phase=phase,
+                    step=step,
                     status=response.status_code,
                     elapsed_ms=int((time.monotonic() - started) * 1000),
                 )
@@ -899,7 +704,7 @@ class IntegrationExecutor:
                 "method": request["method"],
                 "origin": connection["base_url"],
                 "workflow_revision": self.compiled["workflow_revision"],
-                "phase": phase,
+                "step": step,
                 "policy": operation["policy"],
                 **({"grant": granted_by} if granted_by is not None else {}),
             },
@@ -934,30 +739,17 @@ def doctor(
                 "check": "credential_reference",
                 "connection": connection["ref"],
                 "status": "pass" if configured else "fail",
-                "credential_type": auth["type"],
+                "accepts": [entry["kind"] for entry in auth["accepts"]],
             }
         )
-        if configured and resolved is not None and auth["type"] in {"basic", "bearer"}:
-            mapping = _credential_mapping(resolved)
-            if auth["type"] == "basic":
-                shape_ok = ("username" in mapping and "password" in mapping) or "value" in mapping
-                needs = "either username+password fields or a pre-encoded value field"
-            else:
-                shape_ok = "value" in mapping
-                needs = "a value field"
+        if configured and resolved is not None:
+            shape_ok, detail = shape_check(auth, resolved)
             checks.append(
                 {
                     "check": "credential_shape",
                     "connection": connection["ref"],
                     "status": "pass" if shape_ok else "fail",
-                    "detail": (
-                        "credential matches auth.type"
-                        if shape_ok
-                        else (
-                            f"auth.type '{auth['type']}' requires {needs} that this "
-                            "credential does not provide — use auth.type: api_key instead"
-                        )
-                    ),
+                    "detail": detail,
                 }
             )
         if connectivity:
@@ -985,181 +777,4 @@ def doctor(
         "checks": checks,
         "summary": {"passed": len(checks) - failed, "failed": failed},
         "credentials_exposed": False,
-    }
-
-
-def propose_patch(
-    config: Path,
-    integration: str,
-    operation: str,
-    definition: Mapping[str, Any],
-    *,
-    reason: str,
-    run: str,
-    phase: str,
-    agent: str,
-) -> dict[str, Any]:
-    compiled = compile_workflow(config)
-    return {
-        "apiVersion": "outcomeci.workflow/v1alpha1",
-        "kind": "OutcomeWorkflowPatch",
-        "metadata": {
-            "workflow": compiled["workflow"]["metadata"]["name"],
-            "parentRevision": compiled["workflow_revision"],
-            "parentContentSha256": hashlib.sha256(config.read_bytes()).hexdigest(),
-            "derivedFrom": {"run": run, "phase": phase, "agent": agent},
-            "reason": reason,
-        },
-        "spec": {"operations": {"add": {f"{integration}.{operation}": dict(definition)}}},
-    }
-
-
-def import_openapi(
-    config: Path,
-    integration_name: str,
-    *,
-    transport: httpx.BaseTransport | None = None,
-) -> dict[str, Any]:
-    compiled = compile_workflow(config)
-    integration = compiled["workflow"]["spec"].get("integrations", {}).get(integration_name)
-    if integration is None or integration["access"]["mode"] != "openapi":
-        raise ConfigError(f"integration {integration_name} is not configured for OpenAPI")
-    source = integration["access"]["source"]
-    connection = next(
-        item
-        for item in compiled["workflow"]["spec"]["connections"]
-        if item["ref"] == integration["connection"]
-    )
-    _safe_destination(source, connection["allow_private_network"])
-    try:
-        with httpx.Client(transport=transport, timeout=30, follow_redirects=False) as client:
-            response = client.get(source)
-            response.raise_for_status()
-    except httpx.HTTPError as exc:
-        raise ExecutionError("OpenAPI document could not be fetched", retryable=True) from exc
-    try:
-        document = yaml.safe_load(response.text)
-    except yaml.YAMLError as exc:
-        raise ConfigError("OpenAPI document is not valid JSON or YAML") from exc
-    if not isinstance(document, dict) or not str(document.get("openapi", "")).startswith("3."):
-        raise ConfigError("only OpenAPI 3 documents are supported")
-    wanted = set(integration["access"]["operations"])
-    found: dict[str, Any] = {}
-    for path, path_item in document.get("paths", {}).items():
-        if not isinstance(path_item, dict):
-            continue
-        shared_parameters = path_item.get("parameters", [])
-        for method, operation in path_item.items():
-            if method.upper() not in {"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"}:
-                continue
-            if not isinstance(operation, dict) or operation.get("operationId") not in wanted:
-                continue
-            operation_id = operation["operationId"]
-            name = re.sub(r"[^a-z0-9_-]+", "_", operation_id.lower()).strip("_")
-            parameters = [
-                item
-                for item in [*shared_parameters, *operation.get("parameters", [])]
-                if isinstance(item, dict) and "$ref" not in item
-            ]
-            path_properties = {
-                item["name"]: item.get("schema", {})
-                for item in parameters
-                if item.get("in") == "path" and isinstance(item.get("name"), str)
-            }
-            path_required = [
-                item["name"]
-                for item in parameters
-                if item.get("in") == "path" and item.get("required")
-            ]
-            rendered_path = path
-            for parameter in path_properties:
-                rendered_path = rendered_path.replace(
-                    "{" + parameter + "}", "{{ input.path." + parameter + " }}"
-                )
-            input_properties: dict[str, Any] = {
-                "path": {
-                    "type": "object",
-                    "properties": path_properties,
-                    "required": path_required,
-                    "additionalProperties": False,
-                },
-                "query": {"type": "object", "additionalProperties": True},
-            }
-            required = ["path", "query"]
-            request: dict[str, Any] = {
-                "method": method.upper(),
-                "path": rendered_path,
-                "query": "{{ input.query }}",
-            }
-            body = operation.get("requestBody")
-            if isinstance(body, dict):
-                body_schema = (
-                    body.get("content", {})
-                    .get("application/json", {})
-                    .get("schema", {"type": "object"})
-                )
-                input_properties["body"] = body_schema
-                request["body"] = "{{ input.body }}"
-                if body.get("required"):
-                    required.append("body")
-            found[name] = {
-                "description": operation.get("summary")
-                or operation.get("description")
-                or operation_id,
-                "input": {
-                    "type": "object",
-                    "properties": input_properties,
-                    "required": required,
-                    "additionalProperties": False,
-                },
-                "request": request,
-                "response": {"expose": {"result": "body"}},
-            }
-            wanted.remove(operation_id)
-    if wanted:
-        raise ConfigError(f"OpenAPI operations were not found: {', '.join(sorted(wanted))}")
-    return {
-        "apiVersion": "outcomeci.workflow/v1alpha1",
-        "kind": "OutcomeWorkflowPatch",
-        "metadata": {
-            "workflow": compiled["workflow"]["metadata"]["name"],
-            "parentRevision": compiled["workflow_revision"],
-            "parentContentSha256": hashlib.sha256(config.read_bytes()).hexdigest(),
-            "derivedFrom": {"source": source, "agent": "oci"},
-            "reason": f"Import allowlisted operations for {integration_name}",
-        },
-        "spec": {
-            "operations": {
-                "add": {
-                    f"{integration_name}.{operation}": definition
-                    for operation, definition in found.items()
-                }
-            }
-        },
-    }
-
-
-def apply_patch(config: Path, patch_path: Path, output: Path) -> dict[str, Any]:
-    compiled = compile_workflow(config)
-    patch = yaml.safe_load(patch_path.read_text(encoding="utf-8"))
-    if patch.get("kind") != "OutcomeWorkflowPatch":
-        raise ConfigError("patch kind must be OutcomeWorkflowPatch")
-    if patch.get("metadata", {}).get("parentRevision") != compiled["workflow_revision"]:
-        raise ConfigError("patch parent revision is stale")
-    document = copy.deepcopy(compiled["workflow"])
-    for name, definition in patch.get("spec", {}).get("operations", {}).get("add", {}).items():
-        integration, separator, operation = name.partition(".")
-        if not separator or integration not in document["spec"].get("integrations", {}):
-            raise ConfigError(f"patch operation has unknown integration: {name}")
-        operations = document["spec"]["integrations"][integration].setdefault("operations", {})
-        if operation in operations:
-            raise ConfigError(f"patch operation already exists: {name}")
-        operations[operation] = definition
-    output.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
-    child = compile_workflow(output)
-    return {
-        "parent_revision": compiled["workflow_revision"],
-        "workflow_revision": child["workflow_revision"],
-        "output": str(output),
-        "provenance": patch["metadata"].get("derivedFrom", {}),
     }

@@ -6,9 +6,9 @@ from pathlib import Path
 
 import httpx
 import yaml
+from lowered import compile_file
 from test_integrations import workflow
 
-from outcomeci.config import compile_workflow
 from outcomeci.integrations import IntegrationExecutor, local_credential_resolver
 from outcomeci.local_vault import initialize, list_entries, put, resolve
 
@@ -37,7 +37,13 @@ def test_local_vault_resolves_structured_credentials_for_executor(
     value = yaml.safe_load(config.read_text())
     auth = value["spec"]["connections"]["tickets"]["auth"]
     auth.clear()
-    auth.update({"type": "basic", "credential": "vault:tickets/auth"})
+    auth.update(
+        {
+            "connector": "tickets",
+            "credential": "vault:tickets/auth",
+            "accepts": [{"kind": "basic", "credential": ["username", "password"]}],
+        }
+    )
     config.write_text(yaml.safe_dump(value, sort_keys=False))
     seen = {}
 
@@ -46,10 +52,10 @@ def test_local_vault_resolves_structured_credentials_for_executor(
         return httpx.Response(201, json={"id": "T-1"})
 
     executor = IntegrationExecutor(
-        compile_workflow(config),
+        compile_file(config),
         resolver=local_credential_resolver(tmp_path),
         transport=httpx.MockTransport(handler),
     )
-    result = executor.execute("tickets.create", {"title": "Test"}, phase="intake")
+    result = executor.execute("tickets.create", {"title": "Test"}, step="intake")
     assert seen["authorization"].startswith("Basic ")
     assert "secret" not in json.dumps(result)

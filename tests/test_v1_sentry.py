@@ -17,7 +17,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from outcomeci import debug, integrations, local, v1_runtime
+from outcomeci import integrations, local, run_container, v1_runtime
 from outcomeci.capability import invoke_integration
 from outcomeci.config import compile_workflow
 from outcomeci.process import ExecutionError
@@ -201,10 +201,9 @@ def _run(root: Path, agent: Agent, monkeypatch, reviews: list | None = None) -> 
 
     options = local.ExecutionOptions(
         credential_resolver=lambda reference: "xoxb-or-ghp-token",
-        execution_backend="outcomeci",
         policy_reviewer=review,
     )
-    return debug.execute(
+    return run_container.execute(
         root, config, compile_workflow(config), "webhook", _payload(), options, auto_continue=True
     )
 
@@ -218,8 +217,8 @@ def test_approved_alert_runs_every_step_inside_its_grants(workflow, monkeypatch)
     result = _run(workflow, agent, monkeypatch, reviews)
 
     assert result["status"] == "completed"
-    assert result["completed_phases"] == ["triage", "approve", "fix", "announce"]
-    assert result.get("skipped_phases", []) == []
+    assert result["completed_steps"] == ["triage", "approve", "fix", "announce"]
+    assert result.get("skipped_steps", []) == []
     posts = [
         json.loads(item.content) for item in services.sent("slack.com", "/api/chat.postMessage")
     ]
@@ -266,8 +265,8 @@ def test_recorded_calls_carry_the_step_that_made_them(workflow, monkeypatch):
     journal = json.loads(
         (workflow / ".outcomeci" / ".broker" / result["run_id"] / "journal.json").read_text()
     )
-    phases = sorted({call["phase"] for call in journal["calls"].values()})
-    assert phases == ["announce", "fix", "triage"]
+    steps = sorted({call["step"] for call in journal["calls"].values()})
+    assert steps == ["announce", "fix", "triage"]
 
 
 def test_no_op_triage_skips_the_approval_fix_and_announcement(workflow, monkeypatch):
@@ -277,7 +276,7 @@ def test_no_op_triage_skips_the_approval_fix_and_announcement(workflow, monkeypa
     result = _run(workflow, Agent(decision="no_op"), monkeypatch)
 
     assert result["status"] == "completed"
-    assert result["skipped_phases"] == ["approve", "fix", "announce"]
+    assert result["skipped_steps"] == ["approve", "fix", "announce"]
     assert result["skip_reasons"]["announce"] == "reads skipped step fix"
     assert not services.sent("slack.com", "/api/reactions.get")
     assert len(services.sent("slack.com", "/api/chat.postMessage")) == 1
@@ -292,7 +291,7 @@ def test_an_expired_approval_skips_everything_after_it(workflow, monkeypatch):
     result = _run(workflow, Agent(), monkeypatch)
 
     assert result["status"] == "completed"
-    assert result["skipped_phases"] == ["approve", "fix", "announce"]
+    assert result["skipped_steps"] == ["approve", "fix", "announce"]
     assert not services.sent("api.github.com", "/repos/outcomeci/cli/pulls")
     interaction = json.loads(
         (

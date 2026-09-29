@@ -18,7 +18,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from outcomeci import debug, integrations, local, v1_runtime
+from outcomeci import integrations, local, run_container, v1_runtime
 from outcomeci.capability import invoke_integration
 from outcomeci.config import compile_workflow
 from outcomeci.process import ExecutionError
@@ -216,7 +216,6 @@ def _run(root: Path, slack: Slack, agent: Agent, monkeypatch, reviewed: list | N
     config = root / WORKFLOW
     options = local.ExecutionOptions(
         credential_resolver=lambda reference: "xoxb-test-credential",
-        execution_backend="outcomeci",
         policy_reviewer=lambda proposal: (
             (reviewed.append(proposal) if reviewed is not None else None)
             or {
@@ -226,7 +225,7 @@ def _run(root: Path, slack: Slack, agent: Agent, monkeypatch, reviewed: list | N
             }
         ),
     )
-    return debug.execute(
+    return run_container.execute(
         root, config, compile_workflow(config), "webhook", _payload(), options, auto_continue=True
     )
 
@@ -244,7 +243,7 @@ def test_a_discussed_plan_becomes_one_pull_request_per_repository(workflow, monk
     result = _run(workflow, slack, agent, monkeypatch)
 
     assert result["status"] == "completed"
-    assert result["completed_phases"] == ["draft", "discuss", "implement", "announce"]
+    assert result["completed_steps"] == ["draft", "discuss", "implement", "announce"]
     consultation = _consultation(workflow, result["run_id"])
     assert consultation["status"] == "converged"
     assert consultation["current_version"] == 2
@@ -291,7 +290,7 @@ def test_a_discussion_that_never_converges_is_capped_and_nothing_is_built(workfl
     result = _run(workflow, slack, agent, monkeypatch)
 
     assert result["status"] == "completed"
-    assert result["skipped_phases"] == ["implement", "announce"]
+    assert result["skipped_steps"] == ["implement", "announce"]
     consultation = _consultation(workflow, result["run_id"])
     assert consultation["status"] == "capped"
     assert len(consultation["turns"]) >= 12
@@ -306,7 +305,7 @@ def test_a_discussion_nobody_answers_times_out(workflow, monkeypatch):
     result = _run(workflow, slack, Agent(), monkeypatch)
 
     assert _consultation(workflow, result["run_id"])["status"] == "timed_out"
-    assert result["skipped_phases"] == ["implement", "announce"]
+    assert result["skipped_steps"] == ["implement", "announce"]
     outputs = json.loads(
         (workflow / ".outcomeci/outcomes" / result["run_id"] / "discuss/outputs.json").read_text()
     )
@@ -376,5 +375,5 @@ def test_the_reviewer_judges_a_step_against_its_approved_plan(workflow, monkeypa
     # The discussion revised the plan; the reviewer sees the revision, and not the
     # trigger's first wording, which this step does not take.
     assert inputs["plan"]["summary"] == "Add --json output and document it"
-    assert set(implement[0]["context"]) == {"inputs", "phase"}
+    assert set(implement[0]["context"]) == {"inputs", "step"}
     assert "context.inputs is everything this step was given" in implement[0]["policy"]["content"]

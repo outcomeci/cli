@@ -68,13 +68,13 @@ def sync_credentials(
     transport: httpx.BaseTransport | None = None,
 ) -> dict[str, Any]:
     if local == bool(cloud_workspace):
-        raise SlackError("Select exactly one destination: --local or --cloud WORKSPACE_ID")
+        raise SlackError("Select exactly one destination: --local, or --cloud with --workspace-id")
     if not is_valid_vault_path(path):
         raise SlackError("Vault path must be a relative logical path")
     if not local and vault_workspace is not None:
-        raise SlackError("--vault-workspace is only valid with --local")
+        raise SlackError("--vault-dir is only valid with --local")
     if local and workflows:
-        raise SlackError("--workflow grants are only valid with --cloud")
+        raise SlackError("--workflow-id grants are only valid with --cloud")
     project = workspace.resolve() / PROJECT_RELATIVE
     installation = _installation(project, team)
     existing = None

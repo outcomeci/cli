@@ -39,11 +39,31 @@ def test_the_sentry_example_compiles_to_a_linear_graph():
     assert compiled["graph"]["levels"] == [["triage"], ["approve"], ["fix"], ["announce"]]
     assert compiled["source"]["apiVersion"] == "outcomeci.workflow/v1"
     assert set(compiled["connectors"]) == {"slack", "github"}
-    phases = compiled["instructions"]["phases"]
-    assert phases["triage"]["path"] == ".outcomeci/instructions/triage-and-notify.md"
-    assert phases["announce"]["content"].startswith("Reply in the alert's thread")
-    assert phases["fix"]["v1"]["policy"].startswith("One new branch")
-    assert phases["approve"]["capabilities"] == ["slack.post", "slack.reactions"]
+    steps = compiled["instructions"]["steps"]
+    assert steps["triage"]["path"] == ".outcomeci/instructions/triage-and-notify.md"
+    assert steps["announce"]["content"].startswith("Reply in the alert's thread")
+    assert steps["fix"]["v1"]["policy"].startswith("One new branch")
+    assert steps["approve"]["capabilities"] == ["slack.post", "slack.reactions"]
+
+
+def test_a_connection_names_its_credential_and_the_kinds_its_connector_accepts(tmp_path):
+    compiled = compile_workflow(_write(tmp_path, [_step("a", can=["github.read"])]))
+    connections = {item["ref"]: item for item in compiled["workflow"]["spec"]["connections"]}
+    github = connections["github"]["auth"]
+    assert github["connector"] == "github"
+    assert github["credential"] == "vault:github/pat"
+    assert [entry["kind"] for entry in github["accepts"]] == ["token", "app_installation"]
+    assert [entry["kind"] for entry in connections["slack"]["auth"]["accepts"]] == [
+        "token",
+        "oauth2",
+    ]
+    assert "type" not in github
+
+
+def test_a_connector_that_needs_a_credential_requires_auth(tmp_path):
+    path = _write(tmp_path, [_step("a")], apis={"github": {"uses": "github"}})
+    with pytest.raises(ConfigError, match="apis.github.auth is required"):
+        compile_workflow(path)
 
 
 def test_a_changed_connector_changes_the_revision(monkeypatch):
@@ -137,9 +157,9 @@ def test_literal_repos_and_as_names_compile(tmp_path):
         _step("b", **{"with": "a.calls.plan_post"}, can=[{"github.write": {"repo": "o/r"}}]),
     ]
     compiled = compile_workflow(_write(tmp_path, steps))
-    grant = compiled["instructions"]["phases"]["b"]["v1"]["grants"][0]
+    grant = compiled["instructions"]["steps"]["b"]["v1"]["grants"][0]
     assert grant["args"]["repo"] == {"literal": {"owner": "o", "name": "r"}}
-    assert compiled["instructions"]["phases"]["b"]["v1"]["inputs"] == [
+    assert compiled["instructions"]["steps"]["b"]["v1"]["inputs"] == [
         {"name": "plan_post", "ref": "a.calls.plan_post"}
     ]
 
@@ -185,32 +205,3 @@ def test_durations():
 )
 def test_paths_stay_under_the_granted_repository(path, inside):
     assert _within(path, "/repos/o/r") is inside
-
-
-def test_a_v1alpha1_workflow_cannot_declare_a_receiver(tmp_path):
-    path = tmp_path / "outcome.yml"
-    path.write_text(
-        yaml.safe_dump(
-            {
-                "apiVersion": "outcomeci.workflow/v1alpha1",
-                "kind": "OutcomeWorkflow",
-                "metadata": {"name": "w"},
-                "spec": {
-                    "triggers": {
-                        "inbound": {
-                            "type": "webhook.received",
-                            "receiver": {
-                                "uses": "slack",
-                                "secret": "vault:slack/signing",
-                                "events": ["dm"],
-                            },
-                        }
-                    }
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ConfigError, match="receiver"):
-        compile_workflow(path)

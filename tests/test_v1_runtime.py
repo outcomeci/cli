@@ -10,10 +10,9 @@ import httpx
 import pytest
 import test_v1_sentry as sentry
 import test_v1_slack as slack_example
-import yaml
 
 from outcomeci import local
-from outcomeci.config import ConfigError, compile_workflow
+from outcomeci.config import compile_workflow
 from outcomeci.integrations import IntegrationError, IntegrationExecutor
 from outcomeci.policy import PolicyExecutor
 from outcomeci.process import ExecutionError
@@ -98,32 +97,8 @@ def test_github_write_refuses_merges_and_settings_before_sending(monkeypatch):
     monkeypatch.setattr(sentry.integrations, "_safe_destination", lambda url, allow: None)
     for method, path in [("PUT", "/repos/o/r/pulls/1/merge"), ("PATCH", "/repos/o/r")]:
         with pytest.raises(IntegrationError, match="does not allow"):
-            executor.execute("github.write", {"method": method, "path": path}, phase="fix")
+            executor.execute("github.write", {"method": method, "path": path}, step="fix")
     assert sent == []
-
-
-def test_v1alpha1_files_keep_their_contract(tmp_path):
-    base = yaml.safe_load(
-        (Path(__file__).parent.parent / "examples/integration-package/outcome.yml").read_text()
-    )
-    for mutate, message in [
-        (
-            lambda doc: doc["spec"]["agents"]["phases"]["intake"].update(
-                instructions={"content": "x"}
-            ),
-            "inline instructions",
-        ),
-    ]:
-        doc = json.loads(json.dumps(base))
-        mutate(doc)
-        path = tmp_path / "outcome.yml"
-        path.write_text(yaml.safe_dump(doc), encoding="utf-8")
-        for name in ("instructions.md", "customer.integration.yml"):
-            (tmp_path / name).write_text(
-                (Path(__file__).parent.parent / "examples/integration-package" / name).read_text()
-            )
-        with pytest.raises(ConfigError, match=message):
-            compile_workflow(path)
 
 
 class FlakySlack(sentry.Services):
@@ -161,11 +136,10 @@ def test_a_failed_await_is_retried_by_the_runtime_never_by_an_agent(workflow, mo
         sentry._run(workflow, agent, monkeypatch)
     run = next((workflow / ".outcomeci/outcomes").glob("*/run.json"))
     state = json.loads(run.read_text())
-    assert (state["status"], state["phase"]) == ("error", "approve")
+    assert (state["status"], state["step"]) == ("error", "approve")
 
     options = local.ExecutionOptions(
         credential_resolver=lambda ref: "xoxb-test-credential",
-        execution_backend="outcomeci",
         policy_reviewer=lambda proposal: {
             "decision": "allow",
             "proposal_sha256": proposal["proposal_sha256"],
@@ -177,7 +151,7 @@ def test_a_failed_await_is_retried_by_the_runtime_never_by_an_agent(workflow, mo
     while state["status"] == "awaiting_confirmation":
         state = local.continue_run(workflow, config, state["run_id"], approve=True, options=options)
 
-    assert state["completed_phases"] == ["triage", "approve", "fix", "announce"]
+    assert state["completed_steps"] == ["triage", "approve", "fix", "announce"]
     assert "approve" not in agent.prompts
     interaction = (
         workflow / ".outcomeci/outcomes" / state["run_id"] / "interactions/approve/approve.json"
@@ -189,7 +163,7 @@ def test_an_agent_is_never_run_for_a_runtime_step(workflow, monkeypatch):
     services = sentry.Services()
     sentry._serve(monkeypatch, services)
     config = workflow / sentry.WORKFLOW
-    state = {"run_id": "r1", "phase": "approve", "status": "queued", "intent": "x"}
+    state = {"run_id": "r1", "step": "approve", "status": "queued", "intent": "x"}
     local._write(workflow, state)
     with pytest.raises(ExecutionError, match="driven by the runtime"):
         local._execute(
@@ -198,7 +172,6 @@ def test_an_agent_is_never_run_for_a_runtime_step(workflow, monkeypatch):
             state,
             options=local.ExecutionOptions(
                 credential_resolver=lambda ref: "xoxb-test-credential",
-                execution_backend="outcomeci",
             ),
         )
 
@@ -225,7 +198,7 @@ def test_a_fix_without_a_pull_request_announces_why(workflow, monkeypatch):
     result = sentry._run(workflow, agent, monkeypatch)
 
     assert result["status"] == "completed"
-    assert "announce" in result["completed_phases"]
+    assert "announce" in result["completed_steps"]
     inputs = {item["name"]: item["value"] for item in agent.prompts["announce"]["inputs"]}
     assert inputs["fix"] == {"reason": "unclear root cause"}
 
@@ -266,13 +239,12 @@ def test_a_reply_left_unanswered_by_a_crash_is_answered_on_retry(tmp_path, monke
     with pytest.raises(ExecutionError, match="converse turn"):
         slack_example._run(root, slack, Scripted([None, None]), monkeypatch)
     state = json.loads(next((root / ".outcomeci/outcomes").glob("*/run.json")).read_text())
-    assert (state["status"], state["phase"]) == ("error", "discuss")
+    assert (state["status"], state["step"]) == ("error", "discuss")
 
     agent = slack_example.Agent()
     monkeypatch.setattr(local, "invoke", agent)
     options = local.ExecutionOptions(
         credential_resolver=lambda ref: "xoxb-test-credential",
-        execution_backend="outcomeci",
         policy_reviewer=lambda proposal: {
             "decision": "allow",
             "proposal_sha256": proposal["proposal_sha256"],
@@ -404,7 +376,7 @@ def test_a_review_sees_earlier_requests_but_not_their_response_bodies(workflow, 
 
     receipts = reviews[0]["receipts"]
     assert receipts and all(
-        set(item) == {"capability", "phase", "status", "request"} for item in receipts
+        set(item) == {"capability", "step", "status", "request"} for item in receipts
     )
 
 
@@ -422,7 +394,7 @@ def test_a_review_sees_only_its_own_steps_requests(workflow, monkeypatch):
         if review["policy"]["content"].startswith("Step policy for fix:")
     ]
     assert fix
-    assert all(item["phase"] == "fix" for review in fix for item in review["receipts"])
+    assert all(item["step"] == "fix" for review in fix for item in review["receipts"])
 
 
 def _broker(tmp_path, monkeypatch, reviewer, responses):
@@ -465,11 +437,11 @@ def test_a_call_whose_review_failed_was_never_sent_and_can_run_again(tmp_path, m
         tmp_path, monkeypatch, reviewer, iter([httpx.Response(201, json={"ref": "x"})])
     )
     with pytest.raises(RuntimeError):
-        broker.execute("github.write", BRANCH, phase="fix")
+        broker.execute("github.write", BRANCH, step="fix")
     journal = json.loads((tmp_path / "journal.json").read_text())
     assert [call["status"] for call in journal["calls"].values()] == ["unsent"]
 
-    assert broker.execute("github.write", BRANCH, phase="fix")["ok"] is True
+    assert broker.execute("github.write", BRANCH, step="fix")["ok"] is True
 
 
 def test_a_write_whose_delivery_is_uncertain_is_never_sent_twice(tmp_path, monkeypatch):
@@ -480,9 +452,9 @@ def test_a_write_whose_delivery_is_uncertain_is_never_sent_twice(tmp_path, monke
     }
     broker = _broker(tmp_path, monkeypatch, allow, iter([httpx.Response(502, json={})]))
     with pytest.raises(IntegrationError):
-        broker.execute("github.write", BRANCH, phase="fix")
+        broker.execute("github.write", BRANCH, step="fix")
     with pytest.raises(IntegrationError, match="delivery is uncertain"):
-        broker.execute("github.write", BRANCH, phase="fix")
+        broker.execute("github.write", BRANCH, step="fix")
 
 
 def test_a_failed_read_can_run_again(tmp_path, monkeypatch):
@@ -490,8 +462,8 @@ def test_a_failed_read_can_run_again(tmp_path, monkeypatch):
     broker = _broker(tmp_path, monkeypatch, None, responses)
     read = {"method": "GET", "path": "/repos/outcomeci/cli/contents/missing.py"}
     with pytest.raises(IntegrationError):
-        broker.execute("github.write", read, phase="fix")
-    assert broker.execute("github.write", read, phase="fix")["ok"] is True
+        broker.execute("github.write", read, step="fix")
+    assert broker.execute("github.write", read, step="fix")["ok"] is True
 
 
 def _github(tmp_path, monkeypatch, handler):
@@ -549,7 +521,7 @@ def test_a_file_commit_is_reviewed_as_a_diff_against_its_branch(tmp_path, monkey
 
     broker, proposals = _github(tmp_path, monkeypatch, github)
     proposed = current.replace("app.run()\n", "print('bear down')\napp.run()\n")
-    broker.execute("github.write", _commit(proposed), phase="fix")
+    broker.execute("github.write", _commit(proposed), step="fix")
 
     (read,) = reads
     assert read.url.path == "/repos/outcomeci/cli/contents/app/main.py"
@@ -568,7 +540,7 @@ def test_a_new_file_is_reviewed_as_all_added(tmp_path, monkeypatch):
         return httpx.Response(201, json={"content": {"path": "app/main.py"}})
 
     broker, proposals = _github(tmp_path, monkeypatch, github)
-    broker.execute("github.write", _commit("print('hi')\n"), phase="fix")
+    broker.execute("github.write", _commit("print('hi')\n"), step="fix")
 
     assert "--- (a new file)" in proposals[0]["compared"]["diff"]
     assert "+print('hi')" in proposals[0]["compared"]["diff"]
@@ -578,7 +550,7 @@ def test_a_write_that_replaces_no_file_carries_no_diff(tmp_path, monkeypatch):
     broker, proposals = _github(
         tmp_path, monkeypatch, lambda request: httpx.Response(201, json={"ref": "x"})
     )
-    broker.execute("github.write", BRANCH, phase="fix")
+    broker.execute("github.write", BRANCH, step="fix")
 
     assert "compared" not in proposals[0]
 
@@ -609,7 +581,7 @@ def test_a_waiting_step_says_why_its_message_is_missing(tmp_path, status, events
     from outcomeci.v1_runtime import missing_call
 
     call = {
-        "phase": "triage",
+        "step": "triage",
         "capability": "slack.post",
         "sequence": 1,
         "status": status,
@@ -662,7 +634,7 @@ def test_a_denied_change_tells_the_agent_the_reviewers_reason(tmp_path, monkeypa
         policy.execute(
             "github.write",
             {"method": "POST", "path": "/repos/outcomeci/cli/pulls"},
-            phase="fix",
+            step="fix",
         )
 
     assert str(exc.value) == (

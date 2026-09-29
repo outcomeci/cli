@@ -1,4 +1,4 @@
-"""Run-scoped broker for human hooks across the agent security boundary."""
+"""Run-scoped broker for API capabilities across the agent security boundary."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Any
 
 from .config import compile_workflow
-from .humans import accept, poll, request, transport_responses
 from .integrations import (
     CredentialResolver,
     IntegrationExecutor,
@@ -47,7 +46,7 @@ class Broker:
         root: Path,
         config: Path,
         run_id: str,
-        phase: str,
+        step: str,
         socket_path: Path,
         compiled=None,
         resolver: CredentialResolver | None = None,
@@ -58,28 +57,20 @@ class Broker:
         inputs=None,
     ):
         compiled = compiled if compiled is not None else compile_workflow(config)
-        hooks = compiled["instructions"]["phases"][phase]["humans"]
-        self.hooks = {
-            hook["id"]: hook
-            for timing in ("before", "during", "after")
-            for hook in hooks[timing]
-            if hook.get("delivery", {}).get("type") == "custom"
-            and hook.get("delivery", {}).get("targets")
-        }
-        self.root, self.config, self.run_id, self.phase = root, config, run_id, phase
+        self.root, self.config, self.run_id, self.step = root, config, run_id, step
         run_directory = root / ".outcomeci" / "outcomes" / run_id
         state_path = run_directory / "run.json"
         state = json.loads(state_path.read_text()) if state_path.exists() else {}
-        step = compiled["instructions"]["phases"][phase]
+        node = compiled["instructions"]["steps"][step]
         step_policy = None
-        if "v1" in step:
+        if "v1" in node:
             # A v1 step's grants are resolved by the caller before its agent
             # starts; with none given, the step may call nothing.
             grants = grants if grants is not None else []
-            if step["v1"].get("policy"):
+            if node["v1"].get("policy"):
                 step_policy = {
                     "content": (
-                        f"Step policy for {phase}: {step['v1']['policy']}\n"
+                        f"Step policy for {step}: {node['v1']['policy']}\n"
                         "Grant arguments such as the channel or repository are enforced "
                         "separately; judge the proposal against this policy only.\n"
                         "context.inputs is everything this step was given, such as a plan "
@@ -88,7 +79,7 @@ class Broker:
                         "against the current copy: judge the lines it changes, not the "
                         "whole file."
                     ),
-                    "policy": step["policy"],
+                    "policy": node["policy"],
                 }
         self.integrations = PolicyExecutor(
             IntegrationExecutor(
@@ -101,13 +92,13 @@ class Broker:
             # A v1 step is reviewed against what it was given, which holds the
             # trigger only when the step takes it (`from: trigger`).
             (
-                {"inputs": inputs or [], "phase": step}
-                if "v1" in step
+                {"inputs": inputs or [], "step": node}
+                if "v1" in node
                 else {
                     "intent": state.get("intent"),
                     "trigger": state.get("trigger"),
                     **({"inputs": inputs} if inputs is not None else {}),
-                    "phase": step,
+                    "step": node,
                 }
             ),
             reviewer=policy_reviewer,
@@ -130,51 +121,7 @@ class Broker:
             if not isinstance(inputs, dict):
                 raise ExecutionError("integration input must be an object")
             return self.integrations.execute(
-                str(payload.get("capability", "")), inputs, phase=self.phase
-            )
-        if payload.get("interaction_id") not in self.hooks:
-            raise ExecutionError("human hook is not authorized for the current phase")
-        operation = payload.get("operation")
-        hook = str(payload["interaction_id"])
-        if operation == "request":
-            return request(
-                self.root,
-                self.config,
-                self.run_id,
-                hook,
-                bool(payload.get("continue_while_waiting")),
-                self.hooks[hook],
-            )
-        if operation == "poll":
-            return poll(
-                self.root,
-                self.config,
-                self.run_id,
-                hook,
-                int(payload.get("wait_seconds", 0)),
-                float(payload.get("interval_seconds", 2)),
-            )
-        if operation == "accept":
-            message = str(payload.get("message", ""))
-            matches = list(
-                (self.root / ".outcomeci" / "outcomes" / self.run_id / "interactions").glob(
-                    f"*/{hook}.json"
-                )
-            )
-            if len(matches) != 1:
-                raise ExecutionError(f"interaction {hook} was not found for outcome {self.run_id}")
-            interaction = json.loads(matches[0].read_text(encoding="utf-8"))
-            replies = transport_responses(self.root, self.config, interaction)
-            if not any(reply.get("message") == message for reply in replies):
-                raise ExecutionError("response was not verified by the configured transport")
-            return accept(
-                self.root,
-                self.config,
-                self.run_id,
-                hook,
-                message,
-                bool(payload.get("approve")),
-                bool(payload.get("reject")),
+                str(payload.get("capability", "")), inputs, step=self.step
             )
         raise ExecutionError("operation is not allowed by this outcome capability")
 
@@ -184,7 +131,7 @@ def serve(
     root: Path,
     config: Path,
     run_id: str,
-    phase: str,
+    step: str,
     *,
     compiled=None,
     resolver: CredentialResolver | None = None,
@@ -196,13 +143,13 @@ def serve(
 ) -> Iterator[dict[str, str]]:
     temporary = tempfile.TemporaryDirectory(prefix="oci-cap-")
     directory = Path(temporary.name)
-    socket_path = directory / "human.sock"
+    socket_path = directory / "capability.sock"
     socket_path.unlink(missing_ok=True)
     broker = Broker(
         root,
         config,
         run_id,
-        phase,
+        step,
         socket_path,
         compiled,
         resolver,
@@ -237,21 +184,6 @@ def _call_broker(
     if not response.get("ok"):
         raise ExecutionError(str(response.get("error", error_fallback)))
     return response["result"]
-
-
-def invoke(operation: str, run_id: str, interaction_id: str, **arguments: Any) -> dict[str, Any]:
-    socket_path = os.environ.get("OUTCOMECI_CAPABILITY_SOCKET")
-    token = os.environ.get("OUTCOMECI_CAPABILITY_TOKEN")
-    if not socket_path or not token:
-        raise ExecutionError("no run-scoped human capability is available")
-    payload = {
-        "token": token,
-        "operation": operation,
-        "run_id": run_id,
-        "interaction_id": interaction_id,
-        **arguments,
-    }
-    return _call_broker(socket_path, payload, error_fallback="capability request failed")
 
 
 def invoke_integration(capability: str, inputs: dict[str, Any]) -> dict[str, Any]:

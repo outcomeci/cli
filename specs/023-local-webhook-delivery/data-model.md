@@ -1,1 +1,0 @@
-Event and version-pinned invocation commit with outbox. Outbox publishes reference-only SQS envelope. Inbox admission marks transport_ready. Leased unstarted work may return to queued; running lease loss becomes uncertain. Terminal failed/uncertain work creates a unique DLQ outbox entry.

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import stat
 from pathlib import Path
@@ -130,7 +129,7 @@ def test_revoked_workspace_key_is_not_sent_to_refresh_endpoint(tmp_path: Path, m
 
 
 def test_sync_validates_and_sends_explicit_create_mode(tmp_path: Path, monkeypatch) -> None:
-    initialize(tmp_path, "filesystem")
+    initialize(tmp_path)
     workflow = tmp_path / "outcome.yml"
     (tmp_path / ".outcomeci/vault.enc").write_text("encrypted-local-vault")
     captured = {}
@@ -149,8 +148,8 @@ def test_sync_validates_and_sends_explicit_create_mode(tmp_path: Path, monkeypat
     assert captured["path"] == "/workspaces/workspace_1/workflow-revisions"
     assert captured["body"]["mode"] == "create"
     assert captured["body"]["content_type"] == "yaml"
-    assert captured["body"]["content"].startswith("apiVersion:")
-    assert ".outcomeci/constitution.md" in captured["body"]["files"]
+    assert "apiVersion: outcomeci.workflow/v1" in captured["body"]["content"]
+    assert ".outcomeci/instructions/investigate.md" in captured["body"]["files"]
     assert ".outcomeci/vault.enc" not in captured["body"]["files"]
 
 
@@ -163,7 +162,7 @@ def test_get_workflow_reads_the_latest_revision(monkeypatch) -> None:
             "workflow_id": "00000000-0000-0000-0000-000000000001",
             "name": "code-outcome",
             "revision": 3,
-            "content": "apiVersion: outcomeci.workflow/v1alpha1\n",
+            "content": "apiVersion: outcomeci.workflow/v1\n",
             "content_sha256": "deadbeef",
             "content_type": "yaml",
             "source_filename": "outcome.yml",
@@ -189,7 +188,7 @@ def test_get_workflow_raises_when_not_found(monkeypatch) -> None:
         raise AssertionError("expected an ExecutionError")
 
 
-def test_issue_debug_lease_posts_the_optional_invocation_id(monkeypatch) -> None:
+def test_issue_debug_lease_posts_the_lease_request(monkeypatch) -> None:
     captured = {}
 
     def request(path, *, method="GET", body=None):
@@ -200,7 +199,7 @@ def test_issue_debug_lease_posts_the_optional_invocation_id(monkeypatch) -> None
     result = cloud.issue_debug_lease("workspace_1", "workflow_1")
     assert result["lease_id"] == "lease-1"
     assert captured["path"] == "/workspaces/workspace_1/workflows/workflow_1/debug-lease"
-    assert captured["body"] == {"invocation_id": None, "ttl_seconds": 600}
+    assert captured["body"] == {"ttl_seconds": 600}
 
 
 def test_issue_debug_lease_raises_the_server_detail_on_failure(monkeypatch) -> None:
@@ -208,56 +207,11 @@ def test_issue_debug_lease_raises_the_server_detail_on_failure(monkeypatch) -> N
         cloud, "_authorized_request", lambda *a, **k: (409, {"detail": "not queued"})
     )
     try:
-        cloud.issue_debug_lease("workspace_1", "workflow_1", invocation_id="inv-1")
+        cloud.issue_debug_lease("workspace_1", "workflow_1")
     except Exception as exc:
         assert "not queued" in str(exc)
     else:
         raise AssertionError("expected an ExecutionError")
-
-
-def test_complete_debug_lease_posts_status(monkeypatch) -> None:
-    captured = {}
-
-    def request(path, *, method="GET", body=None):
-        captured.update(path=path, method=method, body=body)
-        return 200, {"completed": True}
-
-    monkeypatch.setattr(cloud, "_authorized_request", request)
-    cloud.complete_debug_lease("workspace_1", "workflow_1", "inv-1", "failed")
-    assert (
-        captured["path"]
-        == "/workspaces/workspace_1/workflows/workflow_1/debug-lease/inv-1/complete"
-    )
-    assert captured["body"] == {"status": "failed"}
-
-
-def test_sync_sends_patch_lineage_for_new_version(tmp_path: Path, monkeypatch) -> None:
-    initialize(tmp_path, "filesystem")
-    workflow = tmp_path / "outcome.yml"
-    digest = hashlib.sha256(workflow.read_bytes()).hexdigest()
-    patch = tmp_path / "patch.yml"
-    patch.write_text(
-        "apiVersion: outcomeci.workflow/v1alpha1\n"
-        "kind: OutcomeWorkflowPatch\n"
-        "metadata:\n"
-        "  parentRevision: compiled-parent\n"
-        f"  parentContentSha256: {digest}\n"
-        "  reason: Pin discovered operation\n"
-        "  derivedFrom: {run: run-1, phase: intake, agent: codex}\n"
-        "spec: {operations: {add: {}}}\n",
-        encoding="utf-8",
-    )
-    captured = {}
-
-    def request(path, *, method="GET", body=None):
-        captured.update(path=path, method=method, body=body)
-        return 201, {"revision": 2}
-
-    monkeypatch.setattr(cloud, "_authorized_request", request)
-    cloud.sync_workflow(workflow, "workspace_1", "code-outcome", "version", patch_path=patch)
-    assert captured["body"]["expected_parent_sha256"] == digest
-    assert captured["body"]["lineage"]["parent_workflow_revision"] == "compiled-parent"
-    assert captured["body"]["lineage"]["derived_from"]["run"] == "run-1"
 
 
 def test_logout_revokes_before_removing_local_credentials(tmp_path: Path, monkeypatch) -> None:
@@ -298,7 +252,7 @@ def test_issue_debug_lease_asks_for_the_agent_credential(monkeypatch) -> None:
         {
             "path": "/workspaces/w1/workflows/wf1/debug-lease",
             "method": "POST",
-            "body": {"invocation_id": None, "ttl_seconds": 3600, "agent_provider": "codex"},
+            "body": {"ttl_seconds": 3600, "agent_provider": "codex"},
         }
     ]
 

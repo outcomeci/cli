@@ -52,4 +52,4 @@ jobs:
         run: |
           pip install --force-reinstall dist/*.whl
           oci --version
-          oci outcome --help
+          oci workflow run --help

@@ -1,7 +1,7 @@
 """The outcomeci.workflow/v1 front end: secrets, apis, reasoning and ordered steps.
 
-A v1 file lowers to the same validated phase graph every API version runs
-on (`config.validate_lowered`). Each phase also carries a `v1` block the
+A v1 file lowers to the same validated step graph every API version runs
+on (`config.validate_lowered`). Each lowered step also carries a `v1` block the
 runtime reads for what the older shape cannot express: step conditions,
 grant arguments, per-step policy, await steps, and references to earlier
 outputs and recorded calls.
@@ -335,7 +335,10 @@ def _reasoning(value: Any) -> tuple[dict[str, Any], dict[str, Any] | None]:
         raise ConfigError("reasoning.fallback must be a list")
     if len(fallback) > 1:
         raise ConfigError("this runtime tries one fallback; list a single reasoning.fallback entry")
-    return default, _agent(fallback[0], "reasoning.fallback[0]")
+    chosen = _agent(fallback[0], "reasoning.fallback[0]")
+    if "runner" not in chosen:
+        raise ConfigError("reasoning.fallback[0].runner is required")
+    return default, chosen
 
 
 def _agent(value: Any, field: str) -> dict[str, Any]:
@@ -376,22 +379,24 @@ def _apis(document: dict[str, Any]) -> tuple[dict[str, Any], list[dict], dict[st
             raise ConfigError(
                 f"{field}: connector contract {contract['schema_version']} is unsupported"
             )
+        accepts = contract["auth"]["accepts"]
+        keyless = [item["kind"] for item in accepts] == ["none"]
         auth = binding.get("auth")
-        if auth is None and contract["auth"]["type"] != "none":
+        if auth is None and not keyless:
             raise ConfigError(f"{field}.auth is required, such as secrets.{name}")
+        if auth is not None and keyless:
+            raise ConfigError(f"{field}.auth is not used: {found.name} takes no credential")
+        connection_auth: dict[str, Any] = {"connector": found.name, "accepts": accepts}
         if auth is not None:
             secret = _secret(auth, secrets, f"{field}.auth", f"such as secrets.{name}")
+            connection_auth["credential"] = secrets[secret]
         apis[name] = {"uses": found.name, "contract": contract, "digest": found.digest()}
         connections.append(
             {
                 "ref": name,
                 "provider": "http",
                 "base_url": contract["base_url"],
-                "auth": (
-                    {"type": contract["auth"]["type"], "credential": secrets[secret]}
-                    if auth is not None
-                    else {"type": "none"}
-                ),
+                "auth": connection_auth,
             }
         )
         integrations[name] = {
@@ -483,11 +488,11 @@ def _returns(block, name: str, schema: dict[str, Any]) -> dict[str, Any]:
     return schema["properties"]
 
 
-def _agent_step(name, step, phase, block, reads, *, scope: _Scope, apis, base: Path):
+def _agent_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Path):
     field = f"steps.{name}"
-    phase["instructions"] = _reason(step.get("reason"), base, f"{field}.reason")
+    node["instructions"] = _reason(step.get("reason"), base, f"{field}.reason")
     if "using" in step:
-        phase.update(_agent(step["using"], f"{field}.using"))
+        node.update(_agent(step["using"], f"{field}.using"))
     if "for_each" in step:
         match = FOR_EACH.fullmatch(str(step["for_each"]))
         if not match:
@@ -507,7 +512,7 @@ def _agent_step(name, step, phase, block, reads, *, scope: _Scope, apis, base: P
         scope.bound = set()
     for grant in block["grants"]:
         reads.update(rule["step"] for rule in grant["args"].values() if rule.get("step"))
-    phase["capabilities"] = sorted({grant["capability"] for grant in block["grants"]})
+    node["capabilities"] = sorted({grant["capability"] for grant in block["grants"]})
     if step.get("policy") is not None:
         if not isinstance(step["policy"], str) or not step["policy"].strip():
             raise ConfigError(f"{field}.policy must be text")
@@ -535,7 +540,7 @@ def _agent_step(name, step, phase, block, reads, *, scope: _Scope, apis, base: P
     return outputs
 
 
-def _await_step(name, step, phase, block, reads, *, scope: _Scope, apis, base: Path):
+def _await_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Path):
     field = f"steps.{name}"
     watch = _mapping(step["await"], f"{field}.await")
     if len(watch) != 1:
@@ -554,9 +559,9 @@ def _await_step(name, step, phase, block, reads, *, scope: _Scope, apis, base: P
     reads.add(message["step"])
     declared = apis[api]["contract"]["watchers"][watcher]
     operation = declared["operation"]
-    phase["instructions"] = {"content": AWAIT_INSTRUCTIONS}
+    node["instructions"] = {"content": AWAIT_INSTRUCTIONS}
     respond = {f"{api}.{declared['respond']}"} if declared.get("respond") else set()
-    phase["capabilities"] = sorted({f"{api}.{operation}"} | respond)
+    node["capabilities"] = sorted({f"{api}.{operation}"} | respond)
     block["await"] = {
         "api": api,
         "watcher": watcher,
@@ -574,7 +579,7 @@ def _await_step(name, step, phase, block, reads, *, scope: _Scope, apis, base: P
     return {}
 
 
-def _converse_step(name, step, phase, block, reads, *, scope: _Scope, apis, base: Path):
+def _converse_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Path):
     """`converse: <api>.<operation>(<recorded message>)`: discuss a plan in its thread."""
     field = f"steps.{name}"
     match = CONVERSE.fullmatch(str(step["converse"]))
@@ -616,15 +621,15 @@ def _converse_step(name, step, phase, block, reads, *, scope: _Scope, apis, base
     if not isinstance(names, list) or not set(names) <= {"plan", "status"} or not names:
         raise ConfigError(f"{field}.returns lists plan and/or status")
     respond = watchers[watcher]
-    phase["instructions"] = (
+    node["instructions"] = (
         _reason(step["reason"], base, f"{field}.reason")
         if step.get("reason")
         else {"content": CONVERSE_INSTRUCTIONS}
     )
     if "using" in step:
-        phase.update(_agent(step["using"], f"{field}.using"))
+        node.update(_agent(step["using"], f"{field}.using"))
     attachment = respond.get("attachment")
-    phase["capabilities"] = sorted(
+    node["capabilities"] = sorted(
         {f"{api}.{operation}", f"{api}.{respond['respond']}"}
         | ({f"{api}.{attachment}"} if attachment else set())
     )
@@ -661,7 +666,7 @@ def _converse_step(name, step, phase, block, reads, *, scope: _Scope, apis, base
 
 
 def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
-    """Lower a parsed v1 document to the validated shape plus per-phase v1 blocks."""
+    """Lower a parsed v1 document to the validated shape plus per-step v1 blocks."""
     unknown = set(document) - TOP_LEVEL
     if unknown:
         raise ConfigError(f"unknown top-level fields: {', '.join(sorted(unknown))}")
@@ -672,7 +677,7 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
     if not isinstance(raw_steps, list) or not raw_steps:
         raise ConfigError("steps must be a non-empty list")
     scope = _Scope()
-    phases: dict[str, Any] = {}
+    nodes: dict[str, Any] = {}
     blocks: dict[str, Any] = {}
     order: list[str] = []
     for index, entry in enumerate(raw_steps):
@@ -691,13 +696,13 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
                 f"{field} has unsupported fields for {kind} steps: {', '.join(sorted(extra))}"
             )
         when = _when(step.get("when"), scope, f"{field}.when")
-        phase: dict[str, Any] = {"needs": list(order), "expects": {"inputs": [], "outputs": []}}
+        node: dict[str, Any] = {"needs": list(order), "expects": {"inputs": [], "outputs": []}}
         block: dict[str, Any] = {"kind": kind, "when": when, "inputs": [], "grants": []}
         reads = {when["step"]} if when and when["step"] else set()
         lowering = {"agent": _agent_step, "await": _await_step, "converse": _converse_step}[kind]
-        outputs = lowering(name, step, phase, block, reads, scope=scope, apis=apis, base=base)
+        outputs = lowering(name, step, node, block, reads, scope=scope, apis=apis, base=base)
         if block.get("returns"):
-            phase["expects"]["outputs"].append(
+            node["expects"]["outputs"].append(
                 {
                     "name": OUTPUTS,
                     "path": block["returns"]["path"],
@@ -706,7 +711,7 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
                 }
             )
         block["reads"] = sorted(reads)
-        phases[name] = phase
+        nodes[name] = node
         blocks[name] = block
         scope.steps[name] = {"kind": kind, "grants": block["grants"], "outputs": outputs}
         order.append(name)
@@ -722,7 +727,7 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
             "backend": {"provider": "outcomeci"},
             "context": {"provider": "outcomeci"},
             "instructions": {"workflow": {"content": ORCHESTRATOR}},
-            "agents": {**agents, "phases": phases},
+            "agents": {**agents, "steps": nodes},
             "connections": connections,
             "integrations": integrations,
         },
@@ -748,10 +753,10 @@ def load(path: Path) -> dict[str, Any]:
     stem = path.name.split(".", 1)[0]
     lowered = lower(document, path.parent, stem)
     extension = lowered.pop("_v1")
-    root = validate_lowered(lowered, path, lowered=True)
+    root = validate_lowered(lowered, path)
     graph = root["_graph"]
     for name, block in extension["blocks"].items():
-        graph["phases"][name]["v1"] = {**block, "trigger": extension["trigger"]}
+        graph["steps"][name]["v1"] = {**block, "trigger": extension["trigger"]}
     graph["source"] = document
     graph["connectors"] = extension["connectors"]
     return root

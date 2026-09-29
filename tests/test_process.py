@@ -81,7 +81,7 @@ def test_secure_execution_masks_slack_and_mounts_only_outcome_writable(
         "command",
         lambda argv, **kwargs: calls.append(argv) or process.Result(0, "complete", ""),
     )
-    artifact = outcome / "standup.md"
+    artifact = outcome / "summary.md"
     artifact.touch()
     process.invoke(
         "codex", None, "prompt", tmp_path, 10, allow_local_auth=True, writable_paths=[artifact]

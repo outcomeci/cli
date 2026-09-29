@@ -19,13 +19,13 @@ def safe_text(value: str, limit: int = 1024) -> str:
 
 
 def event(
-    event_type: str, phase: str, capability: str, message: str, **fields: Any
+    event_type: str, step: str, capability: str, message: str, **fields: Any
 ) -> dict[str, Any]:
     summary = {
         "event_id": str(uuid4()),
         "occurred_at": datetime.now(UTC).isoformat(),
         "event_type": event_type,
-        "phase": phase,
+        "step": step,
         "capability": capability,
         "message": safe_text(message),
         "level": "info",

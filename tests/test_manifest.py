@@ -8,7 +8,7 @@ from outcomeci.manifest import build_manifest
 def test_manifest_has_one_backend_independent_shape(tmp_path: Path) -> None:
     outcome = tmp_path / ".outcomeci" / "outcomes" / "run-1"
     outcome.mkdir(parents=True)
-    (outcome / "standup.md").write_text("standup\n")
+    (outcome / "summary.md").write_text("summary\n")
     (outcome / ".broker").mkdir()
     (outcome / ".broker" / "journal.json").write_text(
         '{"references":{"izzy":"private-provider-id"}}'
@@ -17,10 +17,9 @@ def test_manifest_has_one_backend_independent_shape(tmp_path: Path) -> None:
         "outcome_root": outcome,
         "artifact_base": tmp_path,
         "run_id": "run-1",
-        "phase": "intake",
+        "step": "intake",
         "workflow_revision": "workflow-revision",
         "context_revision_id": "context-revision",
-        "constitution_sha256": "constitution-sha",
         "repository_base_commits": {"org/repo": "commit-sha"},
         "runner": "codex",
         "model": None,
@@ -46,5 +45,5 @@ def test_manifest_has_one_backend_independent_shape(tmp_path: Path) -> None:
     assert local["runner"].keys() == managed["runner"].keys()
     assert local["backend"].keys() == managed["backend"].keys()
     assert local["context"].keys() == managed["context"].keys()
-    assert local["phase_contract"] is None
+    assert local["step_contract"] is None
     assert all(".broker" not in path for path in local["artifacts"])

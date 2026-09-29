@@ -30,8 +30,8 @@ from .process import ExecutionError
 MISSING = object()
 
 
-def block(compiled: dict[str, Any], phase: str) -> dict[str, Any] | None:
-    return compiled["instructions"]["phases"][phase].get("v1")
+def block(compiled: dict[str, Any], step: str) -> dict[str, Any] | None:
+    return compiled["instructions"]["steps"][step].get("v1")
 
 
 def _lookup(value: Any, parts: list[str]) -> Any:
@@ -76,7 +76,7 @@ def _call_output(root: Path, run_id: str, step: str, parts: list[str]) -> Any:
         call
         for call in (_journal(root, run_id).get("calls") or {}).values()
         if isinstance(call, dict)
-        and call.get("phase") == step
+        and call.get("step") == step
         and call.get("status") == "confirmed"
         and _call_succeeded(call)
     ]
@@ -101,7 +101,7 @@ def missing_call(root: Path, run_id: str, ref: str) -> str:
         call
         for call in (journal.get("calls") or {}).values()
         if isinstance(call, dict)
-        and call.get("phase") == step
+        and call.get("step") == step
         and (call.get("as") == rest or call.get("capability") == rest)
     ]
     if not calls:
@@ -155,17 +155,17 @@ def holds(root: Path, state: dict[str, Any], when: dict[str, Any] | None) -> boo
     return (found == when["value"]) == (when["op"] == "==")
 
 
-def skip_reason(root: Path, state: dict[str, Any], phase_block: dict[str, Any]) -> str | None:
+def skip_reason(root: Path, state: dict[str, Any], step_block: dict[str, Any]) -> str | None:
     """Why a step does not run: it reads a skipped step, reads an output an earlier
     step left out (an optional `?` output), or its `when:` fails."""
-    skipped = set(state.get("skipped_phases", []))
-    upstream = sorted(skipped & set(phase_block.get("reads", [])))
+    skipped = set(state.get("skipped_steps", []))
+    upstream = sorted(skipped & set(step_block.get("reads", [])))
     if upstream:
         return f"reads skipped step {upstream[0]}"
-    if not holds(root, state, phase_block.get("when")):
-        return f"when: {phase_block['when']['ref']} did not hold"
-    bound_names = {phase_block["for_each"]["as"]} if phase_block.get("for_each") else set()
-    for item in phase_block.get("inputs", []):
+    if not holds(root, state, step_block.get("when")):
+        return f"when: {step_block['when']['ref']} did not hold"
+    bound_names = {step_block["for_each"]["as"]} if step_block.get("for_each") else set()
+    for item in step_block.get("inputs", []):
         if item["ref"].split(".", 1)[0] in bound_names:
             continue
         if value(root, state, item["ref"]) is MISSING:
@@ -176,12 +176,12 @@ def skip_reason(root: Path, state: dict[str, Any], phase_block: dict[str, Any]) 
 def resolve_grants(
     root: Path,
     state: dict[str, Any],
-    phase_block: dict[str, Any],
+    step_block: dict[str, Any],
     bound: dict[str, Any] | None = None,
 ) -> list[dict]:
     """Grant rules with every reference replaced by its value in this run."""
     resolved = []
-    for grant in phase_block.get("grants", []):
+    for grant in step_block.get("grants", []):
         args = {}
         for name, rule in grant["args"].items():
             found = (
@@ -197,11 +197,11 @@ def resolve_grants(
 def inputs(
     root: Path,
     state: dict[str, Any],
-    phase_block: dict[str, Any],
+    step_block: dict[str, Any],
     bound: dict[str, Any] | None = None,
 ) -> list[dict]:
     values = []
-    for item in phase_block.get("inputs", []):
+    for item in step_block.get("inputs", []):
         found = value(root, state, item["ref"], bound=bound)
         if found is MISSING:
             raise ExecutionError(f"input {item['ref']} is unavailable")
@@ -212,9 +212,9 @@ def inputs(
 MAX_ITEMS = 20
 
 
-def items(root: Path, state: dict[str, Any], phase_block: dict[str, Any]) -> list[dict[str, Any]]:
+def items(root: Path, state: dict[str, Any], step_block: dict[str, Any]) -> list[dict[str, Any]]:
     """The bindings a for_each step runs with, one per item; one empty binding otherwise."""
-    spec = phase_block.get("for_each")
+    spec = step_block.get("for_each")
     if spec is None:
         return [{}]
     found = value(root, state, spec["ref"])
@@ -227,25 +227,25 @@ def items(root: Path, state: dict[str, Any], phase_block: dict[str, Any]) -> lis
     return [{spec["as"]: item} for item in found]
 
 
-def item_path(root: Path, run_id: str, phase_block: dict[str, Any], index: int) -> Path:
-    relative = phase_block["returns"]["item"]["path"].format(index=index)
+def item_path(root: Path, run_id: str, step_block: dict[str, Any], index: int) -> Path:
+    relative = step_block["returns"]["item"]["path"].format(index=index)
     return root / ".outcomeci" / "outcomes" / run_id / relative
 
 
-def gather(root: Path, run_id: str, phase_block: dict[str, Any], count: int) -> None:
+def gather(root: Path, run_id: str, step_block: dict[str, Any], count: int) -> None:
     """Write a for_each step's outputs: each output a list with one entry per item.
 
     Each item's result is checked against the step's `returns` first, and an
     optional output an item left out is null, so index i of every list is item i.
     """
-    returns = phase_block.get("returns")
+    returns = step_block.get("returns")
     if not returns:
         return
     schema = returns["item"]["schema"]
     names = list(schema["properties"])
     gathered: dict[str, list[Any]] = {name: [] for name in names}
     for index in range(count):
-        path = item_path(root, run_id, phase_block, index)
+        path = item_path(root, run_id, step_block, index)
         try:
             result = json.loads(path.read_text(encoding="utf-8"))
             jsonschema.validate(result, schema)
@@ -265,11 +265,11 @@ SLACK_TEXT_LIMIT = 3900
 
 
 def _poll(
-    executor: IntegrationExecutor, capability: str, request: dict, phase: str, deadline: float
+    executor: IntegrationExecutor, capability: str, request: dict, step: str, deadline: float
 ):
     """One watched read; a transient failure means try again later, not fail the step."""
     try:
-        return executor.execute(capability, request, phase=phase)
+        return executor.execute(capability, request, step=step)
     except IntegrationError as exc:
         if not exc.retryable or time.monotonic() >= deadline:
             raise
@@ -296,14 +296,14 @@ def _chunks(text: str, limit: int = SLACK_TEXT_LIMIT) -> list[str]:
     return parts
 
 
-def _respond(executor, api: str, spec: dict, thread: dict, text: str, phase: str) -> str:
+def _respond(executor, api: str, spec: dict, thread: dict, text: str, step: str) -> str:
     """Post text as replies in the watched thread; returns the first reply's ts."""
     first = None
     for part in _chunks(text):
         result = executor.execute(
             f"{api}.{spec['respond']}",
             {"channel": thread["channel"], "text": part, spec["thread_field"]: thread["ts"]},
-            phase=phase,
+            step=step,
         )
         first = first or (result.get("output") or {}).get("ts")
     return first or ""
@@ -315,7 +315,7 @@ def _show(value: Any) -> str:
     return value if isinstance(value, str) else json.dumps(value, separators=(",", ":"))
 
 
-def _covers(root: Path, compiled: dict[str, Any], state: dict[str, Any], phase: str) -> list[str]:
+def _covers(root: Path, compiled: dict[str, Any], state: dict[str, Any], step: str) -> list[str]:
     """What approving lets the later steps do: their grants resolved from this run's data.
 
     Posting this with the approval request means the reaction approves the
@@ -323,7 +323,7 @@ def _covers(root: Path, compiled: dict[str, Any], state: dict[str, Any], phase: 
     """
     order = [name for level in compiled["graph"]["levels"] for name in level]
     lines = []
-    for later in order[order.index(phase) + 1 :]:
+    for later in order[order.index(step) + 1 :]:
         later_block = block(compiled, later) or {}
         for grant in later_block.get("grants", []):
             referenced = {name: rule for name, rule in grant["args"].items() if "ref" in rule}
@@ -344,7 +344,7 @@ def run_await(
     root: Path,
     compiled: dict[str, Any],
     state: dict[str, Any],
-    phase: str,
+    step: str,
     resolver: CredentialResolver | None,
 ) -> bool:
     """Block until the watched signal arrives (True) or the window expires (False)."""
@@ -353,14 +353,14 @@ def run_await(
 
     if resolver is None:
         raise ExecutionError("an await step requires a credential resolver")
-    spec = block(compiled, phase)["await"]
+    spec = block(compiled, step)["await"]
     message = value(root, state, spec["message"])
     if not isinstance(message, dict) or not message.get("channel") or not message.get("ts"):
         raise ExecutionError(
-            f"await step {phase} has no message to watch: "
+            f"await step {step} has no message to watch: "
             + missing_call(root, state["run_id"], spec["message"])
         )
-    by = _person(root, state, spec.get("by"), phase)
+    by = _person(root, state, spec.get("by"), step)
     uses = compiled["connectors"][spec["api"]]["provider"]
     watcher = provider(uses).watchers[spec["watcher"]]
     executor = IntegrationExecutor(compiled, resolver=resolver, reviewed=True)
@@ -368,7 +368,7 @@ def run_await(
     watched = {"channel": message["channel"], "ts": message["ts"]}
     thread = _thread(message, spec)
     definition = {
-        "id": phase,
+        "id": step,
         "participant": {"role": "approver", **({"user": by} if by else {})},
         "purpose": f"Wait for :{spec['emoji']}: on {spec['message']}",
         "interaction": "approval",
@@ -376,21 +376,21 @@ def run_await(
         "delivery": {"type": spec["api"], "watcher": spec["watcher"], "message": watched},
         "wait": {"strategy": "block", "timeout_seconds": spec["timeout_seconds"]},
     }
-    covers = _covers(root, compiled, state, phase)
-    notice = root / ".outcomeci" / "outcomes" / state["run_id"] / phase / "covers.json"
+    covers = _covers(root, compiled, state, step)
+    notice = root / ".outcomeci" / "outcomes" / state["run_id"] / step / "covers.json"
     if covers and spec.get("respond") and not notice.exists():
         text = f"Reacting :{spec['emoji']}: approves exactly this:\n" + "\n".join(covers)
-        _respond(executor, spec["api"], spec, thread, text, phase)
+        _respond(executor, spec["api"], spec, thread, text, step)
         notice.parent.mkdir(parents=True, exist_ok=True)
         notice.write_text(json.dumps({"covers": covers}) + "\n", encoding="utf-8")
     deadline = time.monotonic() + spec["timeout_seconds"]
     while True:
-        result = _poll(executor, capability, watched, phase, deadline)
+        result = _poll(executor, capability, watched, step, deadline)
         if result is not None and watcher.match(result.get("output") or {}, spec["emoji"], by=by):
             _finish_interaction(
                 root,
                 state,
-                phase,
+                step,
                 "before",
                 definition,
                 status="approved",
@@ -401,7 +401,7 @@ def run_await(
             _finish_interaction(
                 root,
                 state,
-                phase,
+                step,
                 "before",
                 definition,
                 status="expired",
@@ -417,12 +417,12 @@ def _thread(message: dict[str, Any], spec: dict[str, Any]) -> dict[str, str]:
     return {"channel": message["channel"], "ts": root or message["ts"]}
 
 
-def _person(root: Path, state: dict[str, Any], ref: str | None, phase: str) -> str | None:
+def _person(root: Path, state: dict[str, Any], ref: str | None, step: str) -> str | None:
     if ref is None:
         return None
     found = value(root, state, ref)
     if not isinstance(found, str) or not found:
-        raise ExecutionError(f"step {phase}: by: {ref} did not resolve to a person")
+        raise ExecutionError(f"step {step}: by: {ref} did not resolve to a person")
     return found
 
 
@@ -469,8 +469,8 @@ def _plan_diff(before: Any, after: Any) -> dict[str, list[str]]:
     }
 
 
-def _consultation_path(root: Path, run_id: str, phase: str) -> Path:
-    return root / ".outcomeci" / "outcomes" / run_id / phase / "consultation.json"
+def _consultation_path(root: Path, run_id: str, step: str) -> Path:
+    return root / ".outcomeci" / "outcomes" / run_id / step / "consultation.json"
 
 
 def _save(path: Path, consultation: dict[str, Any]) -> None:
@@ -491,7 +491,7 @@ def _opening(root: Path, state: dict[str, Any], spec: dict[str, Any], plan: Any,
     for call in (_journal(root, state["run_id"]).get("calls") or {}).values():
         if (
             isinstance(call, dict)
-            and call.get("phase") == step
+            and call.get("step") == step
             and call.get("status") == "confirmed"
             and _call_succeeded(call)
             and ((call.get("result") or {}).get("output") or {}).get("ts") == ts
@@ -514,7 +514,7 @@ def run_converse(
     root: Path,
     compiled: dict[str, Any],
     state: dict[str, Any],
-    phase: str,
+    step: str,
     options: Any,
 ) -> str:
     """Discuss a plan in its thread until it converges, is capped, or times out.
@@ -532,18 +532,18 @@ def run_converse(
 
     if options.credential_resolver is None:
         raise ExecutionError("a converse step requires a credential resolver")
-    phase_block = block(compiled, phase)
-    spec = phase_block["converse"]
+    step_block = block(compiled, step)
+    spec = step_block["converse"]
     message = value(root, state, spec["message"])
     if not isinstance(message, dict) or not message.get("channel") or not message.get("ts"):
         raise ExecutionError(
-            f"converse step {phase} has no message to watch: "
+            f"converse step {step} has no message to watch: "
             + missing_call(root, state["run_id"], spec["message"])
         )
     plan = value(root, state, spec["subject"])
     if plan is MISSING:
-        raise ExecutionError(f"converse step {phase}: {spec['subject']} is unavailable")
-    by = _person(root, state, spec.get("by"), phase)
+        raise ExecutionError(f"converse step {step}: {spec['subject']} is unavailable")
+    by = _person(root, state, spec.get("by"), step)
     watcher = provider(compiled["connectors"][spec["api"]]["provider"]).watchers[spec["watcher"]]
     executor = IntegrationExecutor(
         compiled,
@@ -551,32 +551,32 @@ def run_converse(
         reviewed=True,
         downloads=attachments_path(root, state["run_id"]),
     )
-    path = _consultation_path(root, state["run_id"], phase)
+    path = _consultation_path(root, state["run_id"], step)
     try:
         consultation = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         consultation = _opening(root, state, spec, plan, message["ts"])
         _save(path, consultation)
-    runner, model = local._policy(compiled, phase, options.agent, options.model)
+    runner, model = local._policy(compiled, step, options.agent, options.model)
     thread = _thread(message, spec)
     deadline = time.monotonic() + spec["timeout_seconds"]
     while consultation["status"] == "open":
         if consultation.get("outbox"):
-            _respond(executor, spec["api"], spec, thread, consultation["outbox"][0], phase)
+            _respond(executor, spec["api"], spec, thread, consultation["outbox"][0], step)
             consultation["outbox"].pop(0)
             if not consultation["outbox"] and consultation.get("closing"):
                 consultation["status"] = consultation.pop("closing")
             _save(path, consultation)
             continue
         if consultation["turns"][-1]["from"] == "human":
-            _answer(root, compiled, state, phase, spec, consultation, runner, model, options)
+            _answer(root, compiled, state, step, spec, consultation, runner, model, options)
             _save(path, consultation)
             deadline = time.monotonic() + spec["timeout_seconds"]
             continue
         if len(consultation["turns"]) >= spec["max_turns"]:
             consultation["status"] = "capped"
             break
-        result = _poll(executor, f"{spec['api']}.{spec['operation']}", thread, phase, deadline)
+        result = _poll(executor, f"{spec['api']}.{spec['operation']}", thread, step, deadline)
         seen = {turn.get("ts") for turn in consultation["turns"]}
         replies = [
             reply
@@ -600,7 +600,7 @@ def run_converse(
                     "plan_version": consultation["current_version"],
                     "ts": reply["ts"],
                     "files": [
-                        _attachment(executor, spec, message["channel"], item, phase)
+                        _attachment(executor, spec, message["channel"], item, step)
                         for item in reply.get("files") or []
                     ],
                 }
@@ -609,8 +609,8 @@ def run_converse(
         _save(path, consultation)
     _save(path, consultation)
     outputs = {"plan": consultation["plan"], "status": consultation["status"]}
-    names = list(phase_block["returns"]["schema"]["properties"])
-    target = outputs_path(root, state["run_id"], phase)
+    names = list(step_block["returns"]["schema"]["properties"])
+    target = outputs_path(root, state["run_id"], step)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(
         json.dumps({name: outputs[name] for name in names}, indent=2, sort_keys=True) + "\n",
@@ -624,7 +624,7 @@ def _attachment(
     spec: dict[str, Any],
     channel: str,
     item: dict[str, Any],
-    phase: str,
+    step: str,
 ) -> dict[str, Any]:
     """A reply's file, downloaded for the next turn, granted only in its thread's
     conversation. A file that cannot be fetched is named with the reason, so
@@ -649,7 +649,7 @@ def _attachment(
         return {"name": name, "error": "the file cannot be scoped to this conversation"}
     try:
         result = executor.execute(
-            capability, {"file": item.get("id")}, phase=phase, response_grants=[[grant]]
+            capability, {"file": item.get("id")}, step=step, response_grants=[[grant]]
         )
     except (ExecutionError, OSError) as exc:
         return {"name": name, "error": str(exc)[:200]}
@@ -661,9 +661,9 @@ def _attachment(
     }
 
 
-def _answer(root, compiled, state, phase, spec, consultation, runner, model, options) -> None:
+def _answer(root, compiled, state, step, spec, consultation, runner, model, options) -> None:
     """Fold one agent turn into the consultation and queue what it posts."""
-    answer = _turn(root, compiled, state, phase, spec, consultation, runner, model, options)
+    answer = _turn(root, compiled, state, step, spec, consultation, runner, model, options)
     unchanged = answer["plan"] == consultation["plan"]
     posts = [answer["message"]]
     if answer["status"] == "converged" and unchanged:
@@ -690,7 +690,7 @@ def _answer(root, compiled, state, phase, spec, consultation, runner, model, opt
     consultation["outbox"] = [*consultation.get("outbox", []), *posts]
 
 
-def _turn(root, compiled, state, phase, spec, consultation, runner, model, options) -> dict:
+def _turn(root, compiled, state, step, spec, consultation, runner, model, options) -> dict:
     """One fresh agent call: the current plan and discussion in, one answer out.
 
     An invalid answer gets one repair attempt with the reason, so a single
@@ -703,13 +703,13 @@ def _turn(root, compiled, state, phase, spec, consultation, runner, model, optio
         / ".outcomeci"
         / "outcomes"
         / state["run_id"]
-        / phase
+        / step
         / "turns"
         / f"{len(consultation['turns'])}.json"
     )
     turn_path.parent.mkdir(parents=True, exist_ok=True)
     prompt = TURN_TASK.format(
-        instructions=compiled["instructions"]["phases"][phase]["content"],
+        instructions=compiled["instructions"]["steps"][step]["content"],
         api=spec["api"],
         path=turn_path,
         schema=json.dumps(spec["plan_schema"], separators=(",", ":")),
