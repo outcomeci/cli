@@ -173,3 +173,14 @@ def test_local_vault_put_drops_the_newline_a_pipe_adds(tmp_path: Path, monkeypat
         == 0
     )
     assert local_vault.resolve(tmp_path, "vault:github") == "ghp-token"
+
+
+def test_agent_only_integration_commands_stay_out_of_help(capsys) -> None:
+    import pytest
+
+    with pytest.raises(SystemExit):
+        main(["integration", "--help"])
+    help_text = capsys.readouterr().out
+    assert "{slack}" in help_text
+    for hidden in ("list", "describe", "execute", "dry-run", "doctor"):
+        assert hidden not in help_text

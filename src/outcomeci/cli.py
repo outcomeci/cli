@@ -251,39 +251,35 @@ def parser() -> argparse.ArgumentParser:
         item.add_argument("config", nargs="?", type=Path, default=Path("outcome.yml"))
         if name == "compile":
             item.add_argument("--step", dest="phase", help="Print only this step's instructions")
-    integration = commands.add_parser("integration")
-    integration_commands = integration.add_subparsers(dest="integration_command", required=True)
-    integration_list = integration_commands.add_parser(
-        "list", help="List authorized API capabilities"
+    integration = commands.add_parser("integration", help="Set up a provider's app, such as Slack")
+    # list, describe, execute, dry-run and doctor are how a running step's agent
+    # calls its granted APIs; they stay out of help and usage.
+    integration_commands = integration.add_subparsers(
+        dest="integration_command", required=True, metavar="{slack}"
     )
+    integration_list = integration_commands.add_parser("list")
     integration_list.add_argument("--phase")
     _add_workflow_arguments(integration_list)
-    integration_describe = integration_commands.add_parser(
-        "describe", help="Describe one API capability without exposing credentials"
-    )
+    integration_describe = integration_commands.add_parser("describe")
     integration_describe.add_argument("capability")
     _add_workflow_arguments(integration_describe)
-    integration_execute = integration_commands.add_parser(
-        "execute", help="Execute a workflow-authorized API capability"
-    )
+    integration_execute = integration_commands.add_parser("execute")
     integration_execute.add_argument("capability")
     integration_execute.add_argument("--phase", required=True)
     integration_execute.add_argument("--input", default="{}")
     integration_execute.add_argument("--input-stdin", action="store_true")
     _add_workflow_arguments(integration_execute)
-    integration_dry_run = integration_commands.add_parser(
-        "dry-run", help="Show authorized API effects without executing them"
-    )
+    integration_dry_run = integration_commands.add_parser("dry-run")
     integration_dry_run.add_argument("--phase", required=True)
     _add_workflow_arguments(integration_dry_run)
-    integration_doctor = integration_commands.add_parser(
-        "doctor", help="Diagnose integration configuration and credential references"
-    )
+    integration_doctor = integration_commands.add_parser("doctor")
     integration_doctor.add_argument(
         "--connectivity", action="store_true", help="Also check configured HTTP origins"
     )
     _add_workflow_arguments(integration_doctor)
-    slack = integration_commands.add_parser("slack")
+    slack = integration_commands.add_parser(
+        "slack", help="Create, inspect and connect a Slack app for a workflow"
+    )
     slack_commands = slack.add_subparsers(dest="slack_command", required=True)
     slack_setup = slack_commands.add_parser("setup")
     _add_workspace_argument(slack_setup)
