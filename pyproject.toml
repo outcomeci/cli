@@ -19,7 +19,7 @@ dependencies = [
     # lockfile, so a commit SHA is what actually keeps this reproducible.
     # Bump it deliberately when outcomeci/connectors releases something cli
     # needs.
-    "outcomeci-connectors @ git+https://github.com/outcomeci/connectors@bbc89939cc628cba2186e030febac3de7d8336a4",
+    "outcomeci-connectors @ git+https://github.com/outcomeci/connectors@d75d1ce9b8ae7bc7616d9c21d837c201f9584bc5",
 ]
 
 [project.scripts]

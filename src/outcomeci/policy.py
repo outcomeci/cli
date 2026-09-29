@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import tempfile
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -74,6 +75,9 @@ class PolicyExecutor:
         self.grants = grants
         self.step_policy = step_policy
         self.container_isolated = container_isolated
+        # Names this invocation's calls, so a review weighs only the calls
+        # the agent it is reviewing made.
+        self.invocation = secrets.token_hex(8)
         self._event_cursor = 0
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
 
@@ -386,6 +390,7 @@ class PolicyExecutor:
             call = {
                 "capability": capability,
                 "phase": phase,
+                "invocation": self.invocation,
                 "sequence": len(state["calls"]) + 1,
                 "as": grant_as,
                 "status": "reviewing",
@@ -422,22 +427,25 @@ class PolicyExecutor:
                     self.step_policy is not None and not self._reads_only(capability, request)
                 )
                 if reviewed:
+                    compared = self.executor.compared(capability, actual, phase=phase)
                     review = self.reviewer(
                         {
                             "proposal_sha256": fingerprint,
                             "request": request,
+                            **({"compared": compared} if compared else {}),
                             "policy": policy,
                             "context": self.context,
-                            # Only this step's own calls: an earlier step's requests,
-                            # such as a plan posted before a discussion revised it,
-                            # would read as what this step must do.
+                            # Only the calls this agent made: another step's
+                            # requests, such as a plan posted before a discussion
+                            # revised it, or another repository's in a for_each,
+                            # would read as what this one must do.
                             "receipts": [
                                 {
                                     key: call.get(key)
                                     for key in ("capability", "phase", "status", "request")
                                 }
                                 for call in state["calls"].values()
-                                if call.get("phase") == phase
+                                if call.get("invocation") == self.invocation
                             ],
                         }
                     )

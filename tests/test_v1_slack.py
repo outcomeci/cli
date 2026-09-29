@@ -349,6 +349,20 @@ def test_the_draft_step_opens_a_screenshot_attached_to_the_request(workflow, mon
     )
 
 
+def test_each_repository_is_reviewed_with_only_its_own_calls(workflow, monkeypatch):
+    slack = Slack(["go ahead"])
+    reviewed: list = []
+
+    _run(workflow, slack, Agent(), monkeypatch, reviewed)
+
+    pulls = [p for p in reviewed if str(p["request"].get("path", "")).endswith("/pulls")]
+    assert len(pulls) == 2
+    for proposal in pulls:
+        repository = proposal["request"]["path"].removesuffix("/pulls")
+        assert proposal["receipts"]
+        assert all(item["request"]["path"].startswith(repository) for item in proposal["receipts"])
+
+
 def test_the_reviewer_judges_a_step_against_its_approved_plan(workflow, monkeypatch):
     slack = Slack(["also document it", "go ahead"])
     reviewed: list = []
@@ -359,6 +373,8 @@ def test_the_reviewer_judges_a_step_against_its_approved_plan(workflow, monkeypa
     implement = [p for p in reviewed if str(p["request"].get("path", "")).startswith("/repos/")]
     assert implement, [p["request"] for p in reviewed]
     inputs = {item["name"]: item["value"] for item in implement[0]["context"]["inputs"]}
-    # The discussion revised the plan; the reviewer sees the revision, not only the trigger.
+    # The discussion revised the plan; the reviewer sees the revision, and not the
+    # trigger's first wording, which this step does not take.
     assert inputs["plan"]["summary"] == "Add --json output and document it"
-    assert "context.inputs is what this step was given" in implement[0]["policy"]["content"]
+    assert set(implement[0]["context"]) == {"inputs", "phase"}
+    assert "context.inputs is everything this step was given" in implement[0]["policy"]["content"]

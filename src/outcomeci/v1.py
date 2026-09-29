@@ -406,6 +406,7 @@ def _apis(document: dict[str, Any]) -> tuple[dict[str, Any], list[dict], dict[st
                     "policy": {"side_effect": item["side_effect"]},
                     "grantable": item["grantable"],
                     "deny": item.get("deny", []),
+                    **({"compare": item["compare"]} if item.get("compare") else {}),
                 }
                 for operation, item in contract["operations"].items()
             },
