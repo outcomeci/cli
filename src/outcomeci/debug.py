@@ -117,6 +117,12 @@ def _default_agent(compiled: dict[str, Any]) -> str:
     return (agents.get("default") or {}).get("runner") or "codex"
 
 
+def _check_agent(agent: str | None, model: str | None) -> None:
+    """OpenCode runs a model through OpenRouter, so it needs one named explicitly."""
+    if agent == "opencode" and not (model or "").startswith("openrouter/"):
+        raise ExecutionError("--agent opencode needs --model openrouter/<provider>/<model>")
+
+
 def _runners(compiled: dict[str, Any], agent: str | None) -> list[str]:
     """Every agent provider the run needs a login for: the default first, then any
     runner a step selects for itself, or only `agent` when it overrides them all."""
@@ -227,6 +233,7 @@ def run(
     from . import local
 
     compiled = compile_workflow(config)
+    _check_agent(agent, model)
     # Everything that can fail on the user's input fails here, before a lease
     # takes the workspace's agent connection away from its cloud runs.
     if network is not None and image is None:
@@ -842,6 +849,7 @@ def run_local(
     if not config.is_relative_to(root):
         raise ExecutionError("the workflow file must live inside --dir")
     compiled = compile_workflow(config)
+    _check_agent(agent, model)
     image = image or default_image()
     if retry_run is not None:
         _retryable(root, retry_run)

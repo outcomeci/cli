@@ -891,3 +891,43 @@ def test_local_run_refuses_to_guess_an_image_for_a_development_build(monkeypatch
 
     with pytest.raises(ExecutionError, match="pass --image"):
         debug.run_local(root, root / "outcome.yml")
+
+
+def test_local_run_accepts_opencode_with_an_openrouter_model(monkeypatch, local_env):
+    root, _ = local_env
+    container = _container(monkeypatch, result={"run_id": "run-1"})
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+
+    _local_run(root, agent="opencode", model="openrouter/anthropic/claude-sonnet-5")
+
+    bundle = container.seen["bundle"]
+    assert bundle["agent"] == "opencode"
+    assert bundle["model"] == "openrouter/anthropic/claude-sonnet-5"
+    assert bundle["credentials"] == [{"provider": "opencode", "credential": "or-key"}]
+
+
+def test_local_run_reads_an_opencode_key_from_the_local_vault(monkeypatch, local_env):
+    from outcomeci import local_vault
+
+    root, _ = local_env
+    container = _container(monkeypatch, result={"run_id": "run-1"})
+    monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+    local_vault.put(root, "agents/opencode", "vault-or-key")
+
+    _local_run(root, agent="opencode", model="openrouter/openai/gpt-5.5")
+
+    assert container.seen["bundle"]["credentials"][0]["credential"] == "vault-or-key"
+
+
+def test_opencode_needs_an_openrouter_model(monkeypatch, local_env):
+    root, _ = local_env
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    for model in (None, "gpt-5.5"):
+        with pytest.raises(ExecutionError, match="--model openrouter/"):
+            _local_run(root, agent="opencode", model=model)
+
+
+def test_the_cli_offers_opencode_for_agent():
+    from outcomeci.cli import AGENT_CHOICES
+
+    assert "opencode" in AGENT_CHOICES

@@ -37,7 +37,7 @@ from .process import ExecutionError
 from .publication import prepare_publication
 from .repository import initialize
 
-AGENT_CHOICES = ("codex", "claude")
+AGENT_CHOICES = ("codex", "claude", "opencode")
 
 
 def _add_workspace_argument(command: argparse.ArgumentParser) -> None:
