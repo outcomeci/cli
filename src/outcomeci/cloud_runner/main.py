@@ -13,13 +13,14 @@ import tempfile
 import threading
 import time
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pyte
 
+from ..leases import LeaseResolver
 from ..process import ExecutionError
 from ..publication import REPORT, REQUIREMENTS, prepare_publication
 from ..security import private_path
@@ -211,18 +212,23 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
         active_agent: str | None = None
         active_model: str | None = None
 
-        values = dict((claim.get("vault") or {}).get("values") or {})
-        vault_expires = datetime.fromisoformat(str((claim.get("vault") or {})["expires_at"]))
+        vault = dict(claim.get("vault") or {})
+        versions = {str(key): int(item) for key, item in dict(vault.get("versions") or {}).items()}
 
-        def resolver(reference: str):
-            if datetime.now(UTC) >= vault_expires:
-                raise ContractError("workflow credential lease expired")
-            if not reference.startswith("vault:"):
-                raise ContractError("cloud credentials must use vault references")
-            path = reference.removeprefix("vault:")
-            if path not in values:
-                raise ContractError("credential is not granted to this workflow")
-            return values[path]
+        def save_rotation(path: str, secrets: dict[str, str]) -> None:
+            # The provider revoked the secret this replaces: save it before use.
+            versions[path] = client.workflow_vault_rotate(
+                lease, str(vault["lease_id"]), path, versions.get(path, 0), secrets
+            )
+
+        resolver = LeaseResolver(
+            dict(vault.get("values") or {}),
+            datetime.fromisoformat(str(vault["expires_at"])),
+            on_rotate=save_rotation if vault.get("lease_id") else None,
+            error=ContractError,
+            expired="workflow credential lease expired",
+            not_granted="credential is not granted to this workflow",
+        )
 
         client.workflow_start(lease)
 

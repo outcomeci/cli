@@ -348,6 +348,28 @@ def complete_debug_lease(
     _raise_for_status(status, value, 200, "could not resolve the debug-claimed invocation")
 
 
+def rotate_debug_vault_credential(
+    workspace_id: str,
+    workflow_id: str,
+    lease_id: str,
+    path: str,
+    expected_version: int,
+    secrets: dict[str, str],
+) -> int:
+    """Save secret fields a provider rotated during a run with this Vault lease.
+
+    Returns the credential's new version; a stale `expected_version` is refused
+    so a concurrent rotation is never overwritten.
+    """
+    status, value = _authorized_request(
+        f"/workspaces/{workspace_id}/workflows/{workflow_id}/debug-lease/vault/{lease_id}/rotate",
+        method="POST",
+        body={"path": path, "expected_version": expected_version, "secrets": secrets},
+    )
+    _raise_for_status(status, value, 200, f"could not save the rotated secret for {path}")
+    return int(value["version"])
+
+
 def vault_request(workspace_id: str, operation: str, **values: Any) -> dict[str, Any] | list[Any]:
     """Perform provider-neutral credential management through OutcomeCI Vault."""
     base = f"/workspaces/{workspace_id}/vault"

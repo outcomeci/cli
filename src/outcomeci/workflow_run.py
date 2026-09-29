@@ -36,10 +36,17 @@ from .cloud import (
     credentials_path,
     issue_debug_lease,
     renew_debug_agent_lease,
+    rotate_debug_vault_credential,
 )
 from .config import compile_workflow
 from .process import ExecutionError
-from .run_container import CONTAINER_OUTPUT, CONTAINER_SOURCE, OUTPUT_HOME, OUTPUT_WORK
+from .run_container import (
+    CONTAINER_OUTPUT,
+    CONTAINER_SOURCE,
+    OUTPUT_HOME,
+    OUTPUT_WORK,
+    ROTATIONS,
+)
 from .security import atomic_write_json
 
 IMAGE_LEASE_TTL_SECONDS = 3600
@@ -148,6 +155,7 @@ def run_cloud(
     image = image or default_image()
     _check_image(image)
     _flush_pending_releases()
+    _flush_pending_rotations()
     if retry_run is not None:
         _retryable(root, retry_run)
         name, payload = None, None
@@ -177,20 +185,23 @@ def run_cloud(
                 f"for workflow {workflow_id}.",
                 file=sys.stderr,
             )
-            result = _run_in_image(
-                image,
-                root,
-                config,
-                lease,
-                hold,
-                name=name,
-                payload=payload,
-                agent=agent,
-                model=model,
-                auto_continue=auto_continue,
-                network=network,
-                retry_run=retry_run,
-            )
+            try:
+                result = _run_in_image(
+                    image,
+                    root,
+                    config,
+                    lease,
+                    hold,
+                    name=name,
+                    payload=payload,
+                    agent=agent,
+                    model=model,
+                    auto_continue=auto_continue,
+                    network=network,
+                    retry_run=retry_run,
+                )
+            finally:
+                _save_cloud_rotations(workspace_id, workflow_id, lease, hold.output)
         except BaseException:
             if replay is not None:
                 with suppress(ExecutionError):
@@ -347,6 +358,92 @@ def _codex_rotation(home: Path, agent_lease: dict[str, Any]) -> dict[str, Any] |
     if not isinstance(login, dict) or login == agent_lease["credential"]:
         return None
     return login
+
+
+def _rotations(output: Path) -> dict[str, dict[str, str]]:
+    """The Vault secrets the run rotated, by path, as the container recorded them."""
+    try:
+        value = json.loads((output / ROTATIONS).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
+def _save_local_rotations(root: Path, output: Path) -> None:
+    """Write rotated secrets back to the local Vault the run's values came from."""
+    from . import local_vault
+
+    for path, secrets in _rotations(output).items():
+        try:
+            local_vault.rotate(root, f"vault:{path}", secrets)
+        except ExecutionError as exc:
+            print(
+                f"oci: warning: could not save the rotated secret for {path} to the local "
+                f"Vault ({exc}); store it again with `oci vault local put {path}`",
+                file=sys.stderr,
+            )
+
+
+def _pending_rotations_dir() -> Path:
+    return credentials_path().parent / "vault-rotations"
+
+
+def _save_cloud_rotations(
+    workspace_id: str, workflow_id: str, lease: dict[str, Any], output: Path
+) -> None:
+    """Save rotated secrets to the workspace Vault. A rotation that cannot land
+    now is kept on disk and sent again before the next cloud run: the provider
+    has already revoked the secret it replaced."""
+    versions = dict(lease.get("versions") or {})
+    for path, secrets in _rotations(output).items():
+        rotation = {
+            "workspace_id": workspace_id,
+            "workflow_id": workflow_id,
+            "lease_id": str(lease.get("lease_id", "")),
+            "path": path,
+            "expected_version": int(versions.get(path, 0)),
+            "secrets": secrets,
+        }
+        try:
+            _send_rotation(rotation)
+        except (CloudRequestError, ExecutionError, KeyError, ValueError) as exc:
+            pending = _pending_rotations_dir() / f"{uuid.uuid4().hex}.json"
+            pending.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            atomic_write_json(pending, rotation, mode=0o600)
+            print(
+                f"oci: warning: could not save the rotated secret for {path} ({exc}); "
+                f"kept it in {pending} and the next `oci workflow run --cloud` sends it again",
+                file=sys.stderr,
+            )
+
+
+def _send_rotation(rotation: dict[str, Any]) -> None:
+    rotate_debug_vault_credential(
+        rotation["workspace_id"],
+        rotation["workflow_id"],
+        rotation["lease_id"],
+        rotation["path"],
+        rotation["expected_version"],
+        rotation["secrets"],
+    )
+
+
+def _flush_pending_rotations() -> None:
+    directory = _pending_rotations_dir()
+    if not directory.is_dir():
+        return
+    for pending in sorted(directory.glob("*.json")):
+        try:
+            _send_rotation(json.loads(pending.read_text(encoding="utf-8")))
+        except CloudRequestError as exc:
+            if exc.transient:
+                print(f"oci: warning: {pending} is still unsent: {exc}", file=sys.stderr)
+                continue
+            print(f"oci: warning: dropped {pending}: {exc}", file=sys.stderr)
+        except (ExecutionError, OSError, KeyError, TypeError, ValueError) as exc:
+            print(f"oci: warning: {pending} is still unsent: {exc}", file=sys.stderr)
+            continue
+        pending.unlink(missing_ok=True)
 
 
 def _pending_releases_dir() -> Path:
@@ -763,3 +860,4 @@ def run_local(
             )
         finally:
             _write_back_codex(hold)
+            _save_local_rotations(root, hold.output)

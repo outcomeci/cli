@@ -5,7 +5,8 @@ agent logins) on stdin. It mounts the workflow directory read-only at /src and
 a private output directory at /oci-run. The run works on a copy of /src under
 /oci-run/work, with HOME at /oci-run/home, through the same execution path as a
 cloud run, isolated by the container itself. The host reads the result, the
-run's state and a rotated Codex login from /oci-run once the container ends.
+run's state, a rotated Codex login and any rotated Vault secrets from /oci-run
+once the container ends.
 """
 
 from __future__ import annotations
@@ -14,13 +15,13 @@ import json
 import os
 import shutil
 import sys
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .cloud_runner.main import _inject_agent_credential
 from .cloud_runner.models import ContractError
 from .config import ConfigError, compile_workflow
+from .leases import LeaseResolver
 from .process import ExecutionError
 from .security import atomic_write_json
 
@@ -36,23 +37,22 @@ OUTPUT_HOME = "home"
 BUNDLE_KEYS = ("config", "trigger", "payload", "values", "expires_at", "credentials")
 
 
-def _lease_resolver(values: dict[str, Any], expires_at: str):
-    expires = datetime.fromisoformat(expires_at)
+ROTATIONS = "rotations.json"
 
-    def resolver(reference: str) -> Any:
-        if datetime.now(UTC) >= expires:
-            raise ExecutionError("the run's credential lease expired; run the command again")
-        if not reference.startswith("vault:"):
-            raise ExecutionError("cloud credentials must use vault references")
-        path = reference.removeprefix("vault:")
-        if path not in values:
-            raise ExecutionError(
-                f"credential {path!r} is not granted to this workflow; "
-                "grant it with `oci vault grant`"
-            )
-        return values[path]
 
-    return resolver
+def _lease_resolver(values: dict[str, Any], expires_at: str, output: Path | None = None):
+    """The bundle's Vault values. A rotated secret is recorded in the output
+    mount the moment it arrives, where the host saves it to the Vault the
+    values came from, however the run ends."""
+
+    def record(path: str, secrets: dict[str, str]) -> None:
+        assert output is not None
+        file = output / ROTATIONS
+        rotations = json.loads(file.read_text(encoding="utf-8")) if file.is_file() else {}
+        rotations[path] = {**rotations.get(path, {}), **secrets}
+        atomic_write_json(file, rotations, mode=0o600)
+
+    return LeaseResolver(values, expires_at, on_rotate=record if output is not None else None)
 
 
 def _continue(
@@ -133,7 +133,7 @@ def run_bundle(bundle: dict[str, Any], *, source: Path, output: Path) -> int:
         options = local.ExecutionOptions(
             agent=bundle.get("agent"),
             model=bundle.get("model"),
-            credential_resolver=_lease_resolver(bundle["values"], bundle["expires_at"]),
+            credential_resolver=_lease_resolver(bundle["values"], bundle["expires_at"], output),
             _container_isolated=True,
         )
         compiled = compile_workflow(config)

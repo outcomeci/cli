@@ -138,6 +138,26 @@ class CoreClient:
             {"lease_token": lease_token, "reference": reference},
         ).get("value")
 
+    def workflow_vault_rotate(
+        self,
+        lease_token: str,
+        vault_lease_id: str,
+        path: str,
+        expected_version: int,
+        secrets: dict[str, Any],
+    ) -> int:
+        """Save secret fields a provider rotated; returns the credential's new version."""
+        result = self._post(
+            f"vault-leases/{vault_lease_id}/rotate",
+            {
+                "lease_token": lease_token,
+                "path": path,
+                "expected_version": expected_version,
+                "secrets": secrets,
+            },
+        )
+        return int(result["version"])
+
     def workflow_agent_fallback(self, lease_token: str) -> dict[str, Any]:
         return self._post("agent-fallback", {"lease_token": lease_token})
 
