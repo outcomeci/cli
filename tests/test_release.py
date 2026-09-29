@@ -18,6 +18,8 @@ def test_publish_uses_trusted_publishing() -> None:
     assert "id-token: write" in source
     assert "pypa/gh-action-pypi-publish@release/v1" in source
     assert "environment: pypi" in source
+    publish_job = source.split("  publish:\n", 1)[1].split("  release:\n", 1)[0]
+    assert "configure-aws-credentials" not in publish_job
     assert "spareparts-changelog" not in source
     assert "gh release create" in source and "--generate-notes" in source
     assert "codeartifact login --tool pip" in source

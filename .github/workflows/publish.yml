@@ -10,12 +10,16 @@ on:
 
 permissions:
   contents: read
-  id-token: write
 
 jobs:
-  publish:
+  # Fetches the exact build internal-release.yml published for the tag. It runs
+  # outside the pypi environment: the AWS role trusts main and tags, not
+  # environments, and the job that can publish to PyPI needs no AWS access.
+  download:
     runs-on: ubuntu-latest
-    environment: pypi
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v7
         with:
@@ -38,6 +42,24 @@ jobs:
           mkdir dist
           pip download --no-deps --only-binary=:all: --dest dist "outcomeci-cli==$VERSION"
           pip download --no-deps --no-build-isolation --no-binary=:all: --dest dist "outcomeci-cli==$VERSION"
+          ls -l dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    needs: download
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
 
   release:
