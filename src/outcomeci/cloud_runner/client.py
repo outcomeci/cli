@@ -13,9 +13,30 @@ from .resource_usage import ResourceUsageReport
 
 
 class CoreError(RuntimeError):
-    def __init__(self, category: str, retryable: bool = False):
-        super().__init__(category)
+    def __init__(self, category: str, retryable: bool = False, detail: str | None = None):
+        # The detail is what the run's log shows about why, such as the api's
+        # reason for refusing a request.
+        super().__init__(f"{category}: {detail}" if detail else category)
         self.category, self.retryable = category, retryable
+
+
+def _refusal(suffix: str, response: httpx.Response) -> str:
+    """Which call OutcomeCI Cloud refused and its stated reason. A validation
+    error keeps each field's location and message, never the input it echoes."""
+    reason = ""
+    with suppress(Exception):
+        detail = json.loads(_read_bounded(response, 4097)).get("detail")
+        if isinstance(detail, list):
+            reason = "; ".join(
+                f"{'.'.join(str(part) for part in item.get('loc', []))}: {item.get('msg', '')}"
+                for item in detail[:5]
+                if isinstance(item, dict)
+            )
+        elif isinstance(detail, str):
+            reason = detail
+    return f"{suffix} returned HTTP {response.status_code}" + (
+        f": {reason[:500]}" if reason else ""
+    )
 
 
 MODEL_TURN_TIMEOUT_SECONDS = 90
@@ -101,7 +122,11 @@ class CoreClient:
                             category, retryable = "policy_review_conflict", False
                     raise CoreError(category, retryable)
                 if response.status_code >= 400:
-                    raise CoreError("core_unavailable", response.status_code >= 500)
+                    raise CoreError(
+                        "core_unavailable",
+                        response.status_code >= 500,
+                        _refusal(suffix, response),
+                    )
                 raw = _read_bounded(response, self._max_response + 1)
         except httpx.HTTPError as error:
             raise CoreError("core_unavailable", True) from error
