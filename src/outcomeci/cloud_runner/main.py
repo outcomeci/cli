@@ -31,6 +31,7 @@ from .process import PTY_COLUMNS, PTY_ROWS, run
 from .providers import ADAPTERS
 from .providers.codex import FILE_AUTH_CONFIG as CODEX_FILE_AUTH_CONFIG
 from .redaction import redact_diagnostic
+from .resource_usage import ResourceUsageSampler
 
 URL = re.compile(r"https://[^\s<>'\"\x00-\x1f\x7f]+")
 USER_CODE = re.compile(r"\b[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+\b")
@@ -210,6 +211,8 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
         )
     )
     os.chmod(root, 0o700)
+    resource_sampler = ResourceUsageSampler(root)
+    resource_sampler.start()
     previous: dict[str, str | None] = {}
     stop = threading.Event()
     run_id: str | None = None
@@ -369,6 +372,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
         if provider == "codex":
             agent_update = json.loads((root / ".codex" / "auth.json").read_text())
         artifacts = workflow_artifacts(root, run_id)
+        resource_usage = resource_sampler.stop()
         try:
             _report_final(
                 lambda: client.workflow_complete(
@@ -378,6 +382,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                     artifacts=artifacts,
                     expected_credential_version=credential_version,
                     agent_credential=agent_update,
+                    resource_usage=resource_usage,
                 )
             )
         except CoreError as completion_error:
@@ -389,6 +394,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
             return 1
         return 0
     except Exception as exc:
+        resource_usage = resource_sampler.stop()
         auth_path = root / ".codex" / "auth.json"
         if provider == "codex" and credential_version is not None and auth_path.is_file():
             with suppress(OSError, json.JSONDecodeError):
@@ -408,6 +414,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 expected_credential_version=credential_version,
                 agent_credential=agent_update,
                 retryable=retryable,
+                resource_usage=resource_usage,
             )
 
         try:
@@ -433,6 +440,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
         raise
     finally:
         stop.set()
+        resource_sampler.stop()
         for key, value in previous.items():
             if value is None:
                 os.environ.pop(key, None)

@@ -114,6 +114,7 @@ class FlowTests(unittest.TestCase):
         _, status, values = client.completed[0]
         self.assertEqual(status, "failed")
         self.assertTrue(values["retryable"])
+        self.assertEqual(values["resource_usage"]["schema_version"], 1)
 
     def test_a_retryable_claim_conflict_is_a_clean_no_op(self):
         # Losing the race to claim an invocation (or its agent connection
@@ -314,6 +315,8 @@ class FlowTests(unittest.TestCase):
         self.assertNotIn("never-upload", repr(artifacts))
         self.assertEqual(client.completed[0][2]["expected_credential_version"], 3)
         self.assertEqual(client.completed[0][2]["agent_credential"], {"token": "agent-secret"})
+        self.assertEqual(client.completed[0][2]["resource_usage"]["schema_version"], 1)
+        self.assertGreaterEqual(client.completed[0][2]["resource_usage"]["sample_count"], 1)
         self.assertEqual(client.heartbeats[0][1][0]["event_type"], "permission.reviewed")
 
     def test_generic_workflow_auto_continues_through_ready_steps(self):
@@ -1449,6 +1452,7 @@ class FinalReportTests(unittest.TestCase):
         code, events = self.run_workflow(client)
         self.assertEqual(code, 0)
         self.assertEqual([item["status"] for item in completions], ["completed", "completed"])
+        self.assertEqual(completions[0]["resource_usage"], completions[1]["resource_usage"])
         self.assertEqual(events, [])
 
     def test_persistent_5xx_on_completion_never_reports_a_retryable_failure(self):

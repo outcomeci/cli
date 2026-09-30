@@ -9,6 +9,7 @@ from typing import Any
 import httpx
 
 from .models import AuthorizationClaim
+from .resource_usage import ResourceUsageReport
 
 
 class CoreError(RuntimeError):
@@ -173,6 +174,7 @@ class CoreClient:
         expected_credential_version: int | None = None,
         agent_credential: Any | None = None,
         retryable: bool = False,
+        resource_usage: ResourceUsageReport | None = None,
     ) -> None:
         self._post(
             "complete",
@@ -186,6 +188,7 @@ class CoreClient:
                 "expected_credential_version": expected_credential_version,
                 "agent_credential": agent_credential,
                 "retryable": retryable,
+                "resource_usage": resource_usage,
             },
         )
 
