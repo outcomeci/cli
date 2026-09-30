@@ -27,7 +27,13 @@ The full guide is at <https://outcomeci.com/docs/outcomeci>.
 - `apis`: a connector bound to a secret, such as
   `github: {uses: github, auth: secrets.github}`. Connectors come from
   [`outcomeci-connectors`](https://github.com/outcomeci/connectors).
-- `reasoning`: the default agent (`codex`, `claude` or `opencode`) and a fallback.
+- `reasoning`: the default agent (`codex`, `claude` or `opencode`), a fallback,
+  and named profiles a step picks with `using: <name>`. A profile with a
+  `runner` is an agent; one with only a `model`, such as
+  `light: {model: anthropic/claude-haiku-4-5}`, reasons with direct model calls
+  and no workspace, its granted APIs offered as tools. `review` sets the policy
+  reviewer's model. A model profile's `key: secrets.<name>` pays with your
+  provider key; without one, OutcomeCI Cloud's key is used and metered.
 - `steps`: agent steps with grants (`can:`) and an optional `policy:`, `await`
   steps that wait for a human signal, and `converse` steps that discuss a plan
   in a thread.

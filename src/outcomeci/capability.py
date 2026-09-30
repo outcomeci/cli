@@ -9,7 +9,7 @@ import socket
 import socketserver
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -186,10 +186,15 @@ def _call_broker(
     return response["result"]
 
 
-def invoke_integration(capability: str, inputs: dict[str, Any]) -> dict[str, Any]:
-    run_id = os.environ.get("OUTCOMECI_RUN_ID")
-    socket_path = os.environ.get("OUTCOMECI_CAPABILITY_SOCKET")
-    token = os.environ.get("OUTCOMECI_CAPABILITY_TOKEN")
+def invoke_integration(
+    capability: str, inputs: dict[str, Any], *, env: Mapping[str, str] | None = None
+) -> dict[str, Any]:
+    """Call the run's capability broker, found through `env` (the process
+    environment by default, as an agent's CLI sees it)."""
+    env = os.environ if env is None else env
+    run_id = env.get("OUTCOMECI_RUN_ID")
+    socket_path = env.get("OUTCOMECI_CAPABILITY_SOCKET")
+    token = env.get("OUTCOMECI_CAPABILITY_TOKEN")
     if not run_id or not socket_path or not token:
         raise ExecutionError("no run-scoped integration capability is available")
     payload = {

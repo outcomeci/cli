@@ -280,6 +280,13 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
             with heartbeat_lock:
                 return client.workflow_policy_review(lease, proposal)
 
+        def model_turn(*, step: str, profile: str, messages: list, tools: list) -> dict:
+            # Not under heartbeat_lock: a turn can take a minute, longer than the
+            # lease lasts without a heartbeat, and each call opens its own client.
+            return client.workflow_model_turn(
+                lease, step=step, profile=profile, messages=messages, tools=tools
+            )
+
         def created(value: str) -> None:
             nonlocal run_id
             run_id = value
@@ -305,6 +312,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 credential_resolver=resolver,
                 event_sink=policy_event,
                 policy_reviewer=policy_review,
+                model_client=model_turn,
                 _container_isolated=True,
             )
 

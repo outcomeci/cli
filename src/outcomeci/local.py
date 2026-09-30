@@ -16,7 +16,8 @@ from typing import Any
 from jsonschema import ValidationError
 from jsonschema import validate as validate_json
 
-from . import templates
+from . import models, templates
+from .capability import invoke_integration
 from .capability import serve as serve_capability
 from .config import compile_workflow
 from .contracts import FORMAT_CHECKER, ContractError, validate_trigger_payload
@@ -38,6 +39,8 @@ class ExecutionOptions:
     credential_resolver: CredentialResolver | None = None
     event_sink: Callable[[dict[str, Any]], None] | None = None
     policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None
+    # Runs a model step's turns; without one, local runs call the provider.
+    model_client: Callable[..., dict[str, Any]] | None = None
     _container_isolated: bool = False
 
 
@@ -488,6 +491,17 @@ def _step_invocations(
                     "bound": bound,
                     "grants": grants,
                     "inputs": v1_runtime.inputs(root, state, step_block, bound),
+                    "context": _step_context(
+                        root,
+                        compiled,
+                        state,
+                        step,
+                        step_block,
+                        outcome_root=outcome_root,
+                        bound=bound,
+                        result_path=result_path,
+                        grants=grants,
+                    ),
                 },
             )
         )
@@ -512,6 +526,42 @@ def _step_prompt(
 
     A for_each step gets one prompt per item, with the item bound to its name
     and its own result path."""
+    context = _step_context(
+        root,
+        compiled,
+        state,
+        step,
+        step_block,
+        outcome_root=outcome_root,
+        bound=bound,
+        result_path=result_path,
+        grants=grants,
+    )
+    return templates.V1_STEP_TASK.format(
+        shared=compiled["instructions"]["orchestrator"]["content"],
+        instructions=compiled["instructions"]["steps"][step]["content"],
+        environment=environment,
+        outcome_root=outcome_root,
+        step=step,
+        runtime_cli=runtime_cli,
+        context_json=json.dumps(context, separators=(",", ":")),
+    )
+
+
+def _step_context(
+    root: Path,
+    compiled: dict[str, Any],
+    state: dict[str, Any],
+    step: str,
+    step_block: dict[str, Any],
+    *,
+    outcome_root: Path,
+    bound: dict[str, Any] | None = None,
+    result_path: Path | None = None,
+    grants: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """What one step invocation is given: inputs, capabilities, grants, policy
+    and where its result goes and in what shape."""
     from . import v1_runtime
 
     describer = IntegrationExecutor(compiled)
@@ -535,15 +585,55 @@ def _step_prompt(
             {"path": str(returns["path"]), "schema": returns["schema"]} if returns else None
         ),
     }
-    return templates.V1_STEP_TASK.format(
-        shared=compiled["instructions"]["orchestrator"]["content"],
-        instructions=compiled["instructions"]["steps"][step]["content"],
-        environment=environment,
-        outcome_root=outcome_root,
+    return context
+
+
+def _run_model_step(
+    compiled: dict[str, Any],
+    step: str,
+    step_block: dict[str, Any],
+    scope: dict[str, Any],
+    capability_env: dict[str, str],
+    options: ExecutionOptions,
+) -> str:
+    """One model step invocation: its tool loop, then its result file."""
+    context = scope["context"]
+    returns = context.get("returns")
+    client = options.model_client or models.local_client(compiled, options.credential_resolver)
+    result, text = models.run(
+        client,
         step=step,
-        runtime_cli=runtime_cli,
-        context_json=json.dumps(context, separators=(",", ":")),
+        profile=step_block["reasoning"]["profile"],
+        system=compiled["instructions"]["orchestrator"]["content"]
+        + "\n\n## Step: "
+        + step
+        + "\n\n"
+        + compiled["instructions"]["steps"][step]["content"],
+        user=templates.MODEL_STEP_TASK.format(
+            returns_hint=(
+                f"Finish by calling {models.RESULT} with the step's result."
+                if returns
+                else "Stop calling tools when the step is done."
+            ),
+            context_json=json.dumps(
+                {key: value for key, value in context.items() if key != "capabilities"},
+                separators=(",", ":"),
+            ),
+        ),
+        capabilities=[
+            {"capability": name, **described}
+            for name, described in zip(
+                compiled["instructions"]["steps"][step].get("capabilities", []),
+                context["capabilities"],
+                strict=True,
+            )
+        ],
+        call=lambda capability, inputs: invoke_integration(capability, inputs, env=capability_env),
+        returns=returns["schema"] if returns else None,
     )
+    if returns and result is not None:
+        Path(returns["path"]).write_text(json.dumps(result), encoding="utf-8")
+    return text or f"{step} done"
 
 
 def _run_step(
@@ -585,6 +675,13 @@ def _run_step(
                 container_isolated=_container_isolated,
                 inputs=(scope or {}).get("inputs"),
             ) as capability_env:
+                if models.is_model_step(step_block):
+                    summaries.append(
+                        _run_model_step(
+                            compiled, step, step_block, scope or {}, capability_env, options
+                        )
+                    )
+                    continue
                 summaries.append(
                     invoke(
                         runner,
@@ -609,6 +706,10 @@ def _run_step(
             try:
                 _validate_outputs(compiled, outcome_root, step)
             except ExecutionError as validation_error:
+                # A model step's result was checked against its schema in the
+                # tool loop; repair would start an agent the step never chose.
+                if models.is_model_step(step_block):
+                    raise
                 if event_sink:
                     event_sink(
                         event(
