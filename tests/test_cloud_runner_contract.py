@@ -96,6 +96,33 @@ class ContractTests(unittest.TestCase):
             client.claim_workflow()
         self.assertEqual(raised.exception.category, "claim_rejected")
 
+    def test_a_refused_call_says_which_and_why_without_the_input(self):
+        detail = [
+            {
+                "type": "string_too_long",
+                "loc": ["body", "messages", 1, "content"],
+                "msg": "Value should have at most 100 items",
+                "input": "the step's prompt, which the api echoes",
+            }
+        ]
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(422, json={"detail": detail})
+        )
+        client = CoreClient(
+            "https://api.outcomeci.com", "job", "bootstrap", "workflow", transport=transport
+        )
+        with self.assertRaises(CoreError) as raised:
+            client.workflow_model_turn(
+                "lease", step="triage", profile="light", messages=[], tools=[]
+            )
+        self.assertEqual(raised.exception.category, "core_unavailable")
+        self.assertFalse(raised.exception.retryable)
+        self.assertEqual(
+            str(raised.exception),
+            "core_unavailable: model-turn returned HTTP 422: "
+            "body.messages.1.content: Value should have at most 100 items",
+        )
+
     def test_client_treats_a_network_failure_as_retryable(self):
         def handler(request: httpx.Request) -> httpx.Response:
             raise httpx.ConnectError("refused", request=request)
