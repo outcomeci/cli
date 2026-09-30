@@ -817,6 +817,7 @@ def _compile(document: dict[str, Any], root: Path) -> dict[str, Any]:
     revision_input = {
         **({"source": graph["source"]} if "source" in graph else {}),
         **({"connectors": graph["connectors"]} if "connectors" in graph else {}),
+        **({"reasoning": graph["reasoning"]} if "reasoning" in graph else {}),
         "workflow": normalized,
         "graph": {"levels": graph["levels"]},
         "instructions": resolved,

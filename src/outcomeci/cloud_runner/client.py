@@ -18,6 +18,9 @@ class CoreError(RuntimeError):
         self.category, self.retryable = category, retryable
 
 
+MODEL_TURN_TIMEOUT_SECONDS = 90
+
+
 def _read_bounded(response: httpx.Response, limit: int) -> bytes:
     """Read at most `limit` bytes of a response body, like file.read(limit)
     -- never buffer more, regardless of what Content-Length claims. A
@@ -59,12 +62,17 @@ class CoreClient:
         )
 
     def _post(
-        self, suffix: str, payload: dict[str, Any], token: str | None = None
+        self,
+        suffix: str,
+        payload: dict[str, Any],
+        token: str | None = None,
+        *,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {token or self._token}"}
         try:
             with (
-                httpx.Client(transport=self._transport, timeout=self._timeout) as client,
+                httpx.Client(transport=self._transport, timeout=timeout or self._timeout) as client,
                 client.stream(
                     "POST", f"{self._url}/{suffix}", json=payload, headers=headers
                 ) as response,
@@ -132,6 +140,30 @@ class CoreClient:
 
     def workflow_policy_review(self, lease_token: str, proposal: dict[str, Any]) -> dict[str, Any]:
         return self._post("policy-review", {"lease_token": lease_token, "proposal": proposal})
+
+    def workflow_model_turn(
+        self,
+        lease_token: str,
+        *,
+        step: str,
+        profile: str,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """One model step turn, called by OutcomeCI Cloud with the profile's
+        model and key as the pinned revision declares them."""
+        return self._post(
+            "model-turn",
+            {
+                "lease_token": lease_token,
+                "step": step,
+                "profile": profile,
+                "messages": messages,
+                "tools": tools,
+            },
+            # The api allows the provider 60 seconds for one turn.
+            timeout=MODEL_TURN_TIMEOUT_SECONDS,
+        )
 
     def workflow_credential(self, lease_token: str, reference: str) -> Any:
         return self._post(

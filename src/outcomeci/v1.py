@@ -178,6 +178,7 @@ class _Scope:
     def __init__(self) -> None:
         self.steps: dict[str, dict[str, Any]] = {}
         self.bound: set[str] = set()
+        self.profiles: dict[str, dict[str, Any]] = {}
 
     def reference(self, value: Any, field: str) -> dict[str, Any] | None:
         """Parse `value` as a reference, or return None when it is a literal."""
@@ -323,14 +324,30 @@ def _reason(value: Any, base: Path, field: str) -> str | dict[str, Any]:
     return {"content": text}
 
 
-def _reasoning(value: Any) -> tuple[dict[str, Any], dict[str, Any] | None]:
+MODEL_PROVIDERS = {"anthropic", "openai"}
+
+
+def _reasoning(
+    value: Any, secrets: dict[str, Any]
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, dict[str, Any]]]:
+    """`default` and `fallback` agents, and the named profiles steps choose with
+    `using:`. A profile with a `runner` is an agent; one without is a model,
+    called directly with no workspace. `review` is the policy reviewer."""
     reasoning = _mapping(value or {}, "reasoning")
-    if set(reasoning) - {"default", "fallback"}:
-        raise ConfigError("reasoning supports default and fallback")
+    profiles: dict[str, dict[str, Any]] = {}
+    for name in sorted(set(reasoning) - {"default", "fallback"}):
+        field = f"reasoning.{name}"
+        _identifier(name, field)
+        item = _mapping(reasoning[name], field)
+        profiles[name] = (
+            {"agent": _agent(item, field)} if "runner" in item else _model(item, secrets, field)
+        )
+    if "agent" in profiles.get("review", {}):
+        raise ConfigError("reasoning.review is a model: {model, key?}, not an agent")
     default = _agent(reasoning.get("default", {"runner": "codex"}), "reasoning.default")
     fallback = reasoning.get("fallback")
     if fallback is None:
-        return default, None
+        return default, None, profiles
     if not isinstance(fallback, list) or not fallback:
         raise ConfigError("reasoning.fallback must be a list")
     if len(fallback) > 1:
@@ -338,7 +355,44 @@ def _reasoning(value: Any) -> tuple[dict[str, Any], dict[str, Any] | None]:
     chosen = _agent(fallback[0], "reasoning.fallback[0]")
     if "runner" not in chosen:
         raise ConfigError("reasoning.fallback[0].runner is required")
-    return default, chosen
+    return default, chosen, profiles
+
+
+def _model(item: dict[str, Any], secrets: dict[str, Any], field: str) -> dict[str, Any]:
+    """`{model: <provider>/<model>, key?: secrets.<name>}`: without a key the
+    platform's key pays; with one, the named Vault secret holds the provider key."""
+    if set(item) - {"model", "key"}:
+        raise ConfigError(f"{field} supports model and key, or runner and model")
+    model = item.get("model")
+    provider, _, name = str(model or "").partition("/")
+    if not isinstance(model, str) or provider not in MODEL_PROVIDERS or not name:
+        raise ConfigError(
+            f"{field}.model must be <provider>/<model> with provider "
+            f"{' or '.join(sorted(MODEL_PROVIDERS))}"
+        )
+    result: dict[str, Any] = {"model": model}
+    if "key" in item:
+        key = str(item["key"])
+        secret = key.removeprefix("secrets.")
+        if not key.startswith("secrets.") or secret not in secrets:
+            raise ConfigError(f"{field}.key must name a declared secret as secrets.<name>")
+        result["key"] = secret
+        result["credential"] = str(secrets[secret])
+    return result
+
+
+def _using(value: Any, profiles: dict[str, dict[str, Any]], node, block, field: str) -> None:
+    """A step's reasoning: a profile's name, or an inline agent `{runner, model}`."""
+    if not isinstance(value, str):
+        node.update(_agent(value, field))
+        return
+    if value == "review" or value not in profiles:
+        raise ConfigError(f"{field} must name a reasoning profile other than review")
+    profile = profiles[value]
+    if "agent" in profile:
+        node.update(profile["agent"])
+    else:
+        block["reasoning"] = {"profile": value, **profile}
 
 
 def _agent(value: Any, field: str) -> dict[str, Any]:
@@ -492,7 +546,7 @@ def _agent_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Pa
     field = f"steps.{name}"
     node["instructions"] = _reason(step.get("reason"), base, f"{field}.reason")
     if "using" in step:
-        node.update(_agent(step["using"], f"{field}.using"))
+        _using(step["using"], scope.profiles, node, block, f"{field}.using")
     if "for_each" in step:
         match = FOR_EACH.fullmatch(str(step["for_each"]))
         if not match:
@@ -627,7 +681,7 @@ def _converse_step(name, step, node, block, reads, *, scope: _Scope, apis, base:
         else {"content": CONVERSE_INSTRUCTIONS}
     )
     if "using" in step:
-        node.update(_agent(step["using"], f"{field}.using"))
+        _using(step["using"], scope.profiles, node, block, f"{field}.using")
     attachment = respond.get("attachment")
     node["capabilities"] = sorted(
         {f"{api}.{operation}", f"{api}.{respond['respond']}"}
@@ -670,13 +724,16 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
     unknown = set(document) - TOP_LEVEL
     if unknown:
         raise ConfigError(f"unknown top-level fields: {', '.join(sorted(unknown))}")
-    default, fallback = _reasoning(document.get("reasoning"))
+    default, fallback, profiles = _reasoning(
+        document.get("reasoning"), _mapping(document.get("secrets") or {}, "secrets")
+    )
     apis, connections, integrations = _apis(document)
     trigger_name, trigger = _trigger(document.get("trigger"), document.get("secrets") or {})
     raw_steps = document.get("steps")
     if not isinstance(raw_steps, list) or not raw_steps:
         raise ConfigError("steps must be a non-empty list")
     scope = _Scope()
+    scope.profiles = profiles
     nodes: dict[str, Any] = {}
     blocks: dict[str, Any] = {}
     order: list[str] = []
@@ -735,6 +792,7 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
             "blocks": blocks,
             "order": order,
             "trigger": trigger_name,
+            "reasoning": profiles,
             "connectors": {
                 name: {"provider": value["uses"], "digest": value["digest"]}
                 for name, value in apis.items()
@@ -759,4 +817,5 @@ def load(path: Path) -> dict[str, Any]:
         graph["steps"][name]["v1"] = {**block, "trigger": extension["trigger"]}
     graph["source"] = document
     graph["connectors"] = extension["connectors"]
+    graph["reasoning"] = extension["reasoning"]
     return root

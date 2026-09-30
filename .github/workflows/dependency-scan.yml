@@ -19,5 +19,5 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - run: pip install -e '.[test]' pip-audit
+      - run: pip install -e '.[test,models]' pip-audit
       - run: pip-audit --skip-editable

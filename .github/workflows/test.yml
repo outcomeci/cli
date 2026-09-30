@@ -32,7 +32,7 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
-      - run: pip install -e '.[test]'
+      - run: pip install -e '.[test,models]'
       - run: pytest -q
 
   build:
