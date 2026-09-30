@@ -368,3 +368,13 @@ def test_a_step_shows_the_model_at_most_three_small_images(tmp_path):
     assert all(part["image_url"]["url"].startswith("data:image/png;base64,") for part in parts)
     # The oversized second image was skipped, not counted.
     assert models.image_parts(files[1:2]) == []
+
+
+def test_a_local_model_step_without_litellm_says_how_to_install_it(monkeypatch):
+    import sys
+
+    monkeypatch.setitem(sys.modules, "litellm", None)
+    client = models.local_client({"reasoning": {"light": {"model": "anthropic/x"}}})
+
+    with pytest.raises(ExecutionError, match=r"outcomeci-cli\[models\]"):
+        client(step="triage", profile="light", messages=[], tools=[])

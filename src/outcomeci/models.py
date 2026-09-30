@@ -48,7 +48,12 @@ def local_client(
     provider's environment variable."""
 
     def call(*, step: str, profile: str, messages: list[dict], tools: list[dict]) -> dict[str, Any]:
-        import litellm
+        try:
+            import litellm
+        except ImportError as exc:
+            raise ExecutionError(
+                "a model step on your machine needs LiteLLM: pip install 'outcomeci-cli[models]'"
+            ) from exc
 
         spec = compiled.get("reasoning", {}).get(profile)
         if not spec or "model" not in spec:
