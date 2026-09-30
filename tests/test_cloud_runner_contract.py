@@ -62,6 +62,31 @@ class ContractTests(unittest.TestCase):
             client.claim_workflow()
         self.assertEqual(raised.exception.category, "invalid_core_response")
 
+    def test_client_includes_resource_usage_in_workflow_completion(self):
+        captured = {}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            captured.update(json.loads(request.content))
+            return httpx.Response(204)
+
+        client = CoreClient(
+            "https://api.outcomeci.com",
+            "job",
+            "bootstrap",
+            "workflow",
+            transport=httpx.MockTransport(handler),
+        )
+        usage = {
+            "schema_version": 1,
+            "sample_count": 2,
+            "sampled_milliseconds": 1000,
+            "memory_peak_bytes": 1024,
+        }
+
+        client.workflow_complete("lease", "completed", resource_usage=usage)
+
+        self.assertEqual(captured["resource_usage"], usage)
+
     def test_client_treats_401_as_claim_rejected(self):
         transport = httpx.MockTransport(lambda request: httpx.Response(401, text="unauthorized"))
         client = CoreClient(
