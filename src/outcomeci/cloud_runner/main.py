@@ -38,42 +38,118 @@ USER_CODE = re.compile(r"\b[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+\b")
 ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 CLAUDE_TOKEN = re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b")
 HEARTBEAT_INTERVAL_SECONDS = 15.0
-WORKFLOW_ARTIFACT_FILE_LIMIT = 200
-WORKFLOW_ARTIFACT_FILE_BYTES = 2 * 1024 * 1024
-WORKFLOW_ARTIFACT_TOTAL_BYTES = 20 * 1024 * 1024
+WORKFLOW_ARTIFACT_FILE_LIMIT = 1_000
+WORKFLOW_ARTIFACT_FILE_BYTES = 32 * 1024 * 1024
+WORKFLOW_ARTIFACT_TOTAL_BYTES = 100 * 1024 * 1024
 # Waits between attempts to report a final workflow result: 6 attempts over
 # about a minute, inside the lease the heartbeat keeps alive.
 COMPLETION_REPORT_DELAYS_SECONDS: tuple[float, ...] = (2.0, 4.0, 8.0, 16.0, 30.0)
 
 
 def workflow_artifacts(root: Path, run_id: str) -> list[dict[str, str]]:
-    """Return the bounded, credential-free durable bundle for one workflow run."""
+    """Return a bounded, credential-free bundle, chunking large source files."""
     outcome_root = (root / ".outcomeci" / "outcomes" / run_id).resolve()
     expected_root = (root / ".outcomeci" / "outcomes").resolve()
     if not outcome_root.is_relative_to(expected_root) or not outcome_root.is_dir():
         raise ContractError("workflow run artifact directory is unavailable")
     artifacts: list[dict[str, str]] = []
     total = 0
+    source_files = 0
+    source_bytes = 0
+    omitted_files = 0
+    omitted_bytes = 0
+
+    def artifact(path: str, content: bytes) -> dict[str, str]:
+        return {
+            "path": path,
+            "content_base64": base64.b64encode(content).decode(),
+            "sha256": hashlib.sha256(content).hexdigest(),
+        }
+
     for path in sorted(item for item in outcome_root.rglob("*") if item.is_file()):
         relative_to_outcome = path.relative_to(outcome_root)
         if private_path(relative_to_outcome):
             continue
+        source_files += 1
         content = path.read_bytes()
-        total += len(content)
+        size = len(content)
+        source_bytes += size
+        relative_to_root = str(path.relative_to(root))
+        pending: list[dict[str, str]]
+        pending_bytes = size
+        if size <= WORKFLOW_ARTIFACT_FILE_BYTES:
+            pending = [artifact(relative_to_root, content)]
+        else:
+            part_count = (size + WORKFLOW_ARTIFACT_FILE_BYTES - 1) // (WORKFLOW_ARTIFACT_FILE_BYTES)
+            identity = hashlib.sha256(relative_to_root.encode()).hexdigest()[:16]
+            chunk_root = f".outcomeci/outcomes/{run_id}/.outcomeci-artifact-chunks/{identity}"
+            pending = []
+            manifest_parts = []
+            for index in range(part_count):
+                chunk = content[
+                    index * WORKFLOW_ARTIFACT_FILE_BYTES : (index + 1)
+                    * WORKFLOW_ARTIFACT_FILE_BYTES
+                ]
+                part_path = f"{chunk_root}/{index + 1:06d}-of-{part_count:06d}.part"
+                record = artifact(part_path, chunk)
+                pending.append(record)
+                manifest_parts.append(
+                    {
+                        "path": part_path,
+                        "bytes": len(chunk),
+                        "sha256": record["sha256"],
+                    }
+                )
+            manifest = (
+                json.dumps(
+                    {
+                        "schema_version": "outcomeci.artifact-chunks/v1",
+                        "source_path": relative_to_root,
+                        "bytes": size,
+                        "sha256": hashlib.sha256(content).hexdigest(),
+                        "parts": manifest_parts,
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode()
+            pending.append(artifact(f"{chunk_root}/manifest.json", manifest))
+            pending_bytes += len(manifest)
         if (
-            len(artifacts) >= WORKFLOW_ARTIFACT_FILE_LIMIT
-            or len(content) > WORKFLOW_ARTIFACT_FILE_BYTES
-            or total > WORKFLOW_ARTIFACT_TOTAL_BYTES
+            len(artifacts) + len(pending) > WORKFLOW_ARTIFACT_FILE_LIMIT
+            or total + pending_bytes > WORKFLOW_ARTIFACT_TOTAL_BYTES
         ):
-            raise ContractError("workflow artifact bundle exceeds the completion limit")
-        artifacts.append(
+            omitted_files += 1
+            omitted_bytes += size
+            continue
+        artifacts.extend(pending)
+        total += pending_bytes
+    print(
+        json.dumps(
             {
-                "path": str(path.relative_to(root)),
-                "content_base64": base64.b64encode(content).decode(),
-                "sha256": hashlib.sha256(content).hexdigest(),
+                "event": "workflow_artifact_capture",
+                "source_file_count": source_files,
+                "source_bytes": source_bytes,
+                "uploaded_part_count": len(artifacts),
+                "uploaded_bytes": total,
+                "omitted_file_count": omitted_files,
+                "omitted_bytes": omitted_bytes,
             }
-        )
+        ),
+        file=sys.stderr,
+    )
     return artifacts
+
+
+def discovered_workflow_run_id(root: Path) -> str | None:
+    """Recover the one run created in an invocation-private workspace."""
+    outcomes = root / ".outcomeci" / "outcomes"
+    with suppress(OSError):
+        run_ids = sorted(path.name for path in outcomes.iterdir() if path.is_dir())
+        if len(run_ids) == 1:
+            return run_ids[0]
+    return None
 
 
 def workflow_failure_category(error: Exception) -> str:
@@ -411,12 +487,21 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
         category = workflow_failure_category(exc)
         detail = redact_diagnostic(exc)
         retryable = isinstance(exc, CoreError) and exc.retryable and not steps_finished
+        artifacts: list[dict[str, str]] = []
+        if not retryable:
+            run_id = run_id or discovered_workflow_run_id(root)
+            if run_id is not None:
+                # Capturing diagnostics is best-effort and must never replace the
+                # original workflow failure with an artifact collection failure.
+                with suppress(Exception):
+                    artifacts = workflow_artifacts(root, run_id)
 
         def report_failure() -> None:
             client.workflow_complete(
                 lease,
                 "failed",
                 run_id=run_id,
+                artifacts=artifacts,
                 category=category,
                 detail=detail,
                 expected_credential_version=credential_version,
