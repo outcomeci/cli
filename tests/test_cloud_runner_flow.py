@@ -1,4 +1,6 @@
 import base64
+import hashlib
+import importlib
 import io
 import json
 import os
@@ -20,14 +22,67 @@ from outcomeci.cloud_runner.main import (
     authorize,
     execute_publication,
     execute_workflow,
+    workflow_artifacts,
     workflow_failure_category,
 )
 from outcomeci.cloud_runner.models import AuthorizationClaim, ContractError, Launch
 from outcomeci.cloud_runner.process import ProcessResult
 from outcomeci.process import ExecutionError
 
+cloud_runner_main = importlib.import_module("outcomeci.cloud_runner.main")
+
 
 class FlowTests(unittest.TestCase):
+    def test_workflow_artifact_guardrails_are_raised(self):
+        self.assertEqual(cloud_runner_main.WORKFLOW_ARTIFACT_FILE_LIMIT, 1_000)
+        self.assertEqual(cloud_runner_main.WORKFLOW_ARTIFACT_FILE_BYTES, 32 * 1024 * 1024)
+        self.assertEqual(cloud_runner_main.WORKFLOW_ARTIFACT_TOTAL_BYTES, 100 * 1024 * 1024)
+
+    def test_large_workflow_artifact_is_losslessly_chunked(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            transcript = root / ".outcomeci" / "outcomes" / "run-1" / "trace.jsonl"
+            transcript.parent.mkdir(parents=True)
+            transcript.write_bytes(b"abcdefghij")
+            with mock.patch.object(cloud_runner_main, "WORKFLOW_ARTIFACT_FILE_BYTES", 4):
+                artifacts = workflow_artifacts(root, "run-1")
+
+        parts = sorted(
+            (item for item in artifacts if item["path"].endswith(".part")),
+            key=lambda item: item["path"],
+        )
+        manifest_record = next(item for item in artifacts if item["path"].endswith("manifest.json"))
+        reassembled = b"".join(base64.b64decode(item["content_base64"]) for item in parts)
+        manifest = json.loads(base64.b64decode(manifest_record["content_base64"]))
+        self.assertEqual(reassembled, b"abcdefghij")
+        self.assertEqual(manifest["schema_version"], "outcomeci.artifact-chunks/v1")
+        self.assertEqual(manifest["source_path"], ".outcomeci/outcomes/run-1/trace.jsonl")
+        self.assertEqual(manifest["sha256"], hashlib.sha256(reassembled).hexdigest())
+        self.assertEqual(len(manifest["parts"]), 3)
+
+    def test_oversized_source_does_not_discard_other_artifacts(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            outcome = root / ".outcomeci" / "outcomes" / "run-1"
+            outcome.mkdir(parents=True)
+            (outcome / "a-small.json").write_bytes(b"small")
+            (outcome / "z-too-large.jsonl").write_bytes(b"x" * 21)
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(cloud_runner_main, "WORKFLOW_ARTIFACT_FILE_BYTES", 10),
+                mock.patch.object(cloud_runner_main, "WORKFLOW_ARTIFACT_TOTAL_BYTES", 20),
+                mock.patch("sys.stderr", stderr),
+            ):
+                artifacts = workflow_artifacts(root, "run-1")
+
+        self.assertEqual(
+            [item["path"] for item in artifacts],
+            [".outcomeci/outcomes/run-1/a-small.json"],
+        )
+        report = json.loads(stderr.getvalue())
+        self.assertEqual(report["omitted_file_count"], 1)
+        self.assertEqual(report["omitted_bytes"], 21)
+
     def test_workflow_failure_categories_do_not_expose_agent_output(self):
         error = ExecutionError("codex failed with exit 1: private provider output", True)
 
@@ -83,6 +138,9 @@ class FlowTests(unittest.TestCase):
 
             def trigger(workspace, config, name, payload, **options):
                 options["on_created"]("run-1")
+                trace = workspace / ".outcomeci" / "outcomes" / "run-1" / "transcripts"
+                trace.mkdir(parents=True)
+                (trace / "codex.jsonl").write_text('{"type":"partial"}\n')
                 raise CoreError("core_conflict", True)
 
             with (
@@ -114,6 +172,7 @@ class FlowTests(unittest.TestCase):
         _, status, values = client.completed[0]
         self.assertEqual(status, "failed")
         self.assertTrue(values["retryable"])
+        self.assertEqual(values["artifacts"], [])
         self.assertEqual(values["resource_usage"]["schema_version"], 1)
 
     def test_a_retryable_claim_conflict_is_a_clean_no_op(self):
@@ -841,6 +900,9 @@ class FlowTests(unittest.TestCase):
             root.mkdir()
 
             def trigger(workspace, config, name, payload, **options):
+                trace = workspace / ".outcomeci" / "outcomes" / "run-1" / "transcripts"
+                trace.mkdir(parents=True)
+                (trace / "codex.jsonl").write_text('{"type":"partial"}\n')
                 raise ExecutionError(
                     "request failed: Bearer sk-abc123supersecretlongtoken rejected"
                 )
@@ -877,6 +939,15 @@ class FlowTests(unittest.TestCase):
         self.assertNotIn("sk-abc123supersecretlongtoken", values["detail"])
         self.assertIn("[REDACTED]", values["detail"])
         self.assertIn("request failed", values["detail"])
+        self.assertEqual(values["run_id"], "run-1")
+        self.assertEqual(
+            [item["path"] for item in values["artifacts"]],
+            [".outcomeci/outcomes/run-1/transcripts/codex.jsonl"],
+        )
+        self.assertEqual(
+            base64.b64decode(values["artifacts"][0]["content_base64"]),
+            b'{"type":"partial"}\n',
+        )
 
     def test_claude_authorization_extracts_the_token_from_a_plain_transcript(self):
         claim = AuthorizationClaim(
