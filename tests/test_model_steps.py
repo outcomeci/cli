@@ -352,3 +352,19 @@ def test_a_named_agent_profile_sets_the_steps_runner(tmp_path):
         "model": "claude-opus-5-5",
     }
     assert "reasoning" not in compiled["instructions"]["steps"]["fix"]["v1"]
+
+
+def test_a_step_shows_the_model_at_most_three_small_images(tmp_path):
+    files = []
+    for index in range(5):
+        path = tmp_path / f"shot{index}.png"
+        path.write_bytes(b"\x89PNG" + b"0" * (10 if index != 1 else models.IMAGE_LIMIT))
+        files.append({"path": str(path), "content_type": "image/png"})
+    files.append({"path": str(tmp_path / "notes.txt"), "content_type": "text/plain"})
+
+    parts = models.image_parts(files)
+
+    assert len(parts) == models.MAX_IMAGES
+    assert all(part["image_url"]["url"].startswith("data:image/png;base64,") for part in parts)
+    # The oversized second image was skipped, not counted.
+    assert models.image_parts(files[1:2]) == []

@@ -26,7 +26,10 @@ from .process import ExecutionError
 MAX_TOOL_CALLS = 20
 RESULT = "return_result"
 TOOL_RESULT_LIMIT = 20_000
-IMAGE_LIMIT = 2 * 1024 * 1024
+# A turn resends the conversation, images included, and OutcomeCI Cloud takes
+# at most 8 MiB per turn: three images of at most 1.5 MiB each fit.
+IMAGE_LIMIT = 3 * 512 * 1024
+MAX_IMAGES = 3
 IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
 PROVIDER_KEYS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
 
@@ -136,10 +139,13 @@ def tools(capabilities: list[Mapping[str, Any]], returns: Mapping[str, Any] | No
     return result
 
 
-def image_parts(files: list[Mapping[str, Any]]) -> list[dict]:
-    """Attached images a model can see, as data URLs; other files are skipped."""
-    parts = []
+def image_parts(files: list[Mapping[str, Any]], limit: int = MAX_IMAGES) -> list[dict]:
+    """Up to `limit` attached images a model can see, as data URLs; other files
+    and larger images are skipped."""
+    parts: list[dict] = []
     for item in files:
+        if len(parts) >= limit:
+            break
         path = Path(str(item.get("path", "")))
         kind = str(item.get("content_type") or item.get("mimetype") or "")
         if kind not in IMAGE_TYPES or not path.is_file() or path.stat().st_size > IMAGE_LIMIT:
@@ -175,6 +181,7 @@ def run(
         else {"role": "user", "content": user},
     ]
     used, nudged, text = 0, False, ""
+    shown = len(images or [])
     while True:
         answer = client(step=step, profile=profile, messages=messages, tools=offered)
         message = answer.get("message") or {}
@@ -239,7 +246,8 @@ def run(
             file = (result.get("output") or {}).get("file") if isinstance(result, dict) else None
             if isinstance(file, dict):
                 seen.append(file)
-        pictures = image_parts(seen)
+        pictures = image_parts(seen, MAX_IMAGES - shown)
+        shown += len(pictures)
         if pictures:
             messages.append(
                 {
