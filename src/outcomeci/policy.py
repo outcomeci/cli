@@ -322,8 +322,12 @@ class PolicyExecutor:
                     "previous request was denied or its delivery is uncertain; inspect the receipt before continuing",
                     category="policy",
                 )
+            # The budget is per agent run: a step, or one item of a
+            # for_each. The journal holds the whole run, so earlier steps'
+            # calls and other items' calls must not spend this one's budget.
             count = sum(
                 call["capability"].split(".")[0] == capability.split(".")[0]
+                and call.get("invocation") == self.invocation
                 for call in state["calls"].values()
             )
             if count >= integration["access"].get("max_requests", 1000):
