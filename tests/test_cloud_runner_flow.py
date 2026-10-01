@@ -1202,6 +1202,8 @@ class PublicationClient:
 def _fake_prepare_publication_writing_output(source, destination, **_options):
     destination.mkdir(parents=True, exist_ok=True)
     (destination / "outcome.yml").write_text("apiVersion: outcomeci.workflow/v1\nname: example\n")
+    (destination / ".outcomeci").mkdir()
+    (destination / ".outcomeci/publication-overview.md").write_text("# Public overview\n")
     return {
         "package_digest": "digest-1",
         "workflow_revision": "rev-1",
@@ -1237,6 +1239,12 @@ class PublicationFallbackTests(unittest.TestCase):
         self.assertEqual(client.fallback_calls, [])
         self.assertEqual(len(client.completions), 1)
         self.assertEqual(client.completions[0][0], "completion-secret")
+        self.assertEqual(
+            base64.b64decode(
+                client.completions[0][1]["files"][".outcomeci/publication-overview.md"]
+            ).decode(),
+            "# Public overview\n",
+        )
 
     def test_a_codex_usage_limit_falls_back_to_claude_and_completes(self):
         client = PublicationClient(publication_claim(agent="codex"))
