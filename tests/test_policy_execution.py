@@ -190,6 +190,22 @@ def test_budget_methods_and_origin_cannot_be_expanded(tmp_path):
         broker.execute("slack.request", {"method": "GET", "path": "/api/new"}, step="notify")
 
 
+def test_request_budget_is_per_agent_run_not_per_workflow_run(tmp_path):
+    # Steps and for_each items each get their own broker over one run journal.
+    first, second = executor(tmp_path), executor(tmp_path)
+    for broker in (first, second):
+        broker.executor.compiled["workflow"]["spec"]["integrations"]["slack"]["access"][
+            "max_requests"
+        ] = 1
+    first.execute("slack.request", {"method": "GET", "path": "/api/users.list"}, step="notify")
+    with pytest.raises(IntegrationError, match="budget"):
+        first.execute("slack.request", {"method": "GET", "path": "/api/channels"}, step="notify")
+    result = second.execute(
+        "slack.request", {"method": "GET", "path": "/api/conversations"}, step="notify"
+    )
+    assert result["ok"] is True
+
+
 def test_reads_skip_the_step_policy_review(tmp_path):
     reviewed = []
     broker = executor(tmp_path, lambda proposal: reviewed.append(proposal) or allow(proposal))
