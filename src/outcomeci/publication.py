@@ -15,6 +15,7 @@ from .security import private_path
 
 REQUIREMENTS = Path(".outcomeci/publication-requirements.json")
 REPORT = Path(".outcomeci/publication-report.json")
+OVERVIEW = Path(".outcomeci/publication-overview.md")
 EMAIL = re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b")
 PROVIDER_ID = re.compile(r"\b(?:U|W|C|G|T)[A-Z0-9]{8,}\b")
 KINDS = {"identity", "vault", "connection", "repository", "endpoint", "provider", "other"}
@@ -124,6 +125,22 @@ def _text_files(root: Path, *, include_manifests: bool = False) -> list[tuple[Pa
     return result
 
 
+def _validate_overview(root: Path) -> str:
+    try:
+        content = (root / OVERVIEW).read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        raise ExecutionError("publication overview must be a UTF-8 Markdown file") from exc
+    if not 100 <= len(content.strip()) <= 12000:
+        raise ExecutionError("publication overview must contain 100–12000 characters")
+    if re.search(
+        r"<[^>]*>|!?\[[^\]]*\]\s*(?:\(|\[)|^\s*\[[^\]]+\]:|(?:https?://|www\.)",
+        content,
+        re.IGNORECASE | re.MULTILINE,
+    ):
+        raise ExecutionError("publication overview must not contain HTML, links, or images")
+    return content
+
+
 def _privacy_gate(root: Path, sensitive_terms: list[str]) -> None:
     failures: set[str] = set()
     terms = [term.strip().casefold() for term in sensitive_terms if term.strip()]
@@ -202,7 +219,9 @@ def prepare_publication(
 
 Edit the copied workflow and its support files in place. Replace every personal or organization-specific value and every value a new consumer must provide: identities, users, groups, channels, email addresses, Vault paths, connection references, repositories, endpoints, provider identifiers, and workspace identifiers. Use safe, valid generic literals so the resulting workflow still compiles. Preserve behavior and never include original sensitive values in your reports.
 
-Create .outcomeci/publication-requirements.json as an array of objects with exactly: id, json_path, kind, description, required. Kinds are identity, vault, connection, repository, endpoint, provider, or other. Create .outcomeci/publication-report.json as an array with exactly: requirement, files, reason. Each report item references a requirement id and contains no original value. Do not modify these contracts. Do not access the network or execute the workflow."""
+Create .outcomeci/publication-requirements.json as an array of objects with exactly: id, json_path, kind, description, required. Kinds are identity, vault, connection, repository, endpoint, provider, or other. Create .outcomeci/publication-report.json as an array with exactly: requirement, files, reason. Each report item references a requirement id and contains no original value. Do not modify these contracts.
+
+After sanitizing, create or replace .outcomeci/publication-overview.md using only the sanitized workflow and its instruction files as evidence. Write 100–12000 characters of UTF-8 Markdown with a plain-English purpose, steps, inputs and setup, and outputs. Describe only behavior actually specified; do not invent capabilities, benefits, guarantees, results, or setup requirements. Explain human collaboration only if the workflow specifies it. Do not reuse an old overview as evidence. Include no original sensitive values, HTML, links, URLs, or images. This overview will be reviewed by the publisher and shown publicly. Do not access the network or execute the workflow."""
     invoke(
         agent,
         model,
@@ -217,6 +236,7 @@ Create .outcomeci/publication-requirements.json as an array of objects with exac
 
     def verify():
         requirements, report = _validate_requirements(destination)
+        _validate_overview(destination)
         _privacy_gate(destination, terms)
         return requirements, report, compile_workflow(config)
 
@@ -226,7 +246,8 @@ Create .outcomeci/publication-requirements.json as an array of objects with exac
         invoke(
             agent,
             model,
-            """The public workflow candidate did not pass OutcomeCI validation. Review the package again, finish replacing every consumer-specific value, repair the workflow so it compiles, and recreate both publication JSON manifests using the exact contracts from the original request. Do not execute the workflow or access the network.""",
+            prompt
+            + "\n\nThe public workflow candidate did not pass OutcomeCI validation. Review the package again, finish replacing every consumer-specific value, repair the workflow so it compiles, and recreate both publication JSON manifests and the overview using the exact contracts above.",
             destination,
             900,
             writable_paths=[destination],
