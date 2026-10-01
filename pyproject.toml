@@ -17,7 +17,7 @@ dependencies = [
     "pyte>=0.8",
     # The connector contract the compiler and executor read: 0.2 declares the
     # credential kinds each provider accepts.
-    "outcomeci-connectors>=0.2,<0.3",
+    "outcomeci-connectors>=0.3,<0.4",
 ]
 
 [project.scripts]

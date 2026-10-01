@@ -97,6 +97,7 @@ def test_a_changed_connector_changes_the_revision(monkeypatch):
             "step a is not granted slack.post",
         ),
         ([_step("a", can=[{"github.write": {"repo": "not-a-repo"}}])], "owner/name"),
+        ([_step("a", can=[{"github.search": {"repo": "not-a-repo"}}])], "owner/name"),
         ([_step("a", reason="missing.md")], "missing.md was not found"),
         ([_step("a", bogus=True)], "unsupported fields for agent steps: bogus"),
         ([_step("a"), _step("a")], "duplicate or reserved step name"),
@@ -205,3 +206,55 @@ def test_durations():
 )
 def test_paths_stay_under_the_granted_repository(path, inside):
     assert _within(path, "/repos/o/r") is inside
+
+
+def test_a_search_grant_compiles_its_repo_and_the_qualifier_rule(tmp_path):
+    compiled = compile_workflow(
+        _write(tmp_path, [_step("a", can=[{"github.search": {"repo": "outcomeci/api"}}])])
+    )
+    (grant,) = compiled["instructions"]["steps"]["a"]["v1"]["grants"]
+    assert grant["args"] == {"repo": {"literal": {"owner": "outcomeci", "name": "api"}}}
+    search = compiled["workflow"]["spec"]["integrations"]["github"]["operations"]["search"]
+    assert search["request"] == {"methods": ["GET"]}
+    assert search["policy"]["side_effect"] == "read"
+    assert search["grantable"]["repo"]["query_qualifier"]["term"] == "repo:{owner}/{name}"
+    assert search["deny"][0]["path"] == "^(?!/search/code$)"
+
+
+QUERY = {"param": "q", "term": "repo:{owner}/{name}", "exclusive": ["repo"], "operators": []}
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        {"query_qualifier": QUERY, "path_prefix": "/repos/{owner}/{name}"},
+        {"query_qualifier": {**QUERY, "term": "{owner}/{name}"}, "value_fields": ["owner", "name"]},
+        {"query_qualifier": {**QUERY, "exclusive": ["org"]}, "value_fields": ["owner", "name"]},
+        {"query_qualifier": {**QUERY, "param": ""}, "value_fields": ["owner", "name"]},
+        {"query_qualifier": QUERY, "value_fields": ["owner", "repo"]},
+        {"query_qualifier": {**QUERY, "operators": "OR"}, "value_fields": ["owner", "name"]},
+    ],
+)
+def test_a_malformed_query_qualifier_is_refused(rule):
+    from outcomeci.config import _grantable
+
+    _grantable(
+        {"grantable": {"repo": {"query_qualifier": QUERY, "value_fields": ["owner", "name"]}}}, "op"
+    )
+    with pytest.raises(ConfigError, match="op.grantable.repo"):
+        _grantable({"grantable": {"repo": rule}}, "op")
+
+
+def test_only_an_operation_that_chooses_its_request_scopes_a_query():
+    from outcomeci.config import _operation
+
+    with pytest.raises(ConfigError, match="scopes a query"):
+        _operation(
+            {
+                "request": {"method": "GET", "path": "/search"},
+                "grantable": {
+                    "repo": {"query_qualifier": QUERY, "value_fields": ["owner", "name"]}
+                },
+            },
+            "op",
+        )

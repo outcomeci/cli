@@ -10,6 +10,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import secrets
 import tempfile
 from collections.abc import Callable, Mapping
@@ -41,6 +42,39 @@ def _path_fields(value: Any, fields: list[str]) -> dict[str, str] | None:
     ):
         return None
     return {name: value[name] for name in fields}
+
+
+def _scoped_query(
+    request: dict[str, Any], scope: dict[str, Any], term: str
+) -> tuple[dict[str, Any] | None, str | None]:
+    """A request's query with its search parameter scoped by `term`.
+
+    The parameter's whitespace-separated terms must include `term` (in any
+    case) and no other qualifier `scope` names exclusive, nor any of its
+    boolean operators: a search ORs repeated scope qualifiers and an operator
+    can widen or negate one. A missing `term` is appended. Returns the query
+    to send, or why the request is refused.
+    """
+    param = scope["param"]
+    if "?" in str(request.get("path", "")):
+        return None, f"{param} goes in query, not in the path"
+    query = request.get("query") or {}
+    value = query.get(param, "") if isinstance(query, dict) else None
+    if not isinstance(value, str):
+        return None, f"query.{param} must be a string"
+    tokens = value.split()
+    operators = set(scope.get("operators", []))
+    if any(token.strip("()") in operators for token in tokens):
+        return None, f"{param} cannot use {' or '.join(sorted(operators))}"
+    names = "|".join(re.escape(name) for name in scope.get("exclusive", []))
+    qualifier = re.compile(rf"(?:^|[^a-z0-9_])(?:{names}):") if names else None
+    granted = term.lower()
+    others = [token for token in tokens if token.lower() != granted]
+    if qualifier and any(qualifier.search(token.lower()) for token in others):
+        return None, f"{param} must search only {term}"
+    if len(others) == len(tokens):
+        value = f"{value.strip()} {term}".strip()
+    return {**query, param: value}, None
 
 
 REVIEW_RESULT = {
@@ -189,7 +223,8 @@ class PolicyExecutor:
     def _apply_grants(
         self, capability: str, request: dict[str, Any]
     ) -> tuple[dict[str, Any], str | None, list[tuple[str | None, list[dict[str, Any]]]]]:
-        """Check a call against the step's grants, filling in fixed fields.
+        """Check a call against the step's grants, filling in fixed fields and
+        scope qualifiers.
 
         Returns the request to send, the matching grant's `as` name, and, when
         the grant can only be judged from the response, every grant that
@@ -219,13 +254,29 @@ class PolicyExecutor:
                         candidate[field] = granted
                     elif not same(candidate[field], granted):
                         problems.append(f"{field} must be {granted}")
-                else:
+                elif "query_qualifier" in rule:
+                    fields = _path_fields(granted, rule.get("value_fields", []))
+                    scope = rule["query_qualifier"]
+                    term = scope["term"].format(**fields) if fields else None
+                    # A value that is not one plain term could smuggle in
+                    # another qualifier when the term is appended.
+                    if term is None or not re.fullmatch(r"[^\s\"()]+", term):
+                        problems.append(f"{name} did not resolve to {rule.get('value_fields')}")
+                    else:
+                        query, problem = _scoped_query(candidate, scope, term)
+                        if problem is not None:
+                            problems.append(problem)
+                        else:
+                            candidate["query"] = query
+                elif "path_prefix" in rule:
                     fields = _path_fields(granted, rule.get("value_fields", []))
                     prefix = rule["path_prefix"].format(**fields) if fields else None
                     if prefix is None:
                         problems.append(f"{name} did not resolve to {rule.get('value_fields')}")
                     elif not _within(candidate.get("path"), prefix):
                         problems.append(f"path must be under {prefix}")
+                else:
+                    problems.append(f"{name} has no rule this runtime enforces")
             if problems:
                 reasons.extend(problems)
                 continue
