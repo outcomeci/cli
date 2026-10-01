@@ -62,6 +62,27 @@ def test_a_release_tags_the_commits_runner_image_without_rebuilding() -> None:
     assert "outcomeci-outcome-runner" in tagging
 
 
+def test_runner_refreshes_security_updates_and_reuses_scanned_layers() -> None:
+    import yaml
+
+    workflow = yaml.safe_load((ROOT / ".github/workflows/runner-container.yml").read_text())
+    steps = {step.get("name"): step for step in workflow["jobs"]["container"]["steps"]}
+    verify = steps["Build image for verification"]["with"]
+    publish = steps["Publish immutable image"]["with"]
+    assert verify["pull"] is True
+    assert verify["build-args"] == publish["build-args"]
+    assert (
+        "RUNNER_DEPENDENCY_REFRESH=${{ github.run_id }}-${{ github.run_attempt }}"
+        in verify["build-args"]
+    )
+    dockerfile = (ROOT / "Dockerfile.runner").read_text()
+    assert dockerfile.index("ARG RUNNER_DEPENDENCY_REFRESH") < dockerfile.index(
+        "RUN apt-get update"
+    )
+    assert steps["Scan image"]["with"]["exit-code"] == "1"
+    assert steps["Scan image"]["with"]["severity"] == "CRITICAL,HIGH"
+
+
 def test_homebrew_release_targets_outcomeci_package_and_tap() -> None:
     source = (ROOT / ".github/workflows/homebrew.yml").read_text()
     assert "pypi.org/pypi/outcomeci-cli/" in source

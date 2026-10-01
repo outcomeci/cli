@@ -36,9 +36,12 @@ jobs:
           context: .
           file: Dockerfile.runner
           load: true
+          pull: true
           tags: outcome-runner:scan
           platforms: linux/amd64
-          build-args: OUTCOMECI_CLI_VERSION=0.0.0
+          build-args: |
+            OUTCOMECI_CLI_VERSION=0.0.0
+            RUNNER_DEPENDENCY_REFRESH=${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha,scope=outcome-runner
           cache-to: type=gha,mode=max,scope=outcome-runner
       - name: Scan image
@@ -95,5 +98,7 @@ jobs:
             ${{ steps.ecr_meta.outputs.tags }}
           labels: ${{ steps.ghcr_meta.outputs.labels }}
           platforms: linux/amd64
-          build-args: OUTCOMECI_CLI_VERSION=0.0.0
+          build-args: |
+            OUTCOMECI_CLI_VERSION=0.0.0
+            RUNNER_DEPENDENCY_REFRESH=${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha,scope=outcome-runner
