@@ -546,6 +546,55 @@ def test_a_new_file_is_reviewed_as_all_added(tmp_path, monkeypatch):
     assert "+print('hi')" in proposals[0]["compared"]["diff"]
 
 
+def _new_file_github(request):
+    if request.method == "GET":
+        return httpx.Response(404, json={"message": "Not Found"})
+    return httpx.Response(201, json={"content": {"path": "app/main.py"}})
+
+
+def test_a_reviewed_file_write_carries_its_diff_not_the_whole_file(tmp_path, monkeypatch):
+    broker, proposals = _github(tmp_path, monkeypatch, _new_file_github)
+    commit = _commit("print('hi')\n")
+    broker.execute("github.write", commit, step="fix")
+
+    shown = proposals[0]["request"]
+    assert shown["body"]["message"] == "log at startup"
+    assert shown["body"]["branch"] == "slack-feature/log"
+    assert shown["body"]["content"]["omitted"] == "shown as the diff in compared"
+    assert commit["body"]["content"] not in json.dumps(proposals[0])
+    # The digest still names the full request the broker will send.
+    journal = json.loads((tmp_path / "journal.json").read_text())
+    (call,) = journal["calls"].values()
+    assert proposals[0]["proposal_sha256"] == call["proposal_sha256"]
+    assert call["request"]["body"]["content"] == commit["body"]["content"]
+
+
+def test_receipts_summarize_earlier_bodies_instead_of_repeating_them(tmp_path, monkeypatch):
+    broker, proposals = _github(tmp_path, monkeypatch, _new_file_github)
+    first = _commit("print('one')\n")
+    broker.execute("github.write", first, step="fix")
+    broker.execute("github.write", _commit("print('two')\n"), step="fix")
+
+    earlier = proposals[1]["receipts"][0]["request"]
+    assert set(earlier["body"]) == {"sha256", "bytes"}
+    assert earlier["path"] == first["path"]
+    assert first["body"]["content"] not in json.dumps(proposals[1])
+
+
+def test_a_review_stays_small_however_many_large_files_were_written(tmp_path, monkeypatch):
+    broker, proposals = _github(tmp_path, monkeypatch, _new_file_github)
+    large = "x = 1\n" * 20_000  # about 120 KB, 160 KB as base64
+    for index in range(15):
+        commit = _commit(large + f"# {index}\n")
+        commit["path"] = f"/repos/outcomeci/cli/contents/app/module_{index}.py"
+        broker.execute("github.write", commit, step="fix")
+
+    last = proposals[-1]
+    without_diff = {key: value for key, value in last.items() if key != "compared"}
+    # Fifteen 160 KB bodies would be 2.4 MB of receipts; summaries keep it small.
+    assert len(json.dumps(without_diff)) < 20_000
+
+
 def test_a_write_that_replaces_no_file_carries_no_diff(tmp_path, monkeypatch):
     broker, proposals = _github(
         tmp_path, monkeypatch, lambda request: httpx.Response(201, json={"ref": "x"})
