@@ -16,7 +16,8 @@ from typing import Any
 from jsonschema import ValidationError
 from jsonschema import validate as validate_json
 
-from . import models, templates
+from . import checkouts, models, templates
+from .auth import Authenticator
 from .capability import invoke_integration
 from .capability import serve as serve_capability
 from .config import compile_workflow
@@ -548,6 +549,15 @@ def _step_prompt(
     )
 
 
+def _with_checkouts(prompt: str, note: str) -> str:
+    """A step prompt with its checkouts note just before the context, which
+    stays the prompt's last line."""
+    if not note:
+        return prompt
+    head, _, context_json = prompt.rpartition("\n\n")
+    return f"{head}\n\n{note}\n\n{context_json}"
+
+
 def _step_context(
     root: Path,
     compiled: dict[str, Any],
@@ -659,43 +669,65 @@ def _run_step(
     _container_isolated = options._container_isolated
     repository = root.name
     step_started_at = datetime.now(UTC).isoformat()
+    # One per step, so a GitHub App's installation token is exchanged once.
+    checkout_auth = Authenticator(rotate=getattr(credential_resolver, "rotate", None))
     try:
         summaries = []
-        for prompt, scope in invocations:
-            with serve_capability(
-                root,
-                config,
-                state["run_id"],
-                step,
-                compiled=compiled,
-                resolver=credential_resolver,
-                event_sink=event_sink,
-                policy_reviewer=policy_reviewer,
-                grants=(scope or {}).get("grants"),
-                container_isolated=_container_isolated,
-                inputs=(scope or {}).get("inputs"),
-            ) as capability_env:
-                if models.is_model_step(step_block):
+        for index, (prompt, scope) in enumerate(invocations):
+            # A model step has no filesystem; an agent gets fresh checkouts of
+            # its own item's repositories only, removed once it finishes.
+            try:
+                if not models.is_model_step(step_block):
+                    records = checkouts.prepare(
+                        root,
+                        compiled,
+                        (scope or {}).get("grants"),
+                        credential_resolver,
+                        step=step,
+                        event_sink=event_sink,
+                        authenticator=checkout_auth,
+                    )
+                    if records:
+                        state.setdefault("repository_checkouts", []).extend(
+                            {"step": step, "item": index, **record} for record in records
+                        )
+                        prompt = _with_checkouts(prompt, checkouts.note(records))
+                with serve_capability(
+                    root,
+                    config,
+                    state["run_id"],
+                    step,
+                    compiled=compiled,
+                    resolver=credential_resolver,
+                    event_sink=event_sink,
+                    policy_reviewer=policy_reviewer,
+                    grants=(scope or {}).get("grants"),
+                    container_isolated=_container_isolated,
+                    inputs=(scope or {}).get("inputs"),
+                ) as capability_env:
+                    if models.is_model_step(step_block):
+                        summaries.append(
+                            _run_model_step(
+                                compiled, step, step_block, scope or {}, capability_env, options
+                            )
+                        )
+                        continue
                     summaries.append(
-                        _run_model_step(
-                            compiled, step, step_block, scope or {}, capability_env, options
+                        invoke(
+                            runner,
+                            chosen_model,
+                            prompt,
+                            root,
+                            7200,
+                            allow_local_auth=True,
+                            extra_env=capability_env,
+                            writable_paths=writable_artifacts,
+                            excluded_env=connection_secrets,
+                            container_isolated=_container_isolated,
                         )
                     )
-                    continue
-                summaries.append(
-                    invoke(
-                        runner,
-                        chosen_model,
-                        prompt,
-                        root,
-                        7200,
-                        allow_local_auth=True,
-                        extra_env=capability_env,
-                        writable_paths=writable_artifacts,
-                        excluded_env=connection_secrets,
-                        container_isolated=_container_isolated,
-                    )
-                )
+            finally:
+                checkouts.remove(root)
         summary = "\n".join(summaries)
         if "for_each" in step_block:
             from . import v1_runtime
