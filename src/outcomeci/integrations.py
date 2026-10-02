@@ -180,6 +180,8 @@ def same(actual: Any, granted: Any) -> bool:
 
 
 DIFF_LIMIT = 40_000
+# A write of several files reads each one's current copy: at most this many.
+COMPARED_ENTRIES = 50
 
 
 def _decoded(value: Any, encoding: str) -> str | None:
@@ -192,6 +194,29 @@ def _decoded(value: Any, encoding: str) -> str | None:
         return base64.b64decode("".join(value.split()), validate=True).decode("utf-8")
     except (ValueError, UnicodeDecodeError):
         return None
+
+
+def _diff(current: str, proposed: str, fromfile: str, tofile: str) -> str:
+    return "".join(
+        difflib.unified_diff(
+            current.splitlines(keepends=True),
+            proposed.splitlines(keepends=True),
+            fromfile=fromfile,
+            tofile=tofile,
+        )
+    )
+
+
+def _deletes(entry: Mapping[str, Any], rule: Mapping[str, Any]) -> bool:
+    """Whether a compared entry deletes its file: its `deletion` field is null."""
+    field = rule.get("deletion")
+    return bool(field) and field in entry and entry[field] is None
+
+
+def _plain_path(name: str) -> bool:
+    """A repository-relative file path whose current copy can be read under
+    the request's own scope: no empty, `.` or `..` segment."""
+    return bool(name) and all(part not in {"", ".", ".."} for part in name.split("/"))
 
 
 def _found(body: Any, source: str) -> Any:
@@ -454,11 +479,56 @@ class IntegrationExecutor:
             None,
         )
 
-    def compared_field(self, capability: str, inputs: Mapping[str, Any]) -> str | None:
-        """The request field a comparison shows as a diff, such as `body.content`
-        for a file write; None when the operation declares no comparison."""
+    def compared_fields(
+        self, capability: str, inputs: Mapping[str, Any], compared: Mapping[str, Any] | None
+    ) -> list[str]:
+        """The request fields `compared` shows as a diff, such as `body.content`
+        for a file write or `body.tree.0.content` for each file of a tree that
+        was diffed; a reviewer needs only the diff. A file whose content was not
+        diffed, such as one past the entry limit, keeps its field."""
         rule = self._compare_rule(capability, inputs)
-        return rule["proposed"] if rule else None
+        if rule is None or not compared:
+            return []
+        if not rule.get("entries"):
+            return [rule["proposed"]] if "diff" in compared else []
+        shown = {item["path"] for item in compared.get("files", []) if "change" in item}
+        entries = _found(inputs.get("body"), rule["entries"])
+        return [
+            f"{rule['entries']}.{index}.{rule['proposed']}"
+            for index, entry in enumerate(
+                entries[:COMPARED_ENTRIES] if isinstance(entries, list) else []
+            )
+            if isinstance(entry, Mapping)
+            and entry.get(rule["entry_path"]) in shown
+            and not _deletes(entry, rule)
+            and isinstance(_found(entry, rule["proposed"]), str)
+        ]
+
+    def _current(
+        self,
+        capability: str,
+        path: str,
+        rule: Mapping[str, Any],
+        *,
+        step: str,
+        ref: Any = None,
+    ) -> tuple[str, str | None]:
+        """A file's current copy: ("found", its text, or None when it is not
+        text), ("missing", None) for a new file, or ("unreadable", None)."""
+        try:
+            result = self.execute(
+                capability,
+                {
+                    "method": "GET",
+                    "path": path,
+                    **({"query": {"ref": ref}} if isinstance(ref, str) and ref else {}),
+                },
+                step=step,
+            )
+        except IntegrationError as exc:
+            return ("missing" if "HTTP 404" in str(exc) else "unreadable"), None
+        current = _found(result["output"].get("result"), rule["current"])
+        return "found", _decoded(current, rule.get("current_encoding") or rule["encoding"])
 
     def compared(
         self, capability: str, inputs: Mapping[str, Any], *, step: str
@@ -470,46 +540,112 @@ class IntegrationExecutor:
         rule = self._compare_rule(capability, inputs)
         if rule is None:
             return None
+        if rule.get("entries"):
+            return self._compared_entries(capability, inputs, path, rule, step=step)
         proposed = _decoded(_found(inputs.get("body"), rule["proposed"]), rule["encoding"])
         if proposed is None:
             return {"path": path, "note": "the proposed content is not readable text"}
         ref = _found(inputs.get("body"), rule["ref"]) if rule.get("ref") else None
-        try:
-            result = self.execute(
-                capability,
-                {
-                    "method": "GET",
-                    "path": path,
-                    **({"query": {"ref": ref}} if isinstance(ref, str) and ref else {}),
-                },
-                step=step,
-            )
-            current = _decoded(
-                _found(result["output"].get("result"), rule["current"]), rule["encoding"]
-            )
-            label = f"{path} at {ref}" if ref else path
-        except IntegrationError as exc:
-            if "HTTP 404" not in str(exc):
-                return {
-                    "path": path,
-                    "note": "the current file could not be read; showing the proposed content",
-                    "proposed": proposed[:DIFF_LIMIT],
-                }
+        status, current = self._current(capability, path, rule, step=step, ref=ref)
+        if status == "unreadable":
+            return {
+                "path": path,
+                "note": "the current file could not be read; showing the proposed content",
+                "proposed": proposed[:DIFF_LIMIT],
+            }
+        if status == "missing":
             current, label = "", "(a new file)"
+        else:
+            label = f"{path} at {ref}" if ref else path
         if current is None:
             return {"path": path, "note": "the current file is not readable text"}
-        diff = "".join(
-            difflib.unified_diff(
-                current.splitlines(keepends=True),
-                proposed.splitlines(keepends=True),
-                fromfile=label,
-                tofile=f"{path} proposed",
-            )
-        )
+        diff = _diff(current, proposed, label, f"{path} proposed")
         return {
             "path": path,
             "diff": diff[:DIFF_LIMIT] or "(no change)",
             **({"truncated": True} if len(diff) > DIFF_LIMIT else {}),
+        }
+
+    def _compared_entries(
+        self,
+        capability: str,
+        inputs: Mapping[str, Any],
+        path: str,
+        rule: Mapping[str, Any],
+        *,
+        step: str,
+    ) -> dict[str, Any]:
+        """A write of several files, such as a tree: each file's diff against its
+        current copy, read with a GET to the rule's `current_path`, all in one
+        `diff`. The first `COMPARED_ENTRIES` entries are diffed until the diffs
+        reach `DIFF_LIMIT`; the rest are noted, and keep their content in the
+        request the reviewer sees."""
+        entries = _found(inputs.get("body"), rule["entries"])
+        if not isinstance(entries, list):
+            return {"path": path, "note": "the request lists no files"}
+        match = re.search(rule["path"], path)
+        groups = match.groupdict() if match else {}
+        files: list[dict[str, Any]] = []
+        diffs: list[str] = []
+        size = 0
+        for entry in entries[:COMPARED_ENTRIES]:
+            name = entry.get(rule["entry_path"]) if isinstance(entry, Mapping) else None
+            if not isinstance(name, str) or not _plain_path(name):
+                files.append({"path": name, "note": "not compared: not a plain file path"})
+                continue
+            deleted = _deletes(entry, rule)
+            raw = _found(entry, rule["proposed"])
+            if not deleted and not isinstance(raw, str):
+                files.append(
+                    {"path": name, "note": "not compared: the entry carries no new content"}
+                )
+                continue
+            if size >= DIFF_LIMIT:
+                files.append({"path": name, "note": "not compared: the diff limit was reached"})
+                continue
+            proposed = "" if deleted else _decoded(raw, rule["encoding"])
+            if proposed is None:
+                files.append({"path": name, "note": "the proposed content is not readable text"})
+                continue
+            current_path = rule["current_path"].format(**groups, file=quote(name, safe="/"))
+            status, current = self._current(capability, current_path, rule, step=step)
+            if status == "unreadable" or (status == "found" and current is None):
+                files.append(
+                    {
+                        "path": name,
+                        **({"change": "deleted"} if deleted else {}),
+                        "note": "the current file could not be read as text",
+                    }
+                )
+                continue
+            if status == "missing":
+                if deleted:
+                    files.append({"path": name, "change": "deleted", "note": "no current copy"})
+                    continue
+                change, label = "added", "(a new file)"
+            else:
+                change, label = ("deleted" if deleted else "modified"), name
+            diff = _diff(
+                current or "", proposed, label, "(deleted)" if deleted else f"{name} proposed"
+            )
+            files.append({"path": name, "change": change if diff else "unchanged"})
+            diffs.append(diff)
+            size += len(diff)
+        diff = "".join(diffs)
+        rest = len(entries) - COMPARED_ENTRIES
+        return {
+            "path": path,
+            "files": files,
+            "diff": diff[:DIFF_LIMIT] or "(no change)",
+            **({"truncated": True} if len(diff) > DIFF_LIMIT else {}),
+            **(
+                {
+                    "note": f"{rest} more entries past the first {COMPARED_ENTRIES} are not "
+                    "compared; their content is in the request"
+                }
+                if rest > 0
+                else {}
+            ),
         }
 
     def execute(

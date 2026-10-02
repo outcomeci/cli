@@ -112,19 +112,28 @@ def _receipt_request(request: Mapping[str, Any]) -> dict[str, Any]:
     return compact
 
 
-def _without_compared(request: Mapping[str, Any], field: str | None) -> dict[str, Any]:
-    """The request with the field its diff already shows replaced by a summary,
-    so a file write is reviewed as its diff rather than as the whole file twice."""
-    if not field or not field.startswith("body.") or not isinstance(request.get("body"), dict):
+def _without_compared(request: Mapping[str, Any], fields: list[str]) -> dict[str, Any]:
+    """The request with each field its diff already shows replaced by a summary,
+    so a file write is reviewed as its diff rather than as the whole file twice.
+    A field is a body path whose numeric parts index lists, such as
+    `body.tree.0.content` for one file of a tree."""
+    if not fields or not isinstance(request.get("body"), dict):
         return dict(request)
-    *parents, leaf = field.removeprefix("body.").split(".")
     body = json.loads(json.dumps(request["body"], default=str))
-    holder = body
-    for part in parents:
-        holder = holder.get(part) if isinstance(holder, dict) else None
-    if not isinstance(holder, dict) or leaf not in holder:
-        return dict(request)
-    holder[leaf] = {"omitted": "shown as the diff in compared", **_summary(holder[leaf])}
+    for field in fields:
+        if not field.startswith("body."):
+            continue
+        *parents, leaf = field.removeprefix("body.").split(".")
+        holder: Any = body
+        for part in parents:
+            if isinstance(holder, dict):
+                holder = holder.get(part)
+            elif isinstance(holder, list) and part.isdigit() and int(part) < len(holder):
+                holder = holder[int(part)]
+            else:
+                holder = None
+        if isinstance(holder, dict) and leaf in holder:
+            holder[leaf] = {"omitted": "shown as the diff in compared", **_summary(holder[leaf])}
     return {**request, "body": body}
 
 
@@ -465,12 +474,8 @@ class PolicyExecutor:
                 )
                 if reviewed:
                     compared = self.executor.compared(capability, request, step=step)
-                    shown = (
-                        _without_compared(
-                            request, self.executor.compared_field(capability, request)
-                        )
-                        if compared and "diff" in compared
-                        else request
+                    shown = _without_compared(
+                        request, self.executor.compared_fields(capability, request, compared)
                     )
                     review = self.reviewer(
                         {

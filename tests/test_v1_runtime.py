@@ -604,6 +604,144 @@ def test_a_write_that_replaces_no_file_carries_no_diff(tmp_path, monkeypatch):
     assert "compared" not in proposals[0]
 
 
+def _tree(*entries: dict) -> dict:
+    return {
+        "method": "POST",
+        "path": "/repos/outcomeci/cli/git/trees",
+        "body": {"base_tree": "abc123", "tree": list(entries)},
+    }
+
+
+def _blob(path: str, text: str) -> dict:
+    return {"path": path, "mode": "100644", "type": "blob", "content": text}
+
+
+def _tree_github(files: dict[str, str], reads: list | None = None):
+    """GitHub serving `files` at the default branch, 404 for any other file."""
+
+    def github(request):
+        if request.method == "GET":
+            if reads is not None:
+                reads.append(request)
+            name = request.url.path.removeprefix("/repos/outcomeci/cli/contents/")
+            if name not in files:
+                return httpx.Response(404, json={"message": "Not Found"})
+            encoded = base64.b64encode(files[name].encode()).decode()
+            return httpx.Response(200, json={"content": encoded, "encoding": "base64"})
+        return httpx.Response(201, json={"sha": "tree-sha"})
+
+    return github
+
+
+def test_a_tree_write_is_reviewed_as_a_diff_of_each_file(tmp_path, monkeypatch):
+    reads: list = []
+    github = _tree_github({"app/main.py": "app.run()\n", "old.py": "legacy = True\n"}, reads)
+    broker, proposals = _github(tmp_path, monkeypatch, github)
+    tree = _tree(
+        _blob("app/main.py", "print('bear down')\napp.run()\n"),
+        _blob("app/new.py", "print('hi')\n"),
+        {"path": "old.py", "mode": "100644", "type": "blob", "sha": None},
+    )
+    broker.execute("github.write", tree, step="fix")
+
+    assert [read.url.path for read in reads] == [
+        "/repos/outcomeci/cli/contents/app/main.py",
+        "/repos/outcomeci/cli/contents/app/new.py",
+        "/repos/outcomeci/cli/contents/old.py",
+    ]
+    # The tree names only a base tree sha: each file is read at the default branch.
+    assert all("ref" not in read.url.params for read in reads)
+    compared = proposals[0]["compared"]
+    assert compared["path"] == "/repos/outcomeci/cli/git/trees"
+    assert compared["files"] == [
+        {"path": "app/main.py", "change": "modified"},
+        {"path": "app/new.py", "change": "added"},
+        {"path": "old.py", "change": "deleted"},
+    ]
+    diff = compared["diff"]
+    assert "+print('bear down')" in diff and "+app.run()" not in diff
+    assert "--- (a new file)" in diff and "+print('hi')" in diff
+    assert "-legacy = True" in diff and "+++ (deleted)" in diff
+
+
+def test_a_reviewed_tree_write_carries_its_diffs_not_the_whole_files(tmp_path, monkeypatch):
+    broker, proposals = _github(tmp_path, monkeypatch, _tree_github({"a.py": "a = 1\n"}))
+    tree = _tree(
+        _blob("a.py", "a = 2\n"),
+        _blob("b.py", "b = 1\n"),
+        {"path": "c.py", "mode": "100644", "type": "blob", "sha": None},
+        {"path": "d.py", "mode": "100755", "type": "blob", "sha": "existing-blob"},
+    )
+    broker.execute("github.write", tree, step="fix")
+
+    shown = proposals[0]["request"]
+    assert shown["body"]["base_tree"] == "abc123"
+    first, second, deleted, kept = shown["body"]["tree"]
+    for entry in (first, second):
+        assert entry["content"]["omitted"] == "shown as the diff in compared"
+        assert set(entry["content"]) == {"omitted", "sha256", "bytes"}
+        assert entry["mode"] == "100644" and entry["type"] == "blob"
+    assert [first["path"], second["path"]] == ["a.py", "b.py"]
+    assert deleted == tree["body"]["tree"][2] and kept == tree["body"]["tree"][3]
+    assert proposals[0]["compared"]["files"][2:] == [
+        {"path": "c.py", "change": "deleted", "note": "no current copy"},
+        {"path": "d.py", "note": "not compared: the entry carries no new content"},
+    ]
+    # The digest still names the full request the broker will send.
+    journal = json.loads((tmp_path / "journal.json").read_text())
+    (call,) = journal["calls"].values()
+    assert proposals[0]["proposal_sha256"] == call["proposal_sha256"]
+    assert call["request"]["body"] == tree["body"]
+
+
+def test_a_tree_past_the_entry_limit_notes_the_files_it_did_not_compare(tmp_path, monkeypatch):
+    reads: list = []
+    broker, proposals = _github(tmp_path, monkeypatch, _tree_github({}, reads))
+    limit = sentry.integrations.COMPARED_ENTRIES
+    tree = _tree(*(_blob(f"m{index}.py", f"x = {index}\n") for index in range(limit + 3)))
+    broker.execute("github.write", tree, step="fix")
+
+    compared = proposals[0]["compared"]
+    assert len(reads) == limit and len(compared["files"]) == limit
+    assert compared["note"].startswith(f"3 more entries past the first {limit}")
+    entries = proposals[0]["request"]["body"]["tree"]
+    assert all("omitted" in entry["content"] for entry in entries[:limit])
+    # A file the reviewer has no diff for keeps its content.
+    assert [entry["content"] for entry in entries[limit:]] == [
+        f"x = {index}\n" for index in range(limit, limit + 3)
+    ]
+
+
+def test_a_tree_stops_reading_files_once_its_diffs_reach_the_limit(tmp_path, monkeypatch):
+    reads: list = []
+    broker, proposals = _github(tmp_path, monkeypatch, _tree_github({}, reads))
+    large = "x = 1\n" * 8_000  # about 48 KB of diff, past the limit alone
+    tree = _tree(_blob("big.py", large), _blob("small.py", "y = 2\n"))
+    broker.execute("github.write", tree, step="fix")
+
+    compared = proposals[0]["compared"]
+    assert len(reads) == 1 and compared["truncated"] is True
+    assert len(compared["diff"]) == sentry.integrations.DIFF_LIMIT
+    assert compared["files"][1] == {
+        "path": "small.py",
+        "note": "not compared: the diff limit was reached",
+    }
+    big, small = proposals[0]["request"]["body"]["tree"]
+    assert "omitted" in big["content"] and small["content"] == "y = 2\n"
+
+
+def test_a_tree_entry_outside_the_repository_is_not_read(tmp_path, monkeypatch):
+    reads: list = []
+    broker, proposals = _github(tmp_path, monkeypatch, _tree_github({}, reads))
+    broker.execute("github.write", _tree(_blob("../../other/x.py", "x\n")), step="fix")
+
+    assert reads == []
+    assert proposals[0]["compared"]["files"] == [
+        {"path": "../../other/x.py", "note": "not compared: not a plain file path"}
+    ]
+    assert proposals[0]["request"]["body"]["tree"][0]["content"] == "x\n"
+
+
 def _journal_with(tmp_path: Path, calls: dict, events: list) -> Path:
     journal = tmp_path / ".outcomeci" / ".broker" / "run-1" / "journal.json"
     journal.parent.mkdir(parents=True)

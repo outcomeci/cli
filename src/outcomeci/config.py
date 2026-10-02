@@ -357,22 +357,37 @@ def _compare(item: dict[str, Any], field: str) -> dict[str, Any]:
         raise ConfigError(f"{field}.compare must be a list")
     for index, rule in enumerate(compare):
         rule = _mapping(rule, f"{field}.compare[{index}]")
-        paths = [rule.get("proposed"), rule.get("current")]
+        paths = [rule.get("current")]
         if rule.get("ref") is not None:
             paths.append(rule["ref"])
+        # A write of several files names each entry's fields, which are not body paths.
+        entries = rule.get("entries") is not None
+        paths.append(rule.get("entries") if entries else rule.get("proposed"))
+        entry_fields = [rule.get("entry_path"), rule.get("proposed"), rule.get("current_path")]
         if (
             not all(isinstance(path, str) and path.startswith("body") for path in paths)
             or rule.get("encoding") not in {"base64", "text"}
+            or rule.get("current_encoding") not in {None, "base64", "text"}
             or not isinstance(rule.get("methods"), list)
+            or (entries and not all(isinstance(item, str) and item for item in entry_fields))
+            or (entries and not isinstance(rule.get("deletion"), str | None))
         ):
             raise ConfigError(
                 f"{field}.compare[{index}] needs methods, proposed, current and optional ref "
-                "body paths, and a base64 or text encoding"
+                "body paths, and a base64 or text encoding; compared entries also name "
+                "entry_path and current_path"
             )
         try:
-            re.compile(str(rule.get("path")))
+            pattern = re.compile(str(rule.get("path")))
         except re.error as exc:
             raise ConfigError(f"{field}.compare[{index}].path is not a pattern") from exc
+        if entries:
+            try:
+                rule["current_path"].format(**dict.fromkeys(pattern.groupindex, "x"), file="x")
+            except (KeyError, IndexError, ValueError) as exc:
+                raise ConfigError(
+                    f"{field}.compare[{index}].current_path names a field its path does not"
+                ) from exc
     return {"compare": compare}
 
 
