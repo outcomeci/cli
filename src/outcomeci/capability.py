@@ -75,9 +75,10 @@ class Broker:
                         "separately; judge the proposal against this policy only.\n"
                         "context.inputs is everything this step was given, such as a plan "
                         "its requester approved in discussion, and is what it must do.\n"
-                        "Where the proposal replaces a file, `compared` is its diff "
-                        "against the current copy: judge the lines it changes, not the "
-                        "whole file."
+                        "Where the proposal replaces a file, or several, `compared` is "
+                        "the diff against each current copy, with `compared.files` "
+                        "listing each file of a write of several: judge the lines it "
+                        "changes, not the whole file."
                     ),
                     "policy": node["policy"],
                 }

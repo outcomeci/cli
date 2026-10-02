@@ -176,3 +176,32 @@ def test_field_order_does_not_change_the_revision(tmp_path: Path) -> None:
     ]
     path.write_text(yaml.safe_dump(value, sort_keys=False))
     assert compile_workflow(path)["workflow_revision"] == first
+
+
+TREE_COMPARE = {
+    "methods": ["POST"],
+    "path": r"^/repos/(?P<owner>[^/]+)/(?P<repo>[^/]+)/git/trees$",
+    "proposed": "content",
+    "current": "body.content",
+    "ref": None,
+    "encoding": "text",
+    "current_encoding": "base64",
+    "entries": "body.tree",
+    "entry_path": "path",
+    "deletion": "sha",
+    "current_path": "/repos/{owner}/{repo}/contents/{file}",
+}
+
+
+def test_a_compare_of_several_files_names_its_entries() -> None:
+    from outcomeci.config import _compare
+
+    assert _compare({"compare": [TREE_COMPARE]}, "op") == {"compare": [TREE_COMPARE]}
+    for broken in (
+        {"entry_path": None},
+        {"entries": "tree"},
+        {"current_encoding": "hex"},
+        {"current_path": "/repos/{org}/contents/{file}"},
+    ):
+        with pytest.raises(ConfigError):
+            _compare({"compare": [{**TREE_COMPARE, **broken}]}, "op")
