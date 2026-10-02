@@ -439,18 +439,13 @@ class IntegrationExecutor:
             "requests_executed": False,
         }
 
-    def compared(
-        self, capability: str, inputs: Mapping[str, Any], *, step: str
-    ) -> dict[str, Any] | None:
-        """A write that replaces a file, as a policy reviewer sees it: a unified
-        diff against the file's current copy, which this reads with a GET to the
-        same path. None when the operation declares no comparison for the call."""
+    def _compare_rule(self, capability: str, inputs: Mapping[str, Any]) -> dict[str, Any] | None:
         integration_name, operation_name = capability.split(".", 1)
         integration = self.compiled["workflow"]["spec"]["integrations"][integration_name]
         operation = integration["operations"].get(operation_name) or {}
         method = str(inputs.get("method", "")).upper()
         path = str(inputs.get("path", "")).split("?", 1)[0]
-        rule = next(
+        return next(
             (
                 item
                 for item in operation.get("compare", [])
@@ -458,6 +453,21 @@ class IntegrationExecutor:
             ),
             None,
         )
+
+    def compared_field(self, capability: str, inputs: Mapping[str, Any]) -> str | None:
+        """The request field a comparison shows as a diff, such as `body.content`
+        for a file write; None when the operation declares no comparison."""
+        rule = self._compare_rule(capability, inputs)
+        return rule["proposed"] if rule else None
+
+    def compared(
+        self, capability: str, inputs: Mapping[str, Any], *, step: str
+    ) -> dict[str, Any] | None:
+        """A write that replaces a file, as a policy reviewer sees it: a unified
+        diff against the file's current copy, which this reads with a GET to the
+        same path. None when the operation declares no comparison for the call."""
+        path = str(inputs.get("path", "")).split("?", 1)[0]
+        rule = self._compare_rule(capability, inputs)
         if rule is None:
             return None
         proposed = _decoded(_found(inputs.get("body"), rule["proposed"]), rule["encoding"])

@@ -88,6 +88,46 @@ REVIEW_RESULT = {
 }
 
 
+# A receipt names an earlier call; it does not repeat it. A request body (a
+# whole file, for a commit) is summarized, and long text is cut, so a review's
+# input stays small however many calls the agent has made.
+RECEIPT_TEXT_LIMIT = 500
+
+
+def _summary(value: Any) -> dict[str, Any]:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode()
+    return {"sha256": hashlib.sha256(encoded).hexdigest(), "bytes": len(encoded)}
+
+
+def _receipt_request(request: Mapping[str, Any]) -> dict[str, Any]:
+    """An earlier request as a reviewer weighs it: what it did, not its content."""
+    compact: dict[str, Any] = {}
+    for key, item in request.items():
+        if key == "body" and item is not None:
+            compact[key] = _summary(item)
+        elif isinstance(item, str) and len(item) > RECEIPT_TEXT_LIMIT:
+            compact[key] = item[:RECEIPT_TEXT_LIMIT] + " [truncated]"
+        else:
+            compact[key] = item
+    return compact
+
+
+def _without_compared(request: Mapping[str, Any], field: str | None) -> dict[str, Any]:
+    """The request with the field its diff already shows replaced by a summary,
+    so a file write is reviewed as its diff rather than as the whole file twice."""
+    if not field or not field.startswith("body.") or not isinstance(request.get("body"), dict):
+        return dict(request)
+    *parents, leaf = field.removeprefix("body.").split(".")
+    body = json.loads(json.dumps(request["body"], default=str))
+    holder = body
+    for part in parents:
+        holder = holder.get(part) if isinstance(holder, dict) else None
+    if not isinstance(holder, dict) or leaf not in holder:
+        return dict(request)
+    holder[leaf] = {"omitted": "shown as the diff in compared", **_summary(holder[leaf])}
+    return {**request, "body": body}
+
+
 def digest(value: Any) -> str:
     return hashlib.sha256(
         json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
@@ -425,10 +465,17 @@ class PolicyExecutor:
                 )
                 if reviewed:
                     compared = self.executor.compared(capability, request, step=step)
+                    shown = (
+                        _without_compared(
+                            request, self.executor.compared_field(capability, request)
+                        )
+                        if compared and "diff" in compared
+                        else request
+                    )
                     review = self.reviewer(
                         {
                             "proposal_sha256": fingerprint,
-                            "request": request,
+                            "request": shown,
                             **({"compared": compared} if compared else {}),
                             "policy": policy,
                             "context": self.context,
@@ -438,8 +485,10 @@ class PolicyExecutor:
                             # would read as what this one must do.
                             "receipts": [
                                 {
-                                    key: call.get(key)
-                                    for key in ("capability", "step", "status", "request")
+                                    "capability": call.get("capability"),
+                                    "step": call.get("step"),
+                                    "status": call.get("status"),
+                                    "request": _receipt_request(call.get("request") or {}),
                                 }
                                 for call in state["calls"].values()
                                 if call.get("invocation") == self.invocation
