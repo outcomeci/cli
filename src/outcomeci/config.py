@@ -29,6 +29,7 @@ AUTH_KINDS = {
 }
 HTTP_METHODS = {"DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"}
 SIDE_EFFECTS = {"read", "create", "update", "delete", "execute"}
+GRANT_KINDS = ("field", "path_prefix", "response_in", "query_qualifier")
 APPROVAL_POLICIES = {"none", "required", "inherit"}
 IDEMPOTENCY_POLICIES = {"none", "supported", "required"}
 TRIGGER_TYPES = {"manual", "email.received", "webhook.received", "cron"}
@@ -383,11 +384,13 @@ def _grantable(item: dict[str, Any], field: str) -> dict[str, Any]:
         grantable = _mapping(item["grantable"], f"{field}.grantable")
         for name, rule in grantable.items():
             rule = _mapping(rule, f"{field}.grantable.{name}")
-            if sum(kind in rule for kind in ("field", "path_prefix", "response_in")) != 1:
+            if sum(kind in rule for kind in GRANT_KINDS) != 1:
                 raise ConfigError(
-                    f"{field}.grantable.{name} sets exactly one of field, path_prefix "
-                    "or response_in"
+                    f"{field}.grantable.{name} sets exactly one of field, path_prefix, "
+                    "response_in or query_qualifier"
                 )
+            if "query_qualifier" in rule:
+                _query_qualifier(rule, f"{field}.grantable.{name}")
             paths = rule.get("response_in", ["body"])
             if (
                 not isinstance(paths, list)
@@ -408,6 +411,32 @@ def _grantable(item: dict[str, Any], field: str) -> dict[str, Any]:
                 raise ConfigError(f"{field}.deny[{index}].path is not a pattern") from exc
         result["deny"] = deny
     return result
+
+
+def _query_qualifier(rule: dict[str, Any], field: str) -> None:
+    """A search parameter scoped by a qualifier term, such as `repo:{owner}/{name}`."""
+    scope = _mapping(rule["query_qualifier"], f"{field}.query_qualifier")
+    fields = rule.get("value_fields")
+    names = scope.get("exclusive")
+    operators = scope.get("operators", [])
+    term = scope.get("term")
+    if (
+        not isinstance(scope.get("param"), str)
+        or not scope["param"]
+        or not isinstance(term, str)
+        or not re.fullmatch(r"[a-z][a-z_-]*:\S+", term)
+        or not isinstance(fields, list)
+        or not fields
+        or not all(isinstance(item, str) and "{" + item + "}" in term for item in fields)
+        or not isinstance(names, list)
+        or not isinstance(operators, list)
+        or not all(isinstance(item, str) and item for item in [*names, *operators])
+        or term.split(":", 1)[0] not in names
+    ):
+        raise ConfigError(
+            f"{field}.query_qualifier needs a param, a name:value term over value_fields, "
+            "exclusive qualifier names including the term's own, and operators"
+        )
 
 
 def _download(response: dict[str, Any], field: str) -> dict[str, Any]:
@@ -480,6 +509,11 @@ def _operation(value: Any, field: str) -> dict[str, Any]:
         raise ConfigError(f"{field}.policy.approval is unsupported")
     if idempotency not in IDEMPOTENCY_POLICIES:
         raise ConfigError(f"{field}.policy.idempotency is unsupported")
+    if any(
+        isinstance(rule, dict) and "query_qualifier" in rule
+        for rule in _mapping(item.get("grantable", {}), f"{field}.grantable").values()
+    ):
+        raise ConfigError(f"{field}: only an operation that chooses its request scopes a query")
     return {
         "description": str(item.get("description", "")).strip(),
         "input": _schema(item.get("input"), f"{field}.input"),

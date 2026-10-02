@@ -641,3 +641,195 @@ def test_a_denied_change_tells_the_agent_the_reviewers_reason(tmp_path, monkeypa
         "policy did not approve this exact proposal (deny): "
         "It logs a different message than the plan asks for."
     )
+
+
+def _search(tmp_path: Path, repo="outcomeci/api") -> PolicyExecutor:
+    return _policy(tmp_path, [{"capability": "github.search", "args": {"repo": repo}, "as": None}])
+
+
+def _query(q=None, path="/search/code") -> dict:
+    return {"method": "GET", "path": path, **({"query": {"q": q}} if q is not None else {})}
+
+
+@pytest.mark.parametrize("repo", [{"owner": "outcomeci", "name": "api"}, "outcomeci/api"])
+def test_search_grants_append_the_repo_qualifier_when_absent(tmp_path, repo):
+    policy = _search(tmp_path, repo)
+    request, _, _ = policy._apply_grants("github.search", _query("parse_config language:python"))
+    assert request["query"] == {"q": "parse_config language:python repo:outcomeci/api"}
+    assert policy._apply_grants("github.search", _query())[0]["query"] == {
+        "q": "repo:outcomeci/api"
+    }
+    other = {**_query("x"), "query": {"q": "x", "per_page": 50}}
+    assert policy._apply_grants("github.search", other)[0]["query"] == {
+        "q": "x repo:outcomeci/api",
+        "per_page": 50,
+    }
+
+
+@pytest.mark.parametrize(
+    "q", ["repo:outcomeci/api parse", "parse REPO:OutComeCI/API", "a  repo:outcomeci/api  b"]
+)
+def test_search_grants_accept_the_granted_qualifier_in_any_case(tmp_path, q):
+    request, _, _ = _search(tmp_path)._apply_grants("github.search", _query(q))
+    assert request["query"] == {"q": q}
+
+
+@pytest.mark.parametrize(
+    "q",
+    [
+        "x repo:outcomeci/api repo:outcomeci/other",
+        "x repo:outcomeci/other",
+        "x org:evil",
+        "x ORG:evil repo:outcomeci/api",
+        "x user:someone repo:outcomeci/api",
+        "x owner:someone",
+        "x -repo:outcomeci/api",
+        "x (org:evil) repo:outcomeci/api",
+        "x repo: outcomeci/other",
+        'x "repo:outcomeci/other"',
+    ],
+)
+def test_search_grants_refuse_any_other_scope_qualifier(tmp_path, q):
+    with pytest.raises(IntegrationError, match="q must search only repo:outcomeci/api"):
+        _search(tmp_path)._apply_grants("github.search", _query(q))
+
+
+@pytest.mark.parametrize(
+    "q", ["x OR y repo:outcomeci/api", "x NOT repo:outcomeci/api", "(x OR y) repo:outcomeci/api"]
+)
+def test_search_grants_refuse_operators_that_widen_or_negate_the_scope(tmp_path, q):
+    with pytest.raises(IntegrationError, match="q cannot use NOT or OR"):
+        _search(tmp_path)._apply_grants("github.search", _query(q))
+
+
+def test_search_grants_refuse_a_query_hidden_in_the_path_or_not_a_string(tmp_path):
+    policy = _search(tmp_path)
+    with pytest.raises(IntegrationError, match="q goes in query, not in the path"):
+        policy._apply_grants("github.search", _query(path="/search/code?q=org:evil"))
+    with pytest.raises(IntegrationError, match="query.q must be a string"):
+        policy._apply_grants("github.search", _query(["a", "org:evil"]))
+
+
+def test_a_search_grant_that_did_not_resolve_refuses_every_call(tmp_path):
+    with pytest.raises(IntegrationError, match="repo did not resolve"):
+        _search(tmp_path, None)._apply_grants("github.search", _query("x"))
+
+
+@pytest.mark.parametrize(
+    "repo", [{"owner": "o org:evil", "name": "r"}, {"owner": "o", "name": "r)"}, "o /r"]
+)
+def test_a_search_grant_whose_value_is_not_one_term_refuses_every_call(tmp_path, repo):
+    with pytest.raises(IntegrationError, match="repo did not resolve"):
+        _search(tmp_path, repo)._apply_grants("github.search", _query("x"))
+
+
+def test_search_grants_pick_the_repo_the_query_names(tmp_path):
+    policy = _policy(
+        tmp_path,
+        [
+            {"capability": "github.search", "args": {"repo": "o/a"}, "as": "a"},
+            {"capability": "github.search", "args": {"repo": "o/b"}, "as": "b"},
+        ],
+    )
+    assert policy._apply_grants("github.search", _query("x repo:o/b"))[1] == "b"
+    assert policy._apply_grants("github.search", _query("x"))[0]["query"] == {"q": "x repo:o/a"}
+
+
+def _searching(tmp_path: Path, monkeypatch, sent: list, grant: dict) -> PolicyExecutor:
+    """A broker over a compiled v1 workflow whose for_each step searches each
+    target's repository, with the grant resolved for one target."""
+    import yaml
+
+    from outcomeci import v1_runtime
+
+    document = {
+        "apiVersion": "outcomeci.workflow/v1",
+        "trigger": "manual",
+        "secrets": {"github": "vault:github/pat"},
+        "apis": {"github": {"uses": "github", "auth": "secrets.github"}},
+        "steps": [
+            {
+                "find": {
+                    "reason": "Find the code.",
+                    "for_each": "trigger.targets as target",
+                    "can": [grant],
+                }
+            }
+        ],
+    }
+    path = tmp_path / "search.outcome.yaml"
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    compiled = compile_workflow(path)
+    block = compiled["instructions"]["steps"]["find"]["v1"]
+    grants = v1_runtime.resolve_grants(
+        tmp_path, {}, block, bound={"target": {"repo": {"owner": "outcomeci", "name": "api"}}}
+    )
+    monkeypatch.setattr(sentry.integrations, "_safe_destination", lambda url, allow: None)
+
+    def handler(request):
+        sent.append(request)
+        return httpx.Response(200, json={"total_count": 1, "items": [{"path": "src/app.py"}]})
+
+    executor = IntegrationExecutor(
+        compiled,
+        resolver=lambda ref: "ghp-test-credential",
+        transport=httpx.MockTransport(handler),
+        reviewed=True,
+    )
+    return PolicyExecutor(
+        executor,
+        tmp_path / "broker",
+        {},
+        # Searches are reads, which no reviewer sees; anything else is allowed
+        # here so the broker's own checks are what refuse it.
+        reviewer=lambda proposal: {
+            "decision": "allow",
+            "proposal_sha256": proposal["proposal_sha256"],
+            "reason": "ok",
+        },
+        grants=grants,
+        step_policy={"content": "p", "policy": {"runner": "codex"}},
+    )
+
+
+def test_a_v1_step_searches_only_its_granted_repository(tmp_path, monkeypatch):
+    sent: list = []
+    broker = _searching(tmp_path, monkeypatch, sent, {"github.search": {"repo": "target.repo"}})
+    result = broker.execute("github.search", _query("parse_config"), step="find")
+    assert result["ok"] is True
+    assert result["output"]["result"]["items"] == [{"path": "src/app.py"}]
+    (request,) = sent
+    assert request.url.path == "/search/code"
+    assert request.url.params.get_list("q") == ["parse_config repo:outcomeci/api"]
+    journal = json.loads((tmp_path / "broker" / "journal.json").read_text())
+    (call,) = journal["calls"].values()
+    assert call["request"]["query"] == {"q": "parse_config repo:outcomeci/api"}
+
+    for inputs, message in [
+        (_query("x org:outcomeci"), "q must search only repo:outcomeci/api"),
+        (_query("x", path="/search/commits"), "search covers code only"),
+        (_query("x", path="/repos/outcomeci/api/contents/a.py"), "search covers code only"),
+        ({**_query("x"), "method": "POST"}, "input is invalid"),
+    ]:
+        with pytest.raises(IntegrationError, match=message):
+            broker.execute("github.search", inputs, step="find")
+    assert len(sent) == 1
+    denied = [
+        item
+        for item in journal_events(tmp_path / "broker")
+        if item["event_type"] == "permission.denied"
+    ]
+    assert any("q must search only" in item["message"] for item in denied)
+
+
+def test_an_unscoped_search_grant_searches_anything_its_token_can(tmp_path, monkeypatch):
+    sent: list = []
+    broker = _searching(tmp_path, monkeypatch, sent, "github.search")
+    broker.execute("github.search", _query("x org:outcomeci"), step="find")
+    assert sent[0].url.params["q"] == "x org:outcomeci"
+    with pytest.raises(IntegrationError, match="search covers code only"):
+        broker.execute("github.search", _query("x", path="/search/issues"), step="find")
+
+
+def journal_events(directory: Path) -> list[dict]:
+    return json.loads((directory / "journal.json").read_text()).get("events", [])

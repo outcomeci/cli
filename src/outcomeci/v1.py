@@ -273,7 +273,7 @@ def _grants(value: Any, apis: dict[str, dict[str, Any]], scope: _Scope, field: s
                 )
             reference = scope.reference(raw, f"{entry_field}.{name}")
             rule = grantable[name]
-            if reference is None and "path_prefix" in rule:
+            if reference is None and ("path_prefix" in rule or "query_qualifier" in rule):
                 raw = _path_value(raw, rule, f"{entry_field}.{name}")
             if reference is not None:
                 rules[name] = reference
