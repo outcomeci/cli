@@ -15,9 +15,8 @@ dependencies = [
     "httpx>=0.27",
     "jsonschema>=4.23",
     "pyte>=0.8",
-    # The connector contract the compiler and executor read: 0.2 declares the
-    # credential kinds each provider accepts.
-    "outcomeci-connectors>=0.4,<0.5",
+    # Preserve current connector features and accept the next OAuth metadata release.
+    "outcomeci-connectors>=0.4,<0.6",
 ]
 
 [project.scripts]

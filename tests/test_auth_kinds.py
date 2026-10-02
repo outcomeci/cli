@@ -264,6 +264,54 @@ def test_a_rotating_provider_refuses_to_refresh_where_it_cannot_save(tmp_path: P
     assert server.requests == []
 
 
+def test_interactive_authorization_metadata_reuses_unattended_refresh(tmp_path: Path) -> None:
+    """Browser consent is upstream; runners only receive the Vault refresh credential."""
+    stored = typed(
+        "oauth2",
+        {"client_secret": "app-secret", "refresh_token": "refresh-before"},
+        {"client_id": "app-id", "grant_type": "refresh_token"},
+    )
+    saved = []
+
+    class Vault:
+        def __call__(self, _reference):
+            return stored
+
+        def rotate(self, reference, secrets):
+            saved.append((reference, secrets))
+            stored["secrets"].update(secrets)
+
+    entry = oauth2(
+        authorization_url="https://auth.example.test/authorize",
+        pkce=True,
+        grant_types=["refresh_token"],
+        rotates_refresh_token=True,
+        scopes=["tweet.read", "tweet.write", "users.read", "offline.access"],
+    )
+    entry["credential"] = ["client_id", "client_secret", "refresh_token"]
+    server = Server(
+        tokens=[
+            {
+                "access_token": "access-after",
+                "refresh_token": "refresh-after",
+                "expires_in": 3600,
+            }
+        ]
+    )
+    results = run(workflow(tmp_path, [entry]), None, server, resolver=Vault(), times=2)
+    [exchange] = server.token_requests()
+    assert str(exchange.url) == TOKEN_URL
+    assert parse_qs(exchange.content.decode()) == {
+        "grant_type": ["refresh_token"],
+        "refresh_token": ["refresh-before"],
+        "scope": ["tweet.read tweet.write users.read offline.access"],
+    }
+    assert saved == [("vault:tickets", {"refresh_token": "refresh-after"})]
+    assert len(server.api_requests()) == 2
+    for secret in ("app-secret", "refresh-before", "refresh-after", "access-after"):
+        assert secret not in json.dumps(results)
+
+
 def test_a_token_endpoint_answer_without_a_token_fails(tmp_path: Path) -> None:
     server = Server(tokens=[{"ok": False, "error": "invalid_refresh_token"}])
     credential = typed("oauth2", {"client_secret": "cs"}, {"client_id": "cid"})
