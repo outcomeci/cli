@@ -15,8 +15,8 @@ dependencies = [
     "httpx>=0.27",
     "jsonschema>=4.23",
     "pyte>=0.8",
-    # Preserve current connector features and accept the next OAuth metadata release.
-    "outcomeci-connectors>=0.4,<0.6",
+    # GitHub and Slack account authorization requires the 0.6 connector contracts.
+    "outcomeci-connectors>=0.6,<0.7",
 ]
 
 [project.scripts]
