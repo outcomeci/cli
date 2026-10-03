@@ -218,7 +218,7 @@ def _token_response(response: httpx.Response, connector: str) -> dict[str, Any]:
             "integration.token_exchange_failed",
             f"{connector} token endpoint returned no JSON",
         ) from exc
-    if not isinstance(body, dict):
+    if not isinstance(body, dict) or (connector == "slack" and body.get("ok") is not True):
         raise AuthError("integration.token_exchange_failed", f"{connector} returned no token")
     return body
 
@@ -378,11 +378,13 @@ class Authenticator:
                 data["client_secret"] = client_secret
             else:
                 request_auth = (client_id, client_secret)
-            if scope:
+            if scope and connector != "slack":
                 data["scope"] = scope
             if audience:
                 data["audience"] = str(audience)
-        response = client.post(token_url, data=data, auth=request_auth)
+        response = client.post(
+            token_url, data=data, auth=request_auth, headers={"Accept": "application/json"}
+        )
         body = _token_response(response, connector)
         token = body.get("access_token")
         if not isinstance(token, str) or not token:

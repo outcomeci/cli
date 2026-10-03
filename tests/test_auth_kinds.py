@@ -435,3 +435,98 @@ def test_doctor_reports_the_kind_a_credential_authenticates_as(tmp_path: Path) -
         compiled, resolver=lambda _reference: typed("basic", {"username": "u", "password": "p"})
     )
     assert report["ok"] is False
+
+
+def test_github_refresh_requests_json_and_persists_rotation(tmp_path: Path) -> None:
+    from outcomeci_connectors.providers.github import PROVIDER
+
+    entry = next(
+        item for item in PROVIDER.contract()["auth"]["accepts"] if item["kind"] == "oauth2"
+    )
+    stored = typed(
+        "oauth2",
+        {"client_secret": "cs", "refresh_token": "rt-1"},
+        {"client_id": "cid", "grant_type": "refresh_token"},
+    )
+    requests = []
+    writes = []
+
+    class Vault:
+        def __call__(self, _reference):
+            return json.loads(json.dumps(stored))
+
+        def rotate(self, reference, secrets):
+            writes.append((reference, secrets))
+            stored["secrets"].update(secrets)
+
+    def server(request):
+        requests.append(request)
+        if request.url.host == "github.com":
+            assert request.headers["Accept"] == "application/json"
+            assert "Authorization" not in request.headers
+            form = parse_qs(request.content.decode())
+            assert form["client_id"] == ["cid"]
+            assert form["client_secret"] == ["cs"]
+            assert form["grant_type"] == ["refresh_token"]
+            assert form["refresh_token"] == ["rt-1"]
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "at-1",
+                    "refresh_token": "rt-2",
+                    "expires_in": 28800,
+                    "scope": "repo",
+                },
+            )
+        assert writes == [("vault:tickets", {"refresh_token": "rt-2"})]
+        assert request.headers["Authorization"] == "Bearer at-1"
+        return httpx.Response(200, json={"ok": True})
+
+    run(workflow(tmp_path, [entry]), None, server, resolver=Vault(), times=2)
+    assert len([request for request in requests if request.url.host == "github.com"]) == 1
+
+
+@pytest.mark.parametrize("ok", [True, False])
+def test_slack_refresh_uses_bot_token_and_saves_rotation(ok):
+    from outcomeci_connectors.providers.slack import PROVIDER
+
+    from outcomeci.auth import Authenticator, AuthError
+
+    writes = []
+    auth = Authenticator(rotate=lambda reference, secrets: writes.append((reference, secrets)))
+    contract = {**PROVIDER.contract()["auth"], "connector": "slack", "credential": "vault:slack"}
+    credential = typed(
+        "oauth2",
+        {"client_secret": "cs", "refresh_token": "rt-1"},
+        {"client_id": "cid", "grant_type": "refresh_token"},
+    )
+
+    def server(request):
+        assert request.url == "https://slack.com/api/oauth.v2.access"
+        assert request.headers["Authorization"] == "Basic " + base64.b64encode(b"cid:cs").decode()
+        assert parse_qs(request.content.decode()) == {
+            "grant_type": ["refresh_token"],
+            "refresh_token": ["rt-1"],
+        }
+        return httpx.Response(
+            200,
+            json={
+                "ok": ok,
+                "access_token": "bot-token",
+                "refresh_token": "rt-2",
+                "token_type": "bot",
+                "expires_in": 43200,
+            },
+        )
+
+    headers = {}
+    with httpx.Client(transport=httpx.MockTransport(server)) as client:
+        if ok:
+            auth.apply(client, contract, credential, headers, {})
+            assert headers["Authorization"] == "Bearer bot-token"
+            assert writes == [("vault:slack", {"refresh_token": "rt-2"})]
+        else:
+            with pytest.raises(AuthError):
+                auth.apply(client, contract, credential, headers, {})
+            assert not writes
+            assert not headers
