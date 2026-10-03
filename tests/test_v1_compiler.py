@@ -52,7 +52,7 @@ def test_a_connection_names_its_credential_and_the_kinds_its_connector_accepts(t
     github = connections["github"]["auth"]
     assert github["connector"] == "github"
     assert github["credential"] == "vault:github/pat"
-    assert [entry["kind"] for entry in github["accepts"]] == ["token", "app_installation"]
+    assert [entry["kind"] for entry in github["accepts"]] == ["token", "app_installation", "oauth2"]
     assert [entry["kind"] for entry in connections["slack"]["auth"]["accepts"]] == [
         "token",
         "oauth2",
