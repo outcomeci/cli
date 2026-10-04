@@ -16,7 +16,7 @@ dependencies = [
     "jsonschema>=4.23",
     "pyte>=0.8",
     # LinkedIn OAuth and selectable app scopes require the 0.8 connector contracts.
-    "outcomeci-connectors>=0.8,<0.9",
+    "outcomeci-connectors>=0.10,<0.11",
 ]
 
 [project.scripts]
