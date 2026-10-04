@@ -70,6 +70,20 @@ resolves the credential, checks the call against the step's grants, and sends
 it. A provider that rotates a refresh token revokes the old one, so the runtime
 saves the new one to the Vault the credential came from before it is used again.
 
+### LinkedIn credentials
+
+The bundled LinkedIn connector uses your own app's client ID, client secret,
+and refresh token. Your app needs approval for the requested scopes and for
+programmatic refresh tokens. Save the selected scopes with repeated `--scope`
+options on an OAuth2 Vault credential using `--grant-type refresh_token`.
+Pass the client secret and refresh token through `--secrets-json-stdin`.
+The broker validates the selected scopes against the connector declaration and
+uses only that subset when refreshing access. Scope choices work with both the
+local and workspace Vault, without relying on the web UI.
+
+This connector currently declares account authorization only; LinkedIn API
+operations are not yet available. The CLI does not initiate browser consent.
+
 ## Run a workflow
 
 `oci workflow run` runs the workflow in `--dir` inside the runner container. It
