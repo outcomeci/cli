@@ -15,8 +15,8 @@ dependencies = [
     "httpx>=0.27",
     "jsonschema>=4.23",
     "pyte>=0.8",
-    # Google Analytics and receiver setup metadata require the 0.7 connector contracts.
-    "outcomeci-connectors>=0.7,<0.8",
+    # LinkedIn OAuth and selectable app scopes require the 0.8 connector contracts.
+    "outcomeci-connectors>=0.8,<0.9",
 ]
 
 [project.scripts]

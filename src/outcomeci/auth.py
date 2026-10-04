@@ -170,8 +170,29 @@ def _https(url: Any, name: str) -> str:
 
 def _scopes(entry: Mapping[str, Any], credential: Credential) -> str | None:
     scopes = list(entry.get("scopes") or [])
-    configured = credential.configuration.get("scopes") or credential.configuration.get("scope")
-    if not scopes and configured:
+    configured = credential.configuration.get("scopes")
+    if configured is None:
+        configured = credential.configuration.get("scope")
+    optional = entry.get("optional_scopes") or []
+    if optional:
+        selected = scopes if configured is None else configured
+        if isinstance(selected, str):
+            selected = selected.split()
+        if (
+            not isinstance(selected, list)
+            or not selected
+            or any(not isinstance(item, str) for item in selected)
+            or len(selected) != len(set(selected))
+            or not set(scopes) <= set(selected)
+            or not set(selected) <= set(scopes + list(optional))
+        ):
+            raise AuthError(
+                "integration.invalid_scopes",
+                "Choose credential scopes supported by the connector and approved for your app",
+                category="configuration",
+            )
+        scopes = selected
+    elif not scopes and configured:
         scopes = configured if isinstance(configured, list) else str(configured).split()
     return " ".join(str(item) for item in scopes) or None
 
@@ -259,6 +280,8 @@ class Authenticator:
         credential = parse(resolved)
         entry = select(auth, credential, reference)
         kind = entry["kind"]
+        if entry.get("optional_scopes"):
+            _scopes(entry, credential)
         sensitive = credential.sensitive()
         if kind == "token":
             value = credential.value()
