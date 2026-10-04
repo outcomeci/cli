@@ -9,7 +9,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from .config import ConfigError, compile_workflow
+from .config import API_VERSION, ConfigError, compile_workflow
 from .process import ExecutionError, invoke
 from .security import private_path
 
@@ -38,6 +38,40 @@ CONSUMER_KEYS = {
     "workspace_id",
 }
 GENERIC_VALUES = {"requester", "owner", "builder", "reviewer", "user", "team", "channel"}
+
+
+class PublicationValidationError(ExecutionError):
+    """A safe failure category plus private diagnostics for the local repair step."""
+
+    def __init__(self, category: str, message: str):
+        super().__init__(message, False)
+        self.category = category
+
+
+def _runtime_references(source: Path) -> set[str]:
+    """Use the compiler's resolved references, rather than guessing from strings."""
+    compiled = compile_workflow(source)
+    references: set[str] = set()
+
+    def walk(value: Any) -> None:
+        if isinstance(value, dict):
+            if set(value) == {"ref", "step"} and isinstance(value["ref"], str):
+                references.add(value["ref"])
+            for child in value.values():
+                walk(child)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child)
+
+    walk(compiled["instructions"]["steps"])
+    return references
+
+
+def _privacy_text(content: str) -> str:
+    # These exact namespaces are public language syntax, not a consumer identity.
+    # Leave surrounding/suffix text intact so private values there still fail.
+    content = re.sub(r"(?<![\w.-])" + re.escape(API_VERSION) + r"(?![\w/.-])", "", content)
+    return re.sub(r"(?<![\w.-])\.outcomeci/", "", content)
 
 
 def _copy_package(source: Path, destination: Path) -> Path:
@@ -144,9 +178,9 @@ def _validate_overview(root: Path) -> str:
 def _privacy_gate(root: Path, sensitive_terms: list[str]) -> None:
     failures: set[str] = set()
     terms = [term.strip().casefold() for term in sensitive_terms if term.strip()]
-    for path, content in _text_files(root):
+    for path, content in _text_files(root, include_manifests=True):
         relative = path.relative_to(root).as_posix()
-        folded = content.casefold()
+        folded = _privacy_text(content).casefold()
         if EMAIL.search(content):
             failures.add(f"{relative}: email address")
         if PROVIDER_ID.search(content):
@@ -170,6 +204,7 @@ def _consumer_values(source: Path) -> list[str]:
     except (OSError, ValueError):
         return []
     values: set[str] = set()
+    references = _runtime_references(source)
 
     def walk(value: Any, parent: str | None = None) -> None:
         if isinstance(value, dict):
@@ -181,13 +216,17 @@ def _consumer_values(source: Path) -> list[str]:
         elif isinstance(value, str):
             candidate = value.strip()
             if (
-                parent in CONSUMER_KEYS
-                or candidate.startswith("vault:")
-                or candidate.startswith("https://")
-                or candidate.startswith("http://")
-                or EMAIL.fullmatch(candidate)
-                or PROVIDER_ID.fullmatch(candidate)
-            ) and candidate.casefold() not in GENERIC_VALUES:
+                (
+                    parent in CONSUMER_KEYS
+                    or candidate.startswith("vault:")
+                    or candidate.startswith("https://")
+                    or candidate.startswith("http://")
+                    or EMAIL.fullmatch(candidate)
+                    or PROVIDER_ID.fullmatch(candidate)
+                )
+                and candidate.casefold() not in GENERIC_VALUES
+                and candidate not in references
+            ):
                 values.add(candidate)
 
     walk(document)
@@ -213,15 +252,23 @@ def prepare_publication(
     sensitive_terms: list[str] | None = None,
     container_isolated: bool = False,
 ) -> dict[str, Any]:
-    original_values = _consumer_values(source.resolve())
+    try:
+        original_values = _consumer_values(source.resolve())
+    except ConfigError as exc:
+        raise PublicationValidationError("publication_source_invalid", str(exc)) from exc
     config = _copy_package(source, destination)
     prompt = """Prepare this OutcomeCI workflow package for public reuse.
 
-Edit the copied workflow and its support files in place. Replace every personal or organization-specific value and every value a new consumer must provide: identities, users, groups, channels, email addresses, Vault paths, connection references, repositories, endpoints, provider identifiers, and workspace identifiers. Use safe, valid generic literals so the resulting workflow still compiles. Preserve behavior and never include original sensitive values in your reports.
+Edit the copied workflow and its support files in place. Replace every personal or organization-specific value and every value a new consumer must provide: identities, users, groups, channels, email addresses, Vault paths, connection references, repositories, endpoints, provider identifiers, and workspace identifiers. Use safe, valid generic literals so the resulting workflow still compiles. Preserve runtime references such as trigger.channel, references to earlier step outputs, and required language syntax such as apiVersion and .outcomeci/ paths. These are not consumer-specific literals. Preserve behavior and never include original sensitive values in your reports.
 
 Create .outcomeci/publication-requirements.json as an array of objects with exactly: id, json_path, kind, description, required. Kinds are identity, vault, connection, repository, endpoint, provider, or other. Create .outcomeci/publication-report.json as an array with exactly: requirement, files, reason. Each report item references a requirement id and contains no original value. Do not modify these contracts.
 
 After sanitizing, create or replace .outcomeci/publication-overview.md using only the sanitized workflow and its instruction files as evidence. Write 100–12000 characters of UTF-8 Markdown with a plain-English purpose, steps, inputs and setup, and outputs. Describe only behavior actually specified; do not invent capabilities, benefits, guarantees, results, or setup requirements. Explain human collaboration only if the workflow specifies it. Do not reuse an old overview as evidence. Include no original sensitive values, HTML, links, URLs, or images. This overview will be reviewed by the publisher and shown publicly. Do not access the network or execute the workflow."""
+    terms = [*(sensitive_terms or []), *original_values]
+    prompt += (
+        "\n\nPrivate literal values to remove (keep required language syntax intact): "
+        + json.dumps(terms)
+    )
     invoke(
         agent,
         model,
@@ -232,21 +279,28 @@ After sanitizing, create or replace .outcomeci/publication-overview.md using onl
         excluded_env=set(),
         container_isolated=container_isolated,
     )
-    terms = [*(sensitive_terms or []), *original_values]
 
     def verify():
-        requirements, report = _validate_requirements(destination)
-        _validate_overview(destination)
-        _privacy_gate(destination, terms)
-        return requirements, report, compile_workflow(config)
+        stage = "publication_manifest_invalid"
+        try:
+            requirements, report = _validate_requirements(destination)
+            stage = "publication_overview_invalid"
+            _validate_overview(destination)
+            stage = "publication_privacy_failed"
+            _privacy_gate(destination, terms)
+            stage = "publication_compile_failed"
+            return requirements, report, compile_workflow(config)
+        except (ExecutionError, ConfigError) as exc:
+            raise PublicationValidationError(stage, str(exc)) from exc
 
     try:
         requirements, report, compiled = verify()
-    except (ExecutionError, ConfigError):
+    except PublicationValidationError as exc:
         invoke(
             agent,
             model,
             prompt
+            + f"\n\nValidation failure ({exc.category}): {exc}"
             + "\n\nThe public workflow candidate did not pass OutcomeCI validation. Review the package again, finish replacing every consumer-specific value, repair the workflow so it compiles, and recreate both publication JSON manifests and the overview using the exact contracts above.",
             destination,
             900,

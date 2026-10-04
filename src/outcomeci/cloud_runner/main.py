@@ -23,7 +23,7 @@ import pyte
 
 from ..leases import LeaseResolver
 from ..process import ExecutionError
-from ..publication import REPORT, REQUIREMENTS, prepare_publication
+from ..publication import REPORT, REQUIREMENTS, PublicationValidationError, prepare_publication
 from ..security import private_path
 from .client import CoreClient, CoreError
 from .models import ContractError, Launch
@@ -154,6 +154,8 @@ def discovered_workflow_run_id(root: Path) -> str | None:
 
 def workflow_failure_category(error: Exception) -> str:
     """Return an operator-safe category without emitting workflow or provider output."""
+    if isinstance(error, PublicationValidationError):
+        return error.category
     if isinstance(error, ExecutionError):
         message = str(error).casefold()
         if "authentication" in message or "unauthorized" in message or "oauth" in message:

@@ -282,3 +282,93 @@ def test_publication_repairs_missing_overview(tmp_path: Path, monkeypatch) -> No
     publication.prepare_publication(source / "outcome.yml", destination, agent="codex")
     assert len(attempts) == 2
     assert all("publication-overview.md" in prompt for prompt in attempts)
+
+
+def slack_publication_source(root: Path) -> Path:
+    root.mkdir(parents=True)
+    (root / ".outcomeci").mkdir()
+    source = root / "outcome.yml"
+    source.write_text("""apiVersion: outcomeci.workflow/v1
+trigger: manual
+secrets:
+  slack: vault:private/slack
+apis:
+  slack: {uses: slack, auth: secrets.slack}
+steps:
+  - announce:
+      reason: Post the supplied message to the triggering channel.
+      can:
+        - slack.post: {channel: trigger.channel}
+""")
+    return source
+
+
+def sanitize_slack_package(_agent, _model, _prompt, destination, *_args, **_kwargs):
+    (destination / ".outcomeci").mkdir(exist_ok=True)
+    config = destination / "outcome.yml"
+    config.write_text(config.read_text().replace("vault:private/slack", "vault:shared/slack"))
+    (destination / publication.REQUIREMENTS).write_text("[]")
+    (destination / publication.REPORT).write_text("[]")
+    write_overview(destination)
+
+
+def test_runtime_channel_reference_is_not_a_private_literal(tmp_path):
+    source = slack_publication_source(tmp_path / "source")
+    assert publication._consumer_values(source) == ["vault:private/slack"]
+    source.write_text(source.read_text().replace("trigger.channel", "C123456789"))
+    assert "C123456789" in publication._consumer_values(source)
+
+
+def test_publication_preserves_runtime_behavior_and_platform_syntax(tmp_path, monkeypatch):
+    source = slack_publication_source(tmp_path / "source")
+    destination = tmp_path / "public"
+    monkeypatch.setattr(publication, "invoke", sanitize_slack_package)
+    result = publication.prepare_publication(
+        source, destination, agent="codex", sensitive_terms=["outcomeci"]
+    )
+    content = (destination / "outcome.yml").read_text()
+    assert "trigger.channel" in content
+    assert "outcomeci.workflow/v1" in content
+    assert "vault:private/slack" not in content
+    assert len(result["package_digest"]) == 64
+
+
+@pytest.mark.parametrize(
+    "private_content",
+    [
+        "This belongs to the outcomeci workspace",
+        ".outcomeci/instructions/outcomeci-private.md",
+        "private-outcomeci.workflow/v1",
+        "outcomeci.workflow/v1-private",
+    ],
+)
+def test_namespace_exception_does_not_hide_consumer_content(tmp_path, private_content):
+    (tmp_path / "instructions.md").write_text(private_content)
+    with pytest.raises(ExecutionError, match="sensitive term"):
+        publication._privacy_gate(tmp_path, ["outcomeci"])
+
+
+@pytest.mark.parametrize("path", [publication.REQUIREMENTS, publication.REPORT])
+def test_privacy_checks_cover_public_manifests(tmp_path, path):
+    (tmp_path / ".outcomeci").mkdir()
+    (tmp_path / path).write_text(json.dumps([{"description": "person@example.com"}]))
+    with pytest.raises(ExecutionError, match="email address"):
+        publication._privacy_gate(tmp_path, [])
+
+
+def test_repair_receives_validation_reason_and_failure_has_safe_category(tmp_path, monkeypatch):
+    source = slack_publication_source(tmp_path / "source")
+    destination = tmp_path / "public"
+    prompts = []
+
+    def invoke(_agent, _model, prompt, *args, **kwargs):
+        prompts.append(prompt)
+        sanitize_slack_package(_agent, _model, prompt, *args, **kwargs)
+        (destination / publication.REQUIREMENTS).write_text("{}")
+
+    monkeypatch.setattr(publication, "invoke", invoke)
+    with pytest.raises(publication.PublicationValidationError) as caught:
+        publication.prepare_publication(source, destination, agent="codex")
+    assert caught.value.category == "publication_manifest_invalid"
+    assert "publication manifests must be JSON arrays" in prompts[1]
+    assert "trigger.channel" not in prompts[0].split("Private literal values to remove")[1]

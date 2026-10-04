@@ -1570,3 +1570,45 @@ class FinalReportTests(unittest.TestCase):
         self.assertEqual([item["status"] for item in completions], ["failed", "failed"])
         self.assertFalse(any(item["retryable"] for item in completions))
         self.assertEqual(events, [])
+
+
+def test_publication_worker_completes_real_validation_and_preserves_package_digest(
+    tmp_path, monkeypatch
+):
+    from test_publication import sanitize_slack_package, slack_publication_source
+
+    from outcomeci import publication
+
+    source = slack_publication_source(tmp_path / "source")
+    claim = publication_claim()
+    claim["job"].update(content=source.read_text(), sensitive_terms=["outcomeci"])
+    client = PublicationClient(claim)
+    monkeypatch.setenv("AGENT_PRIVATE_ROOT", str(tmp_path))
+    monkeypatch.setattr(publication, "invoke", sanitize_slack_package)
+    assert (
+        execute_publication(
+            Launch("publication", "pub-1", "boot", "https://api.outcomeci.com"), client
+        )
+        == 0
+    )
+    assert client.failures == []
+    token, payload = client.completions[0]
+    assert token == "completion-secret"
+    assert "trigger.channel" in payload["content"]
+    package = {
+        "outcome.yml": payload["content"],
+        **{path: base64.b64decode(value).decode() for path, value in payload["files"].items()},
+    }
+    digest = hashlib.sha256()
+    for path, content in sorted(package.items()):
+        digest.update(path.encode() + b"\0" + content.encode() + b"\0")
+    assert payload["package_sha256"] == digest.hexdigest()
+
+
+def test_publication_failure_category_does_not_contain_private_diagnostics():
+    from outcomeci.publication import PublicationValidationError
+
+    failure = PublicationValidationError(
+        "publication_privacy_failed", "private/path: confidential value"
+    )
+    assert cloud_runner_main.workflow_failure_category(failure) == "publication_privacy_failed"
