@@ -16,7 +16,7 @@ dependencies = [
     "jsonschema>=4.23",
     "pyte>=0.8",
     # GitHub and Slack account authorization requires the 0.6 connector contracts.
-    "outcomeci-connectors>=0.6,<0.7",
+    "outcomeci-connectors @ git+https://github.com/outcomeci/connectors.git@04c2bf6a1358ecd4ae8e1afbc3ec00c76123b97a",
 ]
 
 [project.scripts]
