@@ -140,7 +140,7 @@ def test_the_slack_example_triggers_on_signed_mentions_and_dms():
 @pytest.mark.parametrize(
     ("webhook", "message"),
     [
-        ({"uses": "github", "auth": "secrets.github", "events": ["push"]}, "cannot receive"),
+        ({"uses": "x", "auth": "secrets.github", "events": ["push"]}, "cannot receive"),
         ({"uses": "slack", "auth": "secrets.missing", "events": ["dm"]}, "declared secret"),
         ({"uses": "slack", "auth": "secrets.slack", "events": ["reaction"]}, "not one of"),
         ({"uses": "slack", "auth": "secrets.slack", "events": []}, "must list"),
@@ -258,3 +258,22 @@ def test_only_an_operation_that_chooses_its_request_scopes_a_query():
             },
             "op",
         )
+
+
+def test_github_signed_webhook_compiles(tmp_path):
+    compiled = compile_workflow(
+        _write(
+            tmp_path,
+            [_step("a")],
+            trigger={
+                "webhook": {
+                    "uses": "github",
+                    "auth": "secrets.github",
+                    "events": ["issues", "push"],
+                }
+            },
+        )
+    )
+    receiver = compiled["triggers"]["webhook"]["receiver"]
+    assert receiver["uses"] == "github"
+    assert receiver["events"] == ["issues", "push"]
