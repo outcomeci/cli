@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
 import time
 from datetime import UTC, datetime, timedelta
@@ -189,6 +190,7 @@ def image_env(monkeypatch, tmp_path):
     monkeypatch.setenv("OUTCOMECI_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setattr(workflow_run, "compile_workflow", lambda config: IMAGE_COMPILED)
     monkeypatch.setattr(workflow_run, "_check_image", lambda image: None)
+    monkeypatch.setattr(workflow_run, "_check_network", lambda image, network, hosts: None)
     monkeypatch.setattr(workflow_run, "issue_debug_lease", mock.Mock(return_value=_agent_lease()))
     monkeypatch.setattr(workflow_run, "complete_debug_agent_lease", mock.Mock())
     monkeypatch.setattr(workflow_run, "renew_debug_agent_lease", mock.Mock())
@@ -321,6 +323,96 @@ def test_input_errors_fail_before_any_lease_is_issued(monkeypatch, image_env):
             root, outside, "workspace_1", "workflow_1", trigger_name="go", image="img"
         )
 
+    workflow_run.issue_debug_lease.assert_not_called()
+
+
+def _probe(monkeypatch, *, returncode=0, stdout="", timeout=False):
+    docker = mock.Mock()
+    if timeout:
+        docker.side_effect = subprocess.TimeoutExpired(["docker"], 1)
+    else:
+        docker.return_value = mock.Mock(returncode=returncode, stdout=stdout)
+    monkeypatch.setattr(workflow_run.subprocess, "run", docker)
+    return docker
+
+
+def test_the_network_probe_resolves_each_agent_host_inside_the_image(monkeypatch):
+    docker = _probe(monkeypatch)
+
+    workflow_run._check_network("img", None, ["api.openai.com", "api.anthropic.com"])
+
+    command = docker.call_args.args[0]
+    assert command[:3] == ["docker", "run", "--rm"]
+    assert "--network" not in command
+    assert command[command.index("img") + 1] == "-c"
+    assert command[command.index("img") + 3 :] == ["api.openai.com", "api.anthropic.com"]
+    assert docker.call_args.kwargs["timeout"] == workflow_run.NETWORK_PROBE_TIMEOUT_SECONDS
+
+
+def test_the_network_probe_uses_the_requested_network_and_skips_without_hosts(monkeypatch):
+    docker = _probe(monkeypatch)
+
+    workflow_run._check_network("img", "host", ["api.openai.com"])
+    assert docker.call_args.args[0][3:5] == ["--network", "host"]
+
+    docker.reset_mock()
+    workflow_run._check_network("img", None, [])
+    docker.assert_not_called()
+
+
+def test_an_unresolvable_agent_host_fails_before_the_run_and_suggests_host_networking(
+    monkeypatch,
+):
+    _probe(monkeypatch, returncode=1, stdout="api.openai.com\n")
+
+    with pytest.raises(ExecutionError) as failure:
+        workflow_run._check_network("img", None, ["api.openai.com", "api.anthropic.com"])
+
+    message = str(failure.value)
+    assert "cannot resolve api.openai.com on Docker's default bridge network" in message
+    assert "api.anthropic.com" not in message
+    assert "pass --network host" in message
+
+
+def test_a_dns_failure_on_host_networking_points_at_the_machine(monkeypatch):
+    _probe(monkeypatch, returncode=1, stdout="")
+
+    with pytest.raises(ExecutionError, match="'host' network.*check this machine's DNS"):
+        workflow_run._check_network("img", "host", ["api.openai.com"])
+
+
+def test_a_probe_that_hangs_counts_as_unresolved(monkeypatch):
+    _probe(monkeypatch, timeout=True)
+
+    with pytest.raises(ExecutionError, match="cannot resolve api.openai.com"):
+        workflow_run._check_network("img", None, ["api.openai.com"])
+
+
+def test_the_agent_hosts_follow_the_runners_the_run_needs():
+    assert workflow_run._agent_hosts(["codex", "claude", "opencode"]) == [
+        "api.openai.com",
+        "api.anthropic.com",
+        "openrouter.ai",
+    ]
+    assert workflow_run._agent_hosts(["codex", "unknown"]) == ["api.openai.com"]
+
+
+def test_a_cloud_run_probes_the_network_after_the_image_and_before_any_lease(
+    monkeypatch, image_env
+):
+    root, _ = image_env
+    probed = []
+
+    def failing_probe(image, network, hosts):
+        probed.append((image, network, hosts))
+        raise ExecutionError("the container cannot resolve api.openai.com")
+
+    monkeypatch.setattr(workflow_run, "_check_network", failing_probe)
+
+    with pytest.raises(ExecutionError, match="cannot resolve"):
+        _image_run(root, network="bridge")
+
+    assert probed == [("outcomeci-runner:dev", "bridge", ["api.openai.com"])]
     workflow_run.issue_debug_lease.assert_not_called()
 
 
@@ -608,6 +700,26 @@ def local_env(monkeypatch, image_env, tmp_path):
 def _local_run(root, **kwargs):
     kwargs.setdefault("image", "outcomeci-runner:dev")
     return workflow_run.run_local(root, root / "outcome.yml", **kwargs)
+
+
+def test_a_local_run_probes_the_network_for_the_agents_it_runs(monkeypatch, local_env):
+    root, _ = local_env
+    probed = []
+
+    def failing_probe(image, network, hosts):
+        probed.append((image, network, hosts))
+        raise ExecutionError("the container cannot resolve api.anthropic.com")
+
+    monkeypatch.setattr(workflow_run, "_check_network", failing_probe)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "claude-token")
+    popen = mock.Mock()
+    monkeypatch.setattr(workflow_run.subprocess, "Popen", popen)
+
+    with pytest.raises(ExecutionError, match="cannot resolve"):
+        _local_run(root, agent="claude", network="host")
+
+    assert probed == [("outcomeci-runner:dev", "host", ["api.anthropic.com"])]
+    popen.assert_not_called()
 
 
 def test_local_run_sends_local_vault_values_and_the_local_login(monkeypatch, local_env):

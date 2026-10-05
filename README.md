@@ -11,7 +11,7 @@ pipx install outcomeci-cli
 oci init
 oci vault local init
 oci vault local put github --value-stdin     # a GitHub token that can read the repo
-oci workflow run --payload .outcomeci/request.json
+oci workflow run --payload .outcomeci/request.json --auto-continue
 ```
 
 The full guide is at <https://outcomeci.com/docs/outcomeci>.
