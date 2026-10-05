@@ -309,7 +309,7 @@ def test_a_discussion_nobody_answers_times_out(workflow, monkeypatch):
     outputs = json.loads(
         (workflow / ".outcomeci/outcomes" / result["run_id"] / "discuss/outputs.json").read_text()
     )
-    assert outputs == {"plan": PLAN, "status": "timed_out"}
+    assert outputs == {"plan": PLAN, "status": "timed_out", "decision": "undecided"}
 
 
 def test_a_screenshot_in_the_discussion_reaches_the_next_turn(workflow, monkeypatch):

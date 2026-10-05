@@ -143,3 +143,18 @@ fail. Reports never contain the original values.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the supported Python versions and
 the formatting, lint, test and package checks CI runs.
+
+### Human approval without changing the plan
+
+Keep approval state outside the plan being reviewed. A conversation can return
+`[plan, status, decision]`, where `decision` is `approved`, `rejected`, or
+`undecided`. Gate side effects with `when: discuss.decision == "approved"`.
+The plan itself should contain only the work being proposed, not a `decision`
+field that changes when someone approves it. Use the separate decision directly
+in downstream conditions; a later model step must not reinterpret it.
+
+Explicit approval of the unchanged plan closes the discussion. Rejection
+closes it with `decision: rejected`. A changed plan always requires a later
+approval, even if the agent says it is approved in the same turn. Capped or
+timed-out discussions return `undecided`. Existing `plan` and `status` outputs
+remain supported; `status: converged` still means approval of the unchanged plan.

@@ -672,8 +672,8 @@ def _converse_step(name, step, node, block, reads, *, scope: _Scope, apis, base:
     if isinstance(max_turns, bool) or not isinstance(max_turns, int) or not 2 <= max_turns <= 100:
         raise ConfigError(f"{field}.max_turns must be between 2 and 100")
     names = step.get("returns", ["plan", "status"])
-    if not isinstance(names, list) or not set(names) <= {"plan", "status"} or not names:
-        raise ConfigError(f"{field}.returns lists plan and/or status")
+    if not isinstance(names, list) or not set(names) <= {"plan", "status", "decision"} or not names:
+        raise ConfigError(f"{field}.returns lists plan, status and/or decision")
     respond = watchers[watcher]
     node["instructions"] = (
         _reason(step["reason"], base, f"{field}.reason")
@@ -706,7 +706,8 @@ def _converse_step(name, step, node, block, reads, *, scope: _Scope, apis, base:
     }
     properties = {
         "plan": plan_schema,
-        "status": {"type": "string", "enum": ["converged", "capped", "timed_out"]},
+        "decision": {"type": "string", "enum": ["approved", "rejected", "undecided"]},
+        "status": {"type": "string", "enum": ["converged", "rejected", "capped", "timed_out"]},
     }
     return _returns(
         block,
