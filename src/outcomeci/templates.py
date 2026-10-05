@@ -20,9 +20,11 @@ WORKFLOW_YAML = """# Edit this workflow, then run it in the runner container:
 #
 #   oci vault local init
 #   oci vault local put github --value-stdin     # a GitHub token that can read the repo
-#   oci workflow run --payload .outcomeci/request.json
+#   oci workflow run --payload .outcomeci/request.json --auto-continue
 #
-# When it does what you want, publish it with `oci workflow sync`.
+# That runs every step once, now. Drop --auto-continue to stop after the first
+# step and inspect its result. When it does what you want, publish it with
+# `oci workflow sync`.
 apiVersion: outcomeci.workflow/v1
 name: default
 

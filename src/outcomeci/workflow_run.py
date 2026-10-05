@@ -58,6 +58,24 @@ LOCAL_RUN_TTL_SECONDS = 12 * 3600
 # Agent logins a local run reads from the environment, or else from the local
 # Vault at agents/<provider>. Codex keeps its own login file instead.
 AGENT_ENV = {"claude": "CLAUDE_CODE_OAUTH_TOKEN", "opencode": "OPENROUTER_API_KEY"}
+# The API host each agent must reach from inside the container.
+AGENT_HOSTS = {
+    "codex": "api.openai.com",
+    "claude": "api.anthropic.com",
+    "opencode": "openrouter.ai",
+}
+NETWORK_PROBE_TIMEOUT_SECONDS = 60
+_RESOLVE_HOSTS = """
+import socket, sys
+failed = []
+for host in sys.argv[1:]:
+    try:
+        socket.getaddrinfo(host, 443)
+    except OSError:
+        failed.append(host)
+print("\\n".join(failed))
+sys.exit(1 if failed else 0)
+"""
 _RELEASE = re.compile(r"^\d+\.\d+\.\d+$")
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 
@@ -147,6 +165,7 @@ def run_cloud(
     # takes the workspace's agent connection away from its cloud runs.
     image = image or default_image()
     _check_image(image)
+    _check_network(image, network, _agent_hosts(_runners(compiled, agent)))
     _flush_pending_releases()
     _flush_pending_rotations()
     if retry_run is not None:
@@ -275,6 +294,55 @@ def _check_image(image: str) -> None:
             f"{image} cannot run workflows; it needs an OutcomeCI runner build "
             f"that includes outcomeci.run_container ({detail})"
         )
+
+
+def _agent_hosts(runners: list[str]) -> list[str]:
+    return [AGENT_HOSTS[runner] for runner in runners if runner in AGENT_HOSTS]
+
+
+def _check_network(image: str, network: str | None, hosts: list[str]) -> None:
+    """Fail before the run when the container cannot resolve the hosts its agents need.
+
+    An agent that cannot reach its API retries quietly for a long time, so a
+    Docker network without working DNS makes a run look like a silent hang.
+    Resolving the hosts in a throwaway container catches that in a second.
+    """
+    if not hosts:
+        return
+    command = [
+        "docker",
+        "run",
+        "--rm",
+        *(["--network", network] if network else []),
+        "--entrypoint",
+        "/opt/oci/bin/python",
+        image,
+        "-c",
+        _RESOLVE_HOSTS,
+        *hosts,
+    ]
+    try:
+        probe = subprocess.run(
+            command, capture_output=True, text=True, timeout=NETWORK_PROBE_TIMEOUT_SECONDS
+        )
+    except FileNotFoundError as exc:
+        raise ExecutionError("docker is not installed or not on PATH") from exc
+    except subprocess.TimeoutExpired:
+        unresolved = hosts
+    else:
+        if probe.returncode == 0:
+            return
+        unresolved = [line for line in probe.stdout.splitlines() if line.strip()] or hosts
+    where = f"the {network!r} network" if network else "Docker's default bridge network"
+    advice = (
+        "pass --network host so the container uses this machine's DNS"
+        if network != "host"
+        else "check this machine's DNS settings"
+    )
+    raise ExecutionError(
+        f"the container cannot resolve {', '.join(unresolved)} on {where}, "
+        f"so the agent could not reach its API; {advice}"
+    )
 
 
 @dataclass
@@ -806,8 +874,10 @@ def run_local(
             compiled, trigger_name or _default_trigger(compiled), payload_path
         )
     values = _local_values(root, compiled)
-    logins = [_local_login(root, provider) for provider in _runners(compiled, agent)]
+    runners = _runners(compiled, agent)
+    logins = [_local_login(root, provider) for provider in runners]
     _check_image(image)
+    _check_network(image, network, _agent_hosts(runners))
     expires_at = (datetime.now(UTC) + timedelta(seconds=LOCAL_RUN_TTL_SECONDS)).isoformat()
     with ExitStack() as held:
         held.enter_context(_termination_interrupts())

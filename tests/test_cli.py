@@ -14,13 +14,32 @@ from outcomeci.repository import initialize
 
 def test_init_writes_a_v1_workflow_that_validates(tmp_path: Path, capsys) -> None:
     assert main(["init", "--dir", str(tmp_path)]) == 0
-    document = yaml.safe_load((tmp_path / "outcome.yml").read_text())
+    source = (tmp_path / "outcome.yml").read_text()
+    document = yaml.safe_load(source)
     assert document["apiVersion"] == "outcomeci.workflow/v1"
+    # The header's run command must run every step, or the first run stops
+    # after one step with no way to continue it.
+    assert "oci workflow run --payload .outcomeci/request.json --auto-continue" in source
     assert (tmp_path / ".outcomeci/instructions/investigate.md").is_file()
     assert json.loads((tmp_path / ".outcomeci/request.json").read_text())["repo"]["owner"]
     assert not (tmp_path / ".agents").exists()
     assert main(["validate", "--dir", str(tmp_path)]) == 0
     assert '"valid": true' in capsys.readouterr().out
+
+
+def test_an_interrupted_run_exits_130_without_a_traceback(
+    tmp_path: Path, capsys, monkeypatch
+) -> None:
+    def interrupted(*args, **kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli.workflow_run, "run_local", interrupted)
+
+    assert main(["workflow", "run", "--dir", str(tmp_path)]) == 130
+
+    captured = capsys.readouterr()
+    assert captured.err.strip() == "oci: interrupted"
+    assert "Traceback" not in captured.err
 
 
 def test_workflow_get_writes_content_and_support_files(tmp_path: Path, capsys, monkeypatch) -> None:

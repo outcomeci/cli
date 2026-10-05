@@ -664,6 +664,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (ConfigError, ExecutionError, SlackError) as exc:
         print(f"oci: {exc}", file=sys.stderr)
         return 1 if isinstance(exc, ExecutionError) and exc.retryable else 2
+    except KeyboardInterrupt:
+        # Ctrl-C has already stopped whatever was running; a traceback here
+        # would only bury that. 130 is the shell's exit status for SIGINT.
+        print("oci: interrupted", file=sys.stderr)
+        return 130
 
 
 if __name__ == "__main__":
