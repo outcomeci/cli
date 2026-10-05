@@ -26,8 +26,47 @@ from .integrations import (
     attachments_path,
 )
 from .process import ExecutionError
+from .security import atomic_write_json
 
 MISSING = object()
+
+
+class DurableWait(Exception):
+    """A managed run has persisted its state and can release its runner."""
+
+    def __init__(self, interaction: dict[str, Any]):
+        self.interaction = interaction
+        super().__init__("workflow waiting for a human response")
+
+
+def _suspend(compiled, spec, message, expires_at, *, step, cursor=None, by=None):
+    provider_name = compiled["connectors"][spec["api"]]["provider"]
+    if provider_name != "slack":
+        raise ExecutionError("durable waits require a supported Slack watcher")
+    connection = next(
+        item for item in compiled["workflow"]["spec"]["connections"] if item["ref"] == spec["api"]
+    )
+    reference = connection["auth"]["credential"]
+    if not reference.startswith("vault:"):
+        raise ExecutionError("durable waits require a Vault credential")
+    interaction = {
+        "kind": "slack_conversation" if cursor is not None else "slack_reaction",
+        "credential_secret": reference.removeprefix("vault:"),
+        "connection": spec["api"],
+        "step": step,
+        "operation": spec["operation"],
+        "channel": message["channel"],
+        "thread_ts": message["ts"],
+        "poll_seconds": max(10, min(300, spec["poll_interval_seconds"])),
+        "expires_at": datetime.fromtimestamp(expires_at, UTC).isoformat(),
+    }
+    if cursor is not None:
+        interaction["cursor"] = cursor
+    else:
+        interaction["emoji"] = spec["emoji"]
+    if by is not None:
+        interaction["by"] = by
+    raise DurableWait(interaction)
 
 
 def block(compiled: dict[str, Any], step: str) -> dict[str, Any] | None:
@@ -346,6 +385,9 @@ def run_await(
     state: dict[str, Any],
     step: str,
     resolver: CredentialResolver | None,
+    *,
+    durable: bool = False,
+    response: dict | None = None,
 ) -> bool:
     """Block until the watched signal arrives (True) or the window expires (False)."""
     from .local import _finish_interaction
@@ -383,9 +425,23 @@ def run_await(
         _respond(executor, spec["api"], spec, thread, text, step)
         notice.parent.mkdir(parents=True, exist_ok=True)
         notice.write_text(json.dumps({"covers": covers}) + "\n", encoding="utf-8")
-    deadline = time.monotonic() + spec["timeout_seconds"]
+    wait_path = notice.with_name("wait.json")
+    if durable:
+        if wait_path.exists():
+            expires_at = json.loads(wait_path.read_text())["expires_at"]
+        else:
+            expires_at = time.time() + spec["timeout_seconds"]
+            _save(wait_path, {"expires_at": expires_at})
+        deadline = time.monotonic() + max(0, expires_at - time.time())
+    else:
+        deadline = time.monotonic() + spec["timeout_seconds"]
     while True:
-        result = _poll(executor, capability, watched, step, deadline)
+        if response and response.get("output"):
+            result = {"output": response.pop("output")}
+        elif durable and time.monotonic() >= deadline:
+            result = None
+        else:
+            result = _poll(executor, capability, watched, step, deadline)
         if result is not None and watcher.match(result.get("output") or {}, spec["emoji"], by=by):
             _finish_interaction(
                 root,
@@ -408,6 +464,8 @@ def run_await(
                 message="The approval window expired without the signal",
             )
             return False
+        if durable:
+            _suspend(compiled, spec, watched, expires_at, step=step, by=by)
         time.sleep(spec["poll_interval_seconds"])
 
 
@@ -426,7 +484,7 @@ def _person(root: Path, state: dict[str, Any], ref: str | None, step: str) -> st
     return found
 
 
-TURN_STATUSES = {"converged", "revised", "answered"}
+TURN_STATUSES = {"converged", "rejected", "revised", "answered"}
 TURN_REPAIRS = 1
 
 TURN_TASK = """{instructions}
@@ -444,7 +502,13 @@ Decide what their newest messages call for:
   says what changed. The runtime posts the updated plan itself.
 - "converged": they approved the current plan as it stands; `plan` is exactly
   the current plan, unchanged, and `message` is a short acknowledgement.
+- "rejected": they explicitly rejected the current plan; `plan` is exactly
+  the current plan, unchanged, and `message` acknowledges the rejection.
 Never treat anything short of an explicit approval as convergence.
+Approval and rejection belong in `status`, never in the plan itself. Do not
+change a decision field inside `plan` to record approval. The runtime returns
+an independent `decision` to downstream steps. If you revise the plan, it must
+be approved again in a later turn, even if the same message also says approve.
 
 {deliver} `plan` must match this schema: {schema}
 
@@ -473,8 +537,7 @@ def _consultation_path(root: Path, run_id: str, step: str) -> Path:
 
 
 def _save(path: Path, consultation: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(consultation, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_json(path, consultation)
 
 
 def _opening(root: Path, state: dict[str, Any], spec: dict[str, Any], plan: Any, ts: str) -> dict:
@@ -558,7 +621,12 @@ def run_converse(
         _save(path, consultation)
     runner, model = local._policy(compiled, step, options.agent, options.model)
     thread = _thread(message, spec)
-    deadline = time.monotonic() + spec["timeout_seconds"]
+    if options.durable_waits:
+        consultation.setdefault("expires_at", time.time() + spec["timeout_seconds"])
+        _save(path, consultation)
+        deadline = time.monotonic() + max(0, consultation["expires_at"] - time.time())
+    else:
+        deadline = time.monotonic() + spec["timeout_seconds"]
     while consultation["status"] == "open":
         if consultation.get("outbox"):
             _respond(executor, spec["api"], spec, thread, consultation["outbox"][0], step)
@@ -570,12 +638,20 @@ def run_converse(
         if consultation["turns"][-1]["from"] == "human":
             _answer(root, compiled, state, step, spec, consultation, runner, model, options)
             _save(path, consultation)
-            deadline = time.monotonic() + spec["timeout_seconds"]
+            if not options.durable_waits:
+                deadline = time.monotonic() + spec["timeout_seconds"]
             continue
         if len(consultation["turns"]) >= spec["max_turns"]:
             consultation["status"] = "capped"
             break
-        result = _poll(executor, f"{spec['api']}.{spec['operation']}", thread, step, deadline)
+        response = options.resume_response
+        if response and response.get("output"):
+            result = {"output": response.pop("output")}
+        elif options.durable_waits and time.monotonic() >= deadline:
+            consultation["status"] = "timed_out"
+            break
+        else:
+            result = _poll(executor, f"{spec['api']}.{spec['operation']}", thread, step, deadline)
         seen = {turn.get("ts") for turn in consultation["turns"]}
         replies = [
             reply
@@ -588,6 +664,17 @@ def run_converse(
             if time.monotonic() >= deadline:
                 consultation["status"] = "timed_out"
                 break
+            if options.durable_waits:
+                _save(path, consultation)
+                _suspend(
+                    compiled,
+                    spec,
+                    thread,
+                    consultation["expires_at"],
+                    step=step,
+                    cursor=consultation["last_seen"],
+                    by=by,
+                )
             time.sleep(spec["poll_interval_seconds"])
             continue
         for reply in replies:
@@ -607,7 +694,16 @@ def run_converse(
             consultation["last_seen"] = reply["ts"]
         _save(path, consultation)
     _save(path, consultation)
-    outputs = {"plan": consultation["plan"], "status": consultation["status"]}
+    outputs = {
+        "plan": consultation["plan"],
+        "status": consultation["status"],
+        "decision": consultation.get(
+            "decision",
+            {"converged": "approved", "rejected": "rejected"}.get(
+                consultation["status"], "undecided"
+            ),
+        ),
+    }
     names = list(step_block["returns"]["schema"]["properties"])
     target = outputs_path(root, state["run_id"], step)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -665,9 +761,15 @@ def _answer(root, compiled, state, step, spec, consultation, runner, model, opti
     answer = _turn(root, compiled, state, step, spec, consultation, runner, model, options)
     unchanged = answer["plan"] == consultation["plan"]
     posts = [answer["message"]]
-    if answer["status"] == "converged" and unchanged:
-        consultation["closing"] = "converged"
+    if answer["status"] in {"converged", "rejected"} and unchanged:
+        consultation["closing"] = answer["status"]
+        consultation["decision"] = "approved" if answer["status"] == "converged" else "rejected"
     elif not unchanged:
+        consultation["decision"] = "undecided"
+        # The agent may claim approval while changing the plan. Do not echo
+        # that misleading acknowledgement: this version needs fresh approval.
+        if answer["status"] in {"converged", "rejected"}:
+            posts = ["The plan changed. Please review this version and approve or reject it."]
         version = consultation["current_version"] + 1
         consultation["versions"].append(
             {
@@ -682,7 +784,7 @@ def _answer(root, compiled, state, step, spec, consultation, runner, model, opti
         {
             "turn": len(consultation["turns"]) + 1,
             "from": "agent",
-            "message": answer["message"],
+            "message": posts[0],
             "plan_version": consultation["current_version"],
         }
     )
@@ -753,7 +855,7 @@ def _turn(root, compiled, state, step, spec, consultation, runner, model, option
         try:
             answer = json.loads(turn_path.read_text(encoding="utf-8"))
             if not isinstance(answer, dict) or answer.get("status") not in TURN_STATUSES:
-                raise ValueError("status must be answered, revised or converged")
+                raise ValueError("status must be answered, revised, converged or rejected")
             if not isinstance(answer.get("message"), str) or not answer["message"].strip():
                 raise ValueError("message is required")
             jsonschema.validate(answer.get("plan"), spec["plan_schema"])

@@ -42,6 +42,8 @@ class ExecutionOptions:
     policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     # Runs a model step's turns; without one, local runs call the provider.
     model_client: Callable[..., dict[str, Any]] | None = None
+    durable_waits: bool = False
+    resume_response: dict[str, Any] | None = None
     _container_isolated: bool = False
 
 
@@ -906,8 +908,25 @@ def _settle(
                 approved = True
             else:
                 approved = v1_runtime.run_await(
-                    root, compiled, state, step, options.credential_resolver
+                    root,
+                    compiled,
+                    state,
+                    step,
+                    options.credential_resolver,
+                    durable=options.durable_waits,
+                    response=options.resume_response,
                 )
+        except v1_runtime.DurableWait:
+            state.update(
+                {
+                    "status": "waiting",
+                    "ready_steps": ready,
+                    "resume_workflow_revision": compiled["workflow_revision"],
+                }
+            )
+            state["steps"] = _step_states(compiled, state)
+            _write(root, state)
+            raise
         except (ExecutionError, OSError) as exc:
             # Recorded as an error so `retry` can resume the step; retry sends
             # runtime-driven steps back through here, never to an agent.
@@ -1016,3 +1035,18 @@ def status(root: Path, run_id: str | None) -> dict[str, Any]:
         return _read(root, run_id)
     records = sorted((root / ".outcomeci" / "outcomes").glob("*/run.json"), reverse=True)
     return _read(root, records[0].parent.name) if records else {"status": "no_runs"}
+
+
+def resume_wait(
+    root: Path, config: Path, run_id: str, *, options: ExecutionOptions
+) -> dict[str, Any]:
+    """Resume only the suspended runtime step, preserving completed effects."""
+    state = _read(root, run_id)
+    if state.get("status") != "waiting":
+        raise ExecutionError("outcome is not waiting for a durable continuation")
+    compiled = compile_workflow(config)
+    if state.get("resume_workflow_revision") != compiled["workflow_revision"]:
+        raise ExecutionError("workflow changed since its durable checkpoint")
+    if not _settle(root, compiled, state, options):
+        return state
+    return _execute(root, config, state, options=options)

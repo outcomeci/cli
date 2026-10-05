@@ -277,6 +277,8 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
     """Execute one immutable generic workflow claim with broker-private credentials."""
     from .. import local
     from ..config import compile_workflow
+    from ..v1_runtime import DurableWait
+    from . import checkpoint
 
     claim = _claim_or_skip(client.claim_workflow)
     if claim is None:
@@ -309,6 +311,11 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 raise ContractError("workflow support file escaped its root")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(base64.b64decode(encoded, validate=True))
+
+        resume = claim.get("resume")
+        if resume:
+            run_id = str(resume["run_id"])
+            checkpoint.restore(root, run_id, resume["artifacts"])
 
         # One login per runner the workflow's steps use; the default first.
         logins = [dict(item) for item in (claim.get("agents") or [claim["agent"]])]
@@ -391,6 +398,8 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 event_sink=policy_event,
                 policy_reviewer=policy_review,
                 model_client=model_turn,
+                durable_waits=True,
+                resume_response=resume.get("response") if resume else None,
                 _container_isolated=True,
             )
 
@@ -439,7 +448,12 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                     options=execution_options(active_agent, active_model),
                 )
 
-        result = execute_call(call_trigger)
+        def call_resume(agent_override, model_override):
+            return local.resume_wait(
+                root, config, run_id, options=execution_options(agent_override, model_override)
+            )
+
+        result = execute_call(call_resume if resume else call_trigger)
         run_id = str(result["run_id"])
         step_count = len(compile_workflow(config)["instructions"]["steps"])
         while len(result.get("completed_steps", [])) != step_count:
@@ -479,6 +493,40 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
             _completion_report_failed(completion_error, "completed")
             return 1
         return 0
+    except DurableWait as wait:
+        # Stop heartbeats before releasing the lease. A cancelled or stale claim
+        # fails pause rather than reviving a terminal invocation.
+        stop.set()
+        try:
+            with heartbeat_lock:
+                if heartbeat_failure:
+                    raise CoreError("workflow_lease_lost")
+                if provider == "codex":
+                    agent_update = json.loads((root / ".codex/auth.json").read_text())
+                client.workflow_pause(
+                    lease,
+                    run_id=run_id,
+                    artifacts=checkpoint.capture(root, run_id),
+                    pending_interaction=wait.interaction,
+                    expected_credential_version=credential_version,
+                    agent_credential=agent_update,
+                    resource_usage=resource_sampler.stop(),
+                )
+        except Exception:
+            # If pause was accepted but its response was lost, complete is fenced
+            # by the now-released lease. Otherwise fail closed: do not replay effects.
+            with suppress(CoreError):
+                client.workflow_complete(
+                    lease,
+                    "failed",
+                    run_id=run_id,
+                    category="workflow_checkpoint_failed",
+                    expected_credential_version=credential_version,
+                    agent_credential=agent_update,
+                    retryable=False,
+                )
+            raise
+        return 0
     except Exception as exc:
         resource_usage = resource_sampler.stop()
         auth_path = root / ".codex" / "auth.json"
@@ -488,7 +536,12 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
 
         category = workflow_failure_category(exc)
         detail = redact_diagnostic(exc)
-        retryable = isinstance(exc, CoreError) and exc.retryable and not steps_finished
+        retryable = (
+            isinstance(exc, CoreError)
+            and exc.retryable
+            and not steps_finished
+            and not claim.get("resume")
+        )
         artifacts: list[dict[str, str]] = []
         if not retryable:
             run_id = run_id or discovered_workflow_run_id(root)
