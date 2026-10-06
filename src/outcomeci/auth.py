@@ -194,7 +194,14 @@ def _scopes(entry: Mapping[str, Any], credential: Credential) -> str | None:
         scopes = selected
     elif not scopes and configured:
         scopes = configured if isinstance(configured, list) else str(configured).split()
-    return " ".join(str(item) for item in scopes) or None
+    separator = entry.get("scope_separator", " ") if entry.get("kind") == "oauth2" else " "
+    if separator not in (" ", ","):
+        raise AuthError(
+            "integration.invalid_scope_separator",
+            "OAuth scope_separator must be a space or comma",
+            category="configuration",
+        )
+    return separator.join(str(item) for item in scopes) or None
 
 
 def _b64url(raw: bytes) -> str:
