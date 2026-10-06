@@ -332,6 +332,13 @@ def test_an_anthropic_turn_marks_its_prompt_for_caching(monkeypatch):
     client(step="s", profile="light", messages=messages, tools=tools)
     assert "cache_control" not in json.dumps(seen["messages"]) + json.dumps(seen["tools"])
 
+    # A step whose only tool is return_result usually ends in one turn, where
+    # a cache write would cost more than it saves.
+    client = models.local_client({"reasoning": {"light": {"model": "anthropic/x"}}})
+    only_result = [{"type": "function", "function": {"name": models.RESULT}}]
+    client(step="s", profile="light", messages=messages, tools=only_result)
+    assert "cache_control" not in json.dumps(seen["messages"]) + json.dumps(seen["tools"])
+
 
 def test_a_failed_model_step_still_leaves_its_transcript(sentry_workflow, monkeypatch):
     _profiles(sentry_workflow / sentry.WORKFLOW, {"triage": "light"})

@@ -120,6 +120,11 @@ def cached(messages: list[dict], tools: list[dict]) -> tuple[list[dict], list[di
         blocks[-1] = {**blocks[-1], "cache_control": CACHE_CONTROL}
         return {**message, "content": blocks}
 
+    if all(item.get("function", {}).get("name") == RESULT for item in tools):
+        # A step with nothing to call but return_result usually ends in one
+        # turn, and a segment written once and never read costs more than
+        # sending it plain.
+        return messages, tools
     result = list(messages)
     first_user = next((i for i, m in enumerate(result) if m.get("role") == "user"), -1)
     for index, message in enumerate(result):
