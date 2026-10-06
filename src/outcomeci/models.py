@@ -64,6 +64,8 @@ def local_client(
         spec = compiled.get("reasoning", {}).get(profile)
         if not spec or "model" not in spec:
             raise ExecutionError(f"step {step}: reasoning profile {profile} is not a model")
+        if str(spec["model"]).startswith("anthropic/"):
+            messages, tools = cached(messages, tools)
         response = litellm.completion(
             model=spec["model"],
             api_key=_key(spec, resolver),
@@ -91,6 +93,44 @@ def local_client(
         }
 
     return call
+
+
+CACHE_CONTROL = {"type": "ephemeral"}
+
+
+def cached(messages: list[dict], tools: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Copies of a turn's messages and tools with Anthropic prompt-cache
+    breakpoints, at most four: the system prompt, the tool definitions, the
+    first user message with the step's context, and the latest message, so
+    each turn reuses everything the turn before it sent. OpenAI caches a
+    repeated prefix on its own and takes no marks. The caller's lists are
+    left alone, since marks that accumulated over turns would pass the limit."""
+
+    def marked(message: dict) -> dict:
+        content = message.get("content")
+        if isinstance(content, str):
+            blocks = [{"type": "text", "text": content}]
+        elif isinstance(content, list) and content:
+            blocks = [dict(block) for block in content]
+        else:
+            return message
+        blocks[-1] = {**blocks[-1], "cache_control": CACHE_CONTROL}
+        return {**message, "content": blocks}
+
+    result = list(messages)
+    breakpoints = {
+        index
+        for index, message in enumerate(result)
+        if message.get("role") == "system"
+        or index == next((i for i, m in enumerate(result) if m.get("role") == "user"), -1)
+        or (index == len(result) - 1 and message.get("role") in {"user", "tool"})
+    }
+    for index in breakpoints:
+        result[index] = marked(result[index])
+    marked_tools = list(tools)
+    if marked_tools:
+        marked_tools[-1] = {**marked_tools[-1], "cache_control": CACHE_CONTROL}
+    return result, marked_tools
 
 
 def _usage(usage: Any) -> dict[str, int]:

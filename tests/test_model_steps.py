@@ -285,6 +285,53 @@ def test_a_local_turn_allows_a_long_reply_and_reports_its_usage(monkeypatch):
     }
 
 
+def test_an_anthropic_turn_marks_its_prompt_for_caching(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    seen = {}
+
+    def completion(**kwargs):
+        seen.update(kwargs)
+        message = SimpleNamespace(content="done", tool_calls=None)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=message, finish_reason="stop")], usage=None
+        )
+
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+    messages = [
+        {"role": "system", "content": "rules"},
+        {"role": "user", "content": "context"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]},
+        {"role": "tool", "tool_call_id": "c1", "content": '{"posts": []}'},
+    ]
+    tools = [
+        {"type": "function", "function": {"name": "a"}},
+        {"type": "function", "function": {"name": "b"}},
+    ]
+
+    client = models.local_client({"reasoning": {"light": {"model": "anthropic/x"}}})
+    client(step="s", profile="light", messages=messages, tools=tools)
+
+    sent = seen["messages"]
+    cache = {"type": "ephemeral"}
+    # System, first user, and the latest tool result are breakpoints; the
+    # assistant turn in between is not.
+    assert sent[0]["content"] == [{"type": "text", "text": "rules", "cache_control": cache}]
+    assert sent[1]["content"][-1]["cache_control"] == cache
+    assert "cache_control" not in json.dumps(sent[2])
+    assert sent[3]["content"] == [{"type": "text", "text": '{"posts": []}', "cache_control": cache}]
+    assert "cache_control" not in seen["tools"][0] and seen["tools"][1]["cache_control"] == cache
+    # The caller's lists carry no marks, so the next turn starts clean.
+    assert messages[0]["content"] == "rules" and "cache_control" not in tools[1]
+
+    client = models.local_client({"reasoning": {"light": {"model": "openai/x"}}})
+    client(step="s", profile="light", messages=messages, tools=tools)
+    assert "cache_control" not in json.dumps(seen["messages"]) + json.dumps(seen["tools"])
+
+
 def test_a_failed_model_step_still_leaves_its_transcript(sentry_workflow, monkeypatch):
     _profiles(sentry_workflow / sentry.WORKFLOW, {"triage": "light"})
     sentry._serve(monkeypatch, sentry.Services())
