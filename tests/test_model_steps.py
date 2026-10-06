@@ -340,6 +340,139 @@ def test_an_anthropic_turn_marks_its_prompt_for_caching(monkeypatch):
     assert "cache_control" not in json.dumps(seen["messages"]) + json.dumps(seen["tools"])
 
 
+def _litellm_stub(monkeypatch, completion):
+    import sys
+    from types import SimpleNamespace
+
+    errors = {name: type(name, (Exception,), {}) for name in models.TRANSIENT_ERRORS}
+    stub = SimpleNamespace(completion=completion, **errors)
+    monkeypatch.setitem(sys.modules, "litellm", stub)
+    return stub
+
+
+def _reply(text="done"):
+    from types import SimpleNamespace
+
+    message = SimpleNamespace(content=text, tool_calls=None)
+    return SimpleNamespace(
+        choices=[SimpleNamespace(message=message, finish_reason="stop")], usage=None
+    )
+
+
+def test_a_model_profile_can_name_a_fallback_model(tmp_path):
+    shutil.copytree(sentry.EXAMPLES, tmp_path / "wf")
+    path = tmp_path / "wf" / sentry.WORKFLOW
+    document = yaml.safe_load(path.read_text())
+    document["secrets"]["anthropic"] = "vault:anthropic/api-key"
+    document["secrets"]["openai"] = "vault:openai/api-key"
+    document["reasoning"]["light"] = {
+        "model": "anthropic/claude-haiku-4-5",
+        "key": "secrets.anthropic",
+        "fallback": {"model": "openai/gpt-5.5", "key": "secrets.openai"},
+    }
+    path.write_text(yaml.safe_dump(document, sort_keys=False))
+
+    compiled = compile_workflow(path)
+
+    assert compiled["reasoning"]["light"]["fallback"] == {
+        "model": "openai/gpt-5.5",
+        "key": "openai",
+        "credential": "vault:openai/api-key",
+    }
+
+    document["reasoning"]["light"]["fallback"]["fallback"] = {"model": "openai/gpt-5-mini"}
+    path.write_text(yaml.safe_dump(document, sort_keys=False))
+    with pytest.raises(ConfigError, match=r"reasoning.light.fallback supports model and key"):
+        compile_workflow(path)
+
+
+def test_a_rate_limited_model_falls_back_to_the_profiles_fallback_once(monkeypatch):
+    attempts = []
+
+    def completion(**kwargs):
+        attempts.append((kwargs["model"], kwargs["api_key"]))
+        if kwargs["model"].startswith("anthropic/"):
+            raise stub.RateLimitError("429")
+        return _reply("from the fallback")
+
+    stub = _litellm_stub(monkeypatch, completion)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-openai")
+    compiled = {
+        "reasoning": {
+            "light": {
+                "model": "anthropic/x",
+                "credential": "vault:anthropic/api-key",
+                "fallback": {"model": "openai/y"},
+            }
+        }
+    }
+    client = models.local_client(compiled, lambda reference: "sk-anthropic")
+
+    answer = client(step="s", profile="light", messages=[], tools=[])
+
+    assert attempts == [("anthropic/x", "sk-anthropic"), ("openai/y", "sk-openai")]
+    assert answer["model"] == "openai/y" and answer["message"]["content"] == "from the fallback"
+
+
+def test_a_profile_without_a_fallback_reports_the_unavailable_model(monkeypatch):
+    def completion(**kwargs):
+        raise stub.ServiceUnavailableError("503")
+
+    stub = _litellm_stub(monkeypatch, completion)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
+    client = models.local_client({"reasoning": {"light": {"model": "anthropic/x"}}})
+
+    with pytest.raises(ExecutionError, match="anthropic/x is unavailable: 503"):
+        client(step="s", profile="light", messages=[], tools=[])
+
+
+def test_a_request_error_does_not_fall_back(monkeypatch):
+    def completion(**kwargs):
+        raise ValueError("bad request")
+
+    _litellm_stub(monkeypatch, completion)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
+    compiled = {"reasoning": {"light": {"model": "anthropic/x", "fallback": {"model": "openai/y"}}}}
+    client = models.local_client(compiled)
+
+    with pytest.raises(ValueError, match="bad request"):
+        client(step="s", profile="light", messages=[], tools=[])
+
+
+def test_a_turn_records_its_model_and_normalizes_cloud_usage():
+    # A cloud turn reports usage in the provider's field names.
+    turns = []
+    model = Model(
+        {
+            "s": [
+                {
+                    "text": "done",
+                    "usage": {"prompt_tokens": 500, "completion_tokens": 20},
+                }
+            ]
+        }
+    )
+
+    models.run(
+        model,
+        step="s",
+        profile="light",
+        system="x",
+        user="y",
+        capabilities=[],
+        call=lambda c, i: {},
+        turns=turns,
+    )
+
+    assert turns[1]["usage"] == {
+        "input_tokens": 500,
+        "output_tokens": 20,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }
+    assert turns[1]["model"] is None
+
+
 def test_a_failed_model_step_still_leaves_its_transcript(sentry_workflow, monkeypatch):
     _profiles(sentry_workflow / sentry.WORKFLOW, {"triage": "light"})
     sentry._serve(monkeypatch, sentry.Services())
@@ -491,9 +624,18 @@ def test_a_platform_funded_local_profile_reads_the_provider_env_var(monkeypatch)
         ({"review": {"runner": "claude"}}, None, "review is a model"),
         ({"light": {"model": "mistral/large"}}, None, "<provider>/<model>"),
         ({"light": {"model": "anthropic/x", "key": "secrets.missing"}}, None, "declared secret"),
-        ({"light": {"model": "anthropic/x", "temperature": 1}}, None, "supports model and key"),
+        (
+            {"light": {"model": "anthropic/x", "temperature": 1}},
+            None,
+            "supports model, key and fallback",
+        ),
         ({}, "light", "reasoning profile"),
         ({"review": {"model": "anthropic/x"}}, "review", "other than review"),
+        (
+            {"review": {"model": "anthropic/x", "fallback": {"model": "openai/y"}}},
+            None,
+            "reasoning.review supports model and key",
+        ),
     ],
 )
 def test_profiles_are_checked_when_the_workflow_compiles(tmp_path, reasoning, using, message):

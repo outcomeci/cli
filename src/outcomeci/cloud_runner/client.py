@@ -39,7 +39,7 @@ def _refusal(suffix: str, response: httpx.Response) -> str:
     )
 
 
-MODEL_TURN_TIMEOUT_SECONDS = 90
+MODEL_TURN_TIMEOUT_SECONDS = 630
 
 
 def _read_bounded(response: httpx.Response, limit: int) -> bytes:
@@ -186,7 +186,7 @@ class CoreClient:
                 "messages": messages,
                 "tools": tools,
             },
-            # The api allows the provider 60 seconds for one turn.
+            # The api allows the provider 600 seconds for one turn.
             timeout=MODEL_TURN_TIMEOUT_SECONDS,
         )
 
