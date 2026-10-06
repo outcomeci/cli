@@ -27,7 +27,7 @@ from .process import ExecutionError
 MAX_TOOL_CALLS = 20
 # The longest reply one turn may produce. A step's result travels as the
 # arguments of one tool call, so this bounds how much a step can return.
-MAX_OUTPUT_TOKENS = 16384
+MAX_OUTPUT_TOKENS = 32768
 RESULT = "return_result"
 # The longest tool result a turn carries back to the model, in characters. One
 # page of a search, such as 30 X posts with their authors, is about 32,000.
@@ -100,11 +100,14 @@ CACHE_CONTROL = {"type": "ephemeral"}
 
 def cached(messages: list[dict], tools: list[dict]) -> tuple[list[dict], list[dict]]:
     """Copies of a turn's messages and tools with Anthropic prompt-cache
-    breakpoints, at most four: the system prompt, the tool definitions, the
-    first user message with the step's context, and the latest message, so
-    each turn reuses everything the turn before it sent. OpenAI caches a
-    repeated prefix on its own and takes no marks. The caller's lists are
-    left alone, since marks that accumulated over turns would pass the limit."""
+    breakpoints on what every turn of the step resends: the system prompt,
+    the tool definitions, and the first user message with the step's context.
+    Writing a segment costs a quarter more than sending it and reading it back
+    costs a tenth, so a segment pays only once a later turn reuses it. The
+    static prefix is reused by every turn after the first; the tool results a
+    turn adds are usually sent once more at most, so they are left unmarked.
+    OpenAI caches a repeated prefix on its own and takes no marks. The
+    caller's lists are left alone, so marks never accumulate over turns."""
 
     def marked(message: dict) -> dict:
         content = message.get("content")
@@ -118,15 +121,10 @@ def cached(messages: list[dict], tools: list[dict]) -> tuple[list[dict], list[di
         return {**message, "content": blocks}
 
     result = list(messages)
-    breakpoints = {
-        index
-        for index, message in enumerate(result)
-        if message.get("role") == "system"
-        or index == next((i for i, m in enumerate(result) if m.get("role") == "user"), -1)
-        or (index == len(result) - 1 and message.get("role") in {"user", "tool"})
-    }
-    for index in breakpoints:
-        result[index] = marked(result[index])
+    first_user = next((i for i, m in enumerate(result) if m.get("role") == "user"), -1)
+    for index, message in enumerate(result):
+        if message.get("role") == "system" or index == first_user:
+            result[index] = marked(message)
     marked_tools = list(tools)
     if marked_tools:
         marked_tools[-1] = {**marked_tools[-1], "cache_control": CACHE_CONTROL}

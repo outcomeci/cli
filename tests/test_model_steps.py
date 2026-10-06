@@ -317,12 +317,13 @@ def test_an_anthropic_turn_marks_its_prompt_for_caching(monkeypatch):
 
     sent = seen["messages"]
     cache = {"type": "ephemeral"}
-    # System, first user, and the latest tool result are breakpoints; the
-    # assistant turn in between is not.
+    # The system prompt and the first user message are breakpoints: every
+    # later turn resends them. The assistant turn and the tool result are not:
+    # a tool result is rarely sent more than once more, and writing it to the
+    # cache costs more than sending it.
     assert sent[0]["content"] == [{"type": "text", "text": "rules", "cache_control": cache}]
     assert sent[1]["content"][-1]["cache_control"] == cache
-    assert "cache_control" not in json.dumps(sent[2])
-    assert sent[3]["content"] == [{"type": "text", "text": '{"posts": []}', "cache_control": cache}]
+    assert "cache_control" not in json.dumps(sent[2:])
     assert "cache_control" not in seen["tools"][0] and seen["tools"][1]["cache_control"] == cache
     # The caller's lists carry no marks, so the next turn starts clean.
     assert messages[0]["content"] == "rules" and "cache_control" not in tools[1]
