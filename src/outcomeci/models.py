@@ -15,6 +15,7 @@ import base64
 import json
 import os
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -86,9 +87,83 @@ def local_client(
                 ],
             },
             "finish_reason": choice.finish_reason,
+            "usage": _usage(getattr(response, "usage", None)),
         }
 
     return call
+
+
+def _usage(usage: Any) -> dict[str, int]:
+    """The tokens one turn used, in the fields every agent's usage records share."""
+    if usage is None:
+        return {}
+
+    def field(*names: str) -> int:
+        for name in names:
+            value = usage.get(name) if isinstance(usage, Mapping) else getattr(usage, name, None)
+            if isinstance(value, int | float):
+                return int(value)
+        return 0
+
+    details = (
+        usage.get("prompt_tokens_details")
+        if isinstance(usage, Mapping)
+        else getattr(usage, "prompt_tokens_details", None)
+    )
+    cached = 0
+    if details is not None:
+        cached = (
+            details.get("cached_tokens")
+            if isinstance(details, Mapping)
+            else getattr(details, "cached_tokens", None)
+        ) or 0
+    return {
+        "input_tokens": field("prompt_tokens", "input_tokens"),
+        "output_tokens": field("completion_tokens", "output_tokens"),
+        "cache_read_tokens": int(cached) or field("cache_read_input_tokens"),
+        "cache_write_tokens": field("cache_creation_input_tokens"),
+    }
+
+
+def write_transcript(root: Path, step: str, provider: str, turns: list[dict[str, Any]]) -> dict:
+    """Keep a model step's turns beside an agent's transcripts, with the same
+    usage.json an agent step gets, so a run shows what the model saw and spent."""
+    target = root / "transcripts" / step / "model"
+    target.mkdir(parents=True, exist_ok=True)
+    transcript = target / "01-turns.jsonl"
+    transcript.write_text(
+        "".join(json.dumps(turn, default=str) + "\n" for turn in turns), encoding="utf-8"
+    )
+    relative = str(transcript.relative_to(root))
+    records = [
+        {
+            "provider": provider,
+            "source_line": line,
+            "occurred_at": turn.get("occurred_at"),
+            "transcript_path": relative,
+            **turn["usage"],
+        }
+        for line, turn in enumerate(turns, 1)
+        if turn.get("usage")
+    ]
+    usage_path = root / "transcripts" / step / "usage.json"
+    usage_path.write_text(
+        json.dumps(
+            {"schema_version": 1, "provider": provider, "step": step, "records": records},
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "provider": provider,
+        "step": step,
+        "files": [{"path": relative, "byte_size": transcript.stat().st_size}],
+        "usage_path": str(usage_path.relative_to(root)),
+        "usage_records": len(records),
+        "usage": records,
+    }
 
 
 def _key(spec: Mapping[str, Any], resolver: CredentialResolver | None) -> str:
@@ -176,12 +251,14 @@ def run(
     call: Callable[[str, dict[str, Any]], dict[str, Any]],
     returns: Mapping[str, Any] | None = None,
     images: list[dict] | None = None,
+    turns: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     """Run one model step to its result: (the result or None, the model's last text).
 
     `call(capability, inputs)` executes a capability through the broker. A
     result that does not match `returns` goes back to the model with the
-    reason, within the same budget of tool calls."""
+    reason, within the same budget of tool calls. Each turn is appended to
+    `turns` as it happens, so a transcript survives however the step ends."""
     allowed = {tool_name(item["capability"]): item["capability"] for item in capabilities}
     offered = tools(capabilities, returns)
     messages: list[dict[str, Any]] = [
@@ -190,10 +267,32 @@ def run(
         if images
         else {"role": "user", "content": user},
     ]
+    if turns is not None:
+        turns.append(
+            {
+                "turn": 0,
+                "occurred_at": datetime.now(UTC).isoformat(),
+                "system": system,
+                "user": user,
+                "tools": [item["function"]["name"] for item in offered],
+                "images": len(images or []),
+            }
+        )
     used, nudged, text = 0, False, ""
     shown = len(images or [])
     while True:
         answer = client(step=step, profile=profile, messages=messages, tools=offered)
+        if turns is not None:
+            turns.append(
+                {
+                    "turn": len(turns),
+                    "occurred_at": datetime.now(UTC).isoformat(),
+                    "finish_reason": answer.get("finish_reason"),
+                    "usage": answer.get("usage") or {},
+                    "assistant": answer.get("message") or {},
+                    "tool_results": [],
+                }
+            )
         if answer.get("finish_reason") == "length":
             # A reply cut off mid-way is unusable: a truncated tool call is not
             # JSON, and sending it back only repeats the cut until the call
@@ -237,6 +336,15 @@ def run(
             messages.append({"role": "user", "content": f"Call {RESULT} with the step's result."})
             continue
         seen: list[dict] = []
+
+        def reply(item: Mapping[str, Any], result: Any) -> None:
+            message = _tool(item, result)
+            messages.append(message)
+            if turns is not None:
+                turns[-1]["tool_results"].append(
+                    {"id": item["id"], "name": item.get("name"), "content": message["content"]}
+                )
+
         for item in calls:
             used += 1
             if used > MAX_TOOL_CALLS:
@@ -246,24 +354,24 @@ def run(
                 if not isinstance(arguments, dict):
                     raise ValueError("arguments must be a JSON object")
             except ValueError as exc:
-                messages.append(_tool(item, {"error": f"invalid arguments: {exc}"}))
+                reply(item, {"error": f"invalid arguments: {exc}"})
                 continue
             if item["name"] == RESULT and returns:
                 try:
                     jsonschema.validate(arguments, returns)
                 except jsonschema.ValidationError as exc:
-                    messages.append(_tool(item, {"error": f"result is invalid: {exc.message}"}))
+                    reply(item, {"error": f"result is invalid: {exc.message}"})
                     continue
                 return arguments, text
             capability = allowed.get(item["name"])
             if capability is None:
-                messages.append(_tool(item, {"error": f"{item['name']} is not a tool here"}))
+                reply(item, {"error": f"{item['name']} is not a tool here"})
                 continue
             try:
                 result = call(capability, arguments)
             except ExecutionError as exc:
                 result = {"error": str(exc)}
-            messages.append(_tool(item, result))
+            reply(item, result)
             file = (result.get("output") or {}).get("file") if isinstance(result, dict) else None
             if isinstance(file, dict):
                 seen.append(file)

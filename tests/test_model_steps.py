@@ -64,6 +64,7 @@ class Model:
         return {
             "message": {"content": turn.get("text"), "tool_calls": turn.get("calls", [])},
             "finish_reason": turn.get("finish_reason", "stop"),
+            "usage": turn.get("usage", {}),
         }
 
 
@@ -121,7 +122,10 @@ def test_a_model_step_calls_its_granted_tools_through_the_broker(sentry_workflow
                         _call("slack__post", {"text": "*Sentry alert -- KeyError: 'plan'*"}, 2),
                     ]
                 },
-                {"calls": [_call("return_result", TRIAGE, 3)]},
+                {
+                    "calls": [_call("return_result", TRIAGE, 3)],
+                    "usage": {"input_tokens": 1200, "output_tokens": 80},
+                },
             ],
             "announce": [
                 {"calls": [_call("slack__post", {"text": "PR opened"}, 1)]},
@@ -133,6 +137,24 @@ def test_a_model_step_calls_its_granted_tools_through_the_broker(sentry_workflow
     result = _sentry_run(sentry_workflow, model, agent, monkeypatch)
 
     assert result["status"] == "completed"
+    # A model step leaves a transcript of its turns and the usage they
+    # reported, where an agent step leaves its session, so a run shows what the
+    # model saw and spent.
+    run_dir = sentry_workflow / ".outcomeci/outcomes" / result["run_id"]
+    turns = [
+        json.loads(line)
+        for line in (run_dir / "transcripts/triage/model/01-turns.jsonl").read_text().splitlines()
+    ]
+    assert [turn["turn"] for turn in turns] == [0, 1, 2]
+    assert "return_result" in turns[0]["tools"] and turns[0]["user"]
+    assert [item["name"] for item in turns[1]["tool_results"]] == ["slack__post", "slack__post"]
+    assert "channel" in json.loads(turns[1]["tool_results"][0]["content"])["error"]
+    usage = json.loads((run_dir / "transcripts/triage/usage.json").read_text())
+    assert usage["provider"] == "anthropic"
+    assert [
+        (r["input_tokens"], r["output_tokens"], r["source_line"]) for r in usage["records"]
+    ] == [(1200, 80, 3)]
+    assert result["usage_records"] == 0  # the last step, announce, reported no usage
     # Only the fix step started an agent; triage and announce were model calls.
     assert list(agent.prompts) == ["fix"]
     assert [call["profile"] for call in model.calls] == ["light"] * 4
@@ -228,7 +250,7 @@ def test_a_tool_result_over_the_limit_stays_valid_json():
     assert json.loads(small["content"]) == {"posts": []}
 
 
-def test_a_local_turn_allows_a_long_reply(monkeypatch):
+def test_a_local_turn_allows_a_long_reply_and_reports_its_usage(monkeypatch):
     import sys
     from types import SimpleNamespace
 
@@ -237,7 +259,15 @@ def test_a_local_turn_allows_a_long_reply(monkeypatch):
     def completion(**kwargs):
         seen.update(kwargs)
         message = SimpleNamespace(content="done", tool_calls=None)
-        return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")])
+        usage = SimpleNamespace(
+            prompt_tokens=900,
+            completion_tokens=40,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=600),
+            cache_creation_input_tokens=100,
+        )
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=message, finish_reason="stop")], usage=usage
+        )
 
     monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
@@ -247,6 +277,26 @@ def test_a_local_turn_allows_a_long_reply(monkeypatch):
 
     assert answer["finish_reason"] == "stop"
     assert seen["max_tokens"] == models.MAX_OUTPUT_TOKENS >= 16384
+    assert answer["usage"] == {
+        "input_tokens": 900,
+        "output_tokens": 40,
+        "cache_read_tokens": 600,
+        "cache_write_tokens": 100,
+    }
+
+
+def test_a_failed_model_step_still_leaves_its_transcript(sentry_workflow, monkeypatch):
+    _profiles(sentry_workflow / sentry.WORKFLOW, {"triage": "light"})
+    sentry._serve(monkeypatch, sentry.Services())
+    model = Model({"triage": [{"text": "I give up"}, {"text": "still nothing"}]})
+
+    with pytest.raises(ExecutionError, match="without calling return_result; it said: 'still"):
+        _sentry_run(sentry_workflow, model, sentry.Agent(), monkeypatch)
+
+    run_dir = next((sentry_workflow / ".outcomeci/outcomes").iterdir())
+    lines = (run_dir / "transcripts/triage/model/01-turns.jsonl").read_text().splitlines()
+    assert len(lines) == 3
+    assert json.loads(lines[2])["assistant"]["content"] == "still nothing"
 
 
 def test_tool_calls_are_capped():
