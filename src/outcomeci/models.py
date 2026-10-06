@@ -28,6 +28,17 @@ MAX_TOOL_CALLS = 20
 # The longest reply one turn may produce. A step's result travels as the
 # arguments of one tool call, so this bounds how much a step can return.
 MAX_OUTPUT_TOKENS = 32768
+# Long enough for a reply at the output limit from a slow provider.
+TURN_TIMEOUT_SECONDS = 600
+# The LiteLLM errors that mean the provider, not the request, is the problem,
+# so a profile's fallback model is worth trying.
+TRANSIENT_ERRORS = (
+    "RateLimitError",
+    "ServiceUnavailableError",
+    "InternalServerError",
+    "Timeout",
+    "APIConnectionError",
+)
 RESULT = "return_result"
 # The longest tool result a turn carries back to the model, in characters. One
 # page of a search, such as 30 X posts with their authors, is about 32,000.
@@ -64,17 +75,33 @@ def local_client(
         spec = compiled.get("reasoning", {}).get(profile)
         if not spec or "model" not in spec:
             raise ExecutionError(f"step {step}: reasoning profile {profile} is not a model")
-        if str(spec["model"]).startswith("anthropic/"):
-            messages, tools = cached(messages, tools)
-        response = litellm.completion(
-            model=spec["model"],
-            api_key=_key(spec, resolver),
-            messages=messages,
-            **({"tools": tools} if tools else {}),
-            max_tokens=MAX_OUTPUT_TOKENS,
-            timeout=180,
-            num_retries=0,
+        # The profile's model first; on a provider that is rate limited, down,
+        # or unreachable, the profile's fallback model, once.
+        choices = [spec, *([spec["fallback"]] if spec.get("fallback") else [])]
+        transient = tuple(
+            getattr(litellm, name)
+            for name in TRANSIENT_ERRORS
+            if isinstance(getattr(litellm, name, None), type)
         )
+        for index, chosen in enumerate(choices):
+            model = str(chosen["model"])
+            turn_messages, turn_tools = (
+                cached(messages, tools) if model.startswith("anthropic/") else (messages, tools)
+            )
+            try:
+                response = litellm.completion(
+                    model=model,
+                    api_key=_key(chosen, resolver),
+                    messages=turn_messages,
+                    **({"tools": turn_tools} if turn_tools else {}),
+                    max_tokens=MAX_OUTPUT_TOKENS,
+                    timeout=TURN_TIMEOUT_SECONDS,
+                    num_retries=0,
+                )
+                break
+            except transient as exc:
+                if index == len(choices) - 1:
+                    raise ExecutionError(f"step {step}: {model} is unavailable: {exc}") from exc
         choice = response.choices[0]
         return {
             "message": {
@@ -90,6 +117,7 @@ def local_client(
             },
             "finish_reason": choice.finish_reason,
             "usage": _usage(getattr(response, "usage", None)),
+            "model": model,
         }
 
     return call
@@ -331,7 +359,10 @@ def run(
                     "turn": len(turns),
                     "occurred_at": datetime.now(UTC).isoformat(),
                     "finish_reason": answer.get("finish_reason"),
-                    "usage": answer.get("usage") or {},
+                    # A cloud turn reports usage in the provider's own field
+                    # names; a local one already in the shared ones.
+                    "usage": _usage(answer.get("usage")) if answer.get("usage") else {},
+                    "model": answer.get("model"),
                     "assistant": answer.get("message") or {},
                     "tool_results": [],
                 }

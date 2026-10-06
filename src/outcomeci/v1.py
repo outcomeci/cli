@@ -358,11 +358,20 @@ def _reasoning(
     return default, chosen, profiles
 
 
-def _model(item: dict[str, Any], secrets: dict[str, Any], field: str) -> dict[str, Any]:
-    """`{model: <provider>/<model>, key?: secrets.<name>}`: without a key the
-    platform's key pays; with one, the named Vault secret holds the provider key."""
-    if set(item) - {"model", "key"}:
-        raise ConfigError(f"{field} supports model and key, or runner and model")
+def _model(
+    item: dict[str, Any], secrets: dict[str, Any], field: str, *, fallback: bool = True
+) -> dict[str, Any]:
+    """`{model: <provider>/<model>, key?: secrets.<name>, fallback?: {model, key?}}`:
+    without a key the platform's key pays; with one, the named Vault secret
+    holds the provider key. The fallback is tried when the model's provider
+    is rate limited or unavailable."""
+    allowed = {"model", "key", "fallback"} if fallback else {"model", "key"}
+    if set(item) - allowed:
+        raise ConfigError(
+            f"{field} supports model, key and fallback, or runner and model"
+            if fallback
+            else f"{field} supports model and key"
+        )
     model = item.get("model")
     provider, _, name = str(model or "").partition("/")
     if not isinstance(model, str) or provider not in MODEL_PROVIDERS or not name:
@@ -378,6 +387,13 @@ def _model(item: dict[str, Any], secrets: dict[str, Any], field: str) -> dict[st
             raise ConfigError(f"{field}.key must name a declared secret as secrets.<name>")
         result["key"] = secret
         result["credential"] = str(secrets[secret])
+    if "fallback" in item:
+        result["fallback"] = _model(
+            _mapping(item["fallback"], f"{field}.fallback"),
+            secrets,
+            f"{field}.fallback",
+            fallback=False,
+        )
     return result
 
 
