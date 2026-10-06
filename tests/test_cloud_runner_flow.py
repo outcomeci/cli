@@ -378,6 +378,73 @@ class FlowTests(unittest.TestCase):
         self.assertGreaterEqual(client.completed[0][2]["resource_usage"]["sample_count"], 1)
         self.assertEqual(client.heartbeats[0][1][0]["event_type"], "permission.reviewed")
 
+    def test_a_claim_without_an_agent_runs_a_model_only_workflow(self):
+        # A workflow whose steps all run on model profiles is claimed with no
+        # agent login; the runner reports no credential to write back.
+        claim = {
+            "content": "apiVersion: outcomeci.workflow/v1\nname: example\n",
+            "files": {},
+            "trigger_name": "inbound",
+            "input": {"subject": "hello"},
+            "lease_token": "lease-secret",
+            "vault": {"expires_at": "2099-01-01T00:00:00+00:00", "values": {}},
+        }
+
+        class WorkflowClient:
+            completed = []
+
+            def claim_workflow(self):
+                return claim
+
+            def workflow_start(self, token):
+                self.started = token
+
+            def workflow_heartbeat(self, token, events=None):
+                return {"active": True, "policy_events_received": len(events or [])}
+
+            def workflow_complete(self, token, status, **values):
+                self.completed.append((token, status, values))
+
+        client = WorkflowClient()
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "private"
+            root.mkdir()
+
+            def trigger(workspace, config, name, payload, *, on_created, options):
+                self.assertIsNone(options.agent)
+                on_created("run-1")
+                (workspace / ".outcomeci" / "outcomes" / "run-1").mkdir(parents=True)
+                return {"run_id": "run-1", "status": "completed", "completed_steps": ["digest"]}
+
+            with (
+                mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
+                mock.patch("outcomeci.cloud_runner.main.tempfile.mkdtemp", return_value=str(root)),
+                mock.patch("outcomeci.local.trigger", side_effect=trigger),
+                mock.patch(
+                    "outcomeci.config.compile_workflow",
+                    return_value={
+                        "instructions": {
+                            "steps": {
+                                "digest": {
+                                    "v1": {"reasoning": {"profile": "d", "model": "anthropic/x"}}
+                                }
+                            }
+                        },
+                        "workflow": {"spec": {"agents": {"default": {}}}},
+                    },
+                ),
+            ):
+                self.assertEqual(
+                    execute_workflow(
+                        Launch("workflow", "invocation-1", "boot", "https://api.outcomeci.com"),
+                        client,
+                    ),
+                    0,
+                )
+        self.assertEqual(client.completed[0][0:2], ("lease-secret", "completed"))
+        self.assertIsNone(client.completed[0][2]["expected_credential_version"])
+        self.assertIsNone(client.completed[0][2]["agent_credential"])
+
     def test_generic_workflow_auto_continues_through_ready_steps(self):
         claim = {
             "content": "apiVersion: outcomeci.workflow/v1\nname: example\n",

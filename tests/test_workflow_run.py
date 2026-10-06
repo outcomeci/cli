@@ -388,6 +388,73 @@ def test_a_probe_that_hangs_counts_as_unresolved(monkeypatch):
         workflow_run._check_network("img", None, ["api.openai.com"])
 
 
+MODEL_ONLY_COMPILED = {
+    **COMPILED,
+    "workflow": {
+        "spec": {
+            "agents": {"default": {"runner": "codex"}},
+            "connections": [{"name": "github", "auth": {"credential": "vault:github"}}],
+        }
+    },
+    "instructions": {
+        "steps": {
+            "scan": {
+                "v1": {"reasoning": {"profile": "scan", "model": "anthropic/claude-sonnet-5"}}
+            },
+            "digest": {"v1": {"reasoning": {"profile": "digest", "model": "openai/gpt-5.5"}}},
+        }
+    },
+}
+
+
+def test_steps_on_model_profiles_need_no_agent_but_their_provider_must_be_reachable():
+    mixed = {
+        **IMAGE_COMPILED,
+        "instructions": {
+            "steps": {
+                "scan": {"v1": {"reasoning": {"profile": "scan", "model": "anthropic/x"}}},
+                "fix": {"policy": {"runner": "claude"}, "v1": {}},
+            }
+        },
+    }
+    assert workflow_run._runners(mixed, None) == ["codex", "claude"]
+    assert workflow_run._run_hosts(mixed, ["codex", "claude"]) == [
+        "api.openai.com",
+        "api.anthropic.com",
+    ]
+    # Every step calls a model directly: no agent login, whatever --agent says,
+    # and the probe covers the providers the steps call.
+    assert workflow_run._runners(MODEL_ONLY_COMPILED, None) == []
+    assert workflow_run._runners(MODEL_ONLY_COMPILED, "claude") == []
+    assert workflow_run._run_hosts(MODEL_ONLY_COMPILED, []) == [
+        "api.anthropic.com",
+        "api.openai.com",
+    ]
+
+
+def test_a_model_only_cloud_run_leases_the_vault_and_no_agent(monkeypatch, image_env):
+    root, _ = image_env
+    monkeypatch.setattr(workflow_run, "compile_workflow", lambda config: MODEL_ONLY_COMPILED)
+    workflow_run.issue_debug_lease.return_value = _lease()
+    container = _container(monkeypatch, result={"run_id": "run-1"})
+
+    assert _image_run(root) == {"run_id": "run-1"}
+
+    assert workflow_run.issue_debug_lease.call_args.kwargs["agent_provider"] is None
+    assert container.seen["bundle"]["credentials"] == []
+    assert container.seen["bundle"]["values"] == _lease()["values"]
+    workflow_run.renew_debug_agent_lease.assert_not_called()
+    workflow_run.complete_debug_agent_lease.assert_not_called()
+
+
+def test_a_cloud_run_that_asked_for_an_agent_refuses_a_lease_without_one(monkeypatch, image_env):
+    root, _ = image_env
+    workflow_run.issue_debug_lease.return_value = _lease()
+
+    with pytest.raises(ExecutionError, match="carried no codex login"):
+        _image_run(root)
+
+
 def test_the_agent_hosts_follow_the_runners_the_run_needs():
     assert workflow_run._agent_hosts(["codex", "claude", "opencode"]) == [
         "api.openai.com",
@@ -720,6 +787,23 @@ def test_a_local_run_probes_the_network_for_the_agents_it_runs(monkeypatch, loca
 
     assert probed == [("outcomeci-runner:dev", "host", ["api.anthropic.com"])]
     popen.assert_not_called()
+
+
+def test_a_model_only_local_run_needs_no_agent_login(monkeypatch, local_env):
+    root, codex_home = local_env
+    (codex_home / "auth.json").unlink()
+    monkeypatch.setattr(
+        workflow_run,
+        "compile_workflow",
+        lambda config: {**MODEL_ONLY_COMPILED, "workflow": LOCAL_COMPILED["workflow"]},
+    )
+    container = _container(monkeypatch, result={"run_id": "run-1"})
+
+    assert _local_run(root) == {"run_id": "run-1"}
+
+    bundle = container.seen["bundle"]
+    assert bundle["credentials"] == []
+    assert "github" in bundle["values"]
 
 
 def test_local_run_sends_local_vault_values_and_the_local_login(monkeypatch, local_env):
