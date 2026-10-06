@@ -317,17 +317,23 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
             run_id = str(resume["run_id"])
             checkpoint.restore(root, run_id, resume["artifacts"])
 
-        # One login per runner the workflow's steps use; the default first.
-        logins = [dict(item) for item in (claim.get("agents") or [claim["agent"]])]
+        # One login per runner the workflow's steps use; the default first. A
+        # workflow whose steps all run on model profiles is claimed with none.
+        agents = claim.get("agents") or ([claim["agent"]] if claim.get("agent") else [])
+        logins = [dict(item) for item in agents]
         for login in logins:
             injected = _inject_agent_credential(root, str(login["provider"]), login["credential"])
             for key, value in injected.items():
                 previous.setdefault(key, os.environ.get(key))
                 os.environ[key] = value
         # Only a Codex login rotates, so writeback follows whichever login is Codex.
-        rotating = next((login for login in logins if login["provider"] == "codex"), logins[0])
-        provider = str(rotating["provider"])
-        credential_version = int(rotating["credential_version"])
+        rotating = next(
+            (login for login in logins if login["provider"] == "codex"),
+            logins[0] if logins else None,
+        )
+        if rotating is not None:
+            provider = str(rotating["provider"])
+            credential_version = int(rotating["credential_version"])
         fallback_spec = compile_workflow(config)["workflow"]["spec"]["agents"]["default"].get(
             "fallback"
         )

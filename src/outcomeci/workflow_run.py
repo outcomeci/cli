@@ -64,6 +64,8 @@ AGENT_HOSTS = {
     "claude": "api.anthropic.com",
     "opencode": "openrouter.ai",
 }
+# The API host a step on a model profile calls, by provider.
+MODEL_HOSTS = {"anthropic": "api.anthropic.com", "openai": "api.openai.com"}
 NETWORK_PROBE_TIMEOUT_SECONDS = 60
 _RESOLVE_HOSTS = """
 import socket, sys
@@ -113,17 +115,53 @@ def _check_agent(agent: str | None, model: str | None) -> None:
         raise ExecutionError("--agent opencode needs --model openrouter/<provider>/<model>")
 
 
+def _steps(compiled: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return (compiled.get("instructions") or {}).get("steps", {})
+
+
+def _agent_steps(compiled: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """The steps an agent runs: every step not on a model profile."""
+    return {
+        name: step
+        for name, step in _steps(compiled).items()
+        if not (step.get("v1") or {}).get("reasoning")
+    }
+
+
 def _runners(compiled: dict[str, Any], agent: str | None) -> list[str]:
     """Every agent provider the run needs a login for: the default first, then any
-    runner a step selects for itself, or only `agent` when it overrides them all."""
+    runner a step selects for itself, or only `agent` when it overrides them all.
+
+    A workflow whose steps all run on model profiles needs none: it calls the
+    models directly, and leasing an agent for it would only keep that
+    connection from the workspace's other runs."""
+    steps = _agent_steps(compiled)
+    if not steps:
+        return []
     if agent:
         return [agent]
     found = [_default_agent(compiled)]
-    for step in (compiled.get("instructions") or {}).get("steps", {}).values():
+    for step in steps.values():
         runner = (step.get("policy") or {}).get("runner")
         if runner and runner not in found:
             found.append(runner)
     return found
+
+
+def _model_hosts(compiled: dict[str, Any]) -> list[str]:
+    """The API host of each model provider a step on a model profile calls."""
+    hosts: list[str] = []
+    for step in _steps(compiled).values():
+        model = str(((step.get("v1") or {}).get("reasoning") or {}).get("model") or "")
+        host = MODEL_HOSTS.get(model.partition("/")[0])
+        if host and host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
+def _run_hosts(compiled: dict[str, Any], runners: list[str]) -> list[str]:
+    hosts = _agent_hosts(runners)
+    return hosts + [host for host in _model_hosts(compiled) if host not in hosts]
 
 
 def _resolve_trigger(
@@ -165,7 +203,8 @@ def run_cloud(
     # takes the workspace's agent connection away from its cloud runs.
     image = image or default_image()
     _check_image(image)
-    _check_network(image, network, _agent_hosts(_runners(compiled, agent)))
+    runners = _runners(compiled, agent)
+    _check_network(image, network, _run_hosts(compiled, runners))
     _flush_pending_releases()
     _flush_pending_rotations()
     if retry_run is not None:
@@ -175,7 +214,7 @@ def run_cloud(
         name, payload = _resolve_trigger(
             compiled, trigger_name or _default_trigger(compiled), payload_path
         )
-    leases = _issue_leases(workspace_id, workflow_id, _runners(compiled, agent))
+    leases = _issue_leases(workspace_id, workflow_id, runners)
     lease = leases[0]
 
     with ExitStack() as held:
@@ -229,15 +268,18 @@ def _issue_leases(workspace_id: str, workflow_id: str, runners: list[str]) -> li
     """
     leases: list[dict[str, Any]] = []
     try:
-        for runner in runners:
-            leases.append(
-                issue_debug_lease(
-                    workspace_id,
-                    workflow_id,
-                    ttl_seconds=IMAGE_LEASE_TTL_SECONDS,
-                    agent_provider=runner,
-                )
+        # A run without agent steps still needs the Vault values: one lease
+        # that carries no agent login.
+        for runner in runners or [None]:
+            lease = issue_debug_lease(
+                workspace_id,
+                workflow_id,
+                ttl_seconds=IMAGE_LEASE_TTL_SECONDS,
+                agent_provider=runner,
             )
+            if runner is not None and not isinstance(lease.get("agent"), dict):
+                raise ExecutionError(f"the Vault lease carried no {runner} login for the run")
+            leases.append(lease)
     except BaseException:
         for lease in leases:
             if isinstance(lease.get("agent"), dict):
@@ -364,9 +406,8 @@ def _hold_agent_lease(
     login rotated during the run is always written back: once Codex spends the
     old refresh token, the rotated one is the only valid copy.
     """
-    agent_leases = [lease.get("agent") for lease in leases]
-    if not agent_leases or not all(isinstance(item, dict) for item in agent_leases):
-        raise ExecutionError("the Vault lease carried no agent login for the run")
+    # A run with no agent steps holds a Vault lease and nothing else.
+    agent_leases = [lease["agent"] for lease in leases if isinstance(lease.get("agent"), dict)]
     with tempfile.TemporaryDirectory(prefix="oci-run-") as output:
         os.chmod(output, 0o700)
         hold = _AgentHold(agent_leases, Path(output))
@@ -877,7 +918,7 @@ def run_local(
     runners = _runners(compiled, agent)
     logins = [_local_login(root, provider) for provider in runners]
     _check_image(image)
-    _check_network(image, network, _agent_hosts(runners))
+    _check_network(image, network, _run_hosts(compiled, runners))
     expires_at = (datetime.now(UTC) + timedelta(seconds=LOCAL_RUN_TTL_SECONDS)).isoformat()
     with ExitStack() as held:
         held.enter_context(_termination_interrupts())
