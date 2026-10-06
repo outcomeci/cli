@@ -340,7 +340,10 @@ def _reasoning(
         _identifier(name, field)
         item = _mapping(reasoning[name], field)
         profiles[name] = (
-            {"agent": _agent(item, field)} if "runner" in item else _model(item, secrets, field)
+            {"agent": _agent(item, field)}
+            if "runner" in item
+            # The policy reviewer makes one call with no fallback path.
+            else _model(item, secrets, field, fallback=name != "review")
         )
     if "agent" in profiles.get("review", {}):
         raise ConfigError("reasoning.review is a model: {model, key?}, not an agent")

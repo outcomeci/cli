@@ -631,6 +631,11 @@ def test_a_platform_funded_local_profile_reads_the_provider_env_var(monkeypatch)
         ),
         ({}, "light", "reasoning profile"),
         ({"review": {"model": "anthropic/x"}}, "review", "other than review"),
+        (
+            {"review": {"model": "anthropic/x", "fallback": {"model": "openai/y"}}},
+            None,
+            "reasoning.review supports model and key",
+        ),
     ],
 )
 def test_profiles_are_checked_when_the_workflow_compiles(tmp_path, reasoning, using, message):
