@@ -188,11 +188,16 @@ def _usage(usage: Any) -> dict[str, int]:
             if isinstance(details, Mapping)
             else getattr(details, "cached_tokens", None)
         ) or 0
+    # Accepts a record already in the shared shape as well, so normalizing a
+    # local turn's usage a second time keeps its cache counts.
     return {
         "input_tokens": field("prompt_tokens", "input_tokens"),
         "output_tokens": field("completion_tokens", "output_tokens"),
-        "cache_read_tokens": int(cached) or field("cache_read_input_tokens"),
-        "cache_write_tokens": field("cache_creation_input_tokens"),
+        "cache_read_tokens": int(cached)
+        or field("cache_read_input_tokens", "cache_read_tokens", "cached_tokens"),
+        "cache_write_tokens": field(
+            "cache_creation_input_tokens", "cache_write_tokens", "cache_write_input_tokens"
+        ),
     }
 
 
