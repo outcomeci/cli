@@ -211,6 +211,33 @@ def test_oauth2_client_credentials_exchanges_once_and_redacts(tmp_path: Path) ->
     assert "at-1" not in json.dumps(results)
 
 
+@pytest.mark.parametrize("grant", ["client_credentials", "refresh_token"])
+@pytest.mark.parametrize("separator", [" ", ","])
+def test_oauth2_exchanges_use_connector_scope_separator(tmp_path, grant, separator):
+    server = Server(tokens=[{"access_token": "at-1", "scope": "read write"}])
+    credential = typed(
+        "oauth2",
+        {"client_secret": "cs", "refresh_token": "rt-1"},
+        {"client_id": "cid", "scope_separator": ";"},
+    )
+    entry = oauth2(grant_types=[grant], scope_separator=separator)
+    run(workflow(tmp_path, [entry]), credential, server)
+    form = parse_qs(server.token_requests()[0].content.decode())
+    assert form["scope"] == [separator.join(["read", "write"])]
+    assert form["grant_type"] == [grant]
+    if grant == "refresh_token":
+        assert form["refresh_token"] == ["rt-1"]
+
+
+@pytest.mark.parametrize("separator", [";", "", None, [], {}])
+def test_oauth2_rejects_invalid_scope_separator_before_network(tmp_path, separator):
+    server = Server(tokens=[{"access_token": "at-1"}])
+    credential = typed("oauth2", {"client_secret": "cs"}, {"client_id": "cid"})
+    with pytest.raises(IntegrationError, match="scope_separator must be a space or comma"):
+        run(workflow(tmp_path, [oauth2(scope_separator=separator)]), credential, server)
+    assert server.requests == []
+
+
 def test_oauth2_client_auth_in_the_body(tmp_path: Path) -> None:
     server = Server(tokens=[{"access_token": "at-1"}])
     credential = typed("oauth2", {"client_secret": "cs"}, {"client_id": "cid"})
