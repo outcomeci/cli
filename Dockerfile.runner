@@ -39,7 +39,7 @@ RUN apt-get update \
     && chown runner:runner /work
 
 COPY --from=cli-build /wheels /wheels
-RUN /opt/oci/bin/python -m pip install --no-cache-dir "$(ls /wheels/*.whl)" \
+RUN /opt/oci/bin/python -m pip install --no-cache-dir "$(ls /wheels/*.whl)[models]" \
     && /opt/oci/bin/python -m pip check \
     && /opt/oci/bin/python -m pip uninstall --yes pip setuptools \
     && rm -rf /wheels
