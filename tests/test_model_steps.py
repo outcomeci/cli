@@ -473,6 +473,20 @@ def test_a_turn_records_its_model_and_normalizes_cloud_usage():
     assert turns[1]["model"] is None
 
 
+def test_usage_normalization_keeps_cache_counts_on_a_second_pass():
+    # A local turn's usage is normalized by the client and again by the turn
+    # loop; the v0.52.0 release lost the cache counts on the second pass.
+    local = {
+        "input_tokens": 2148,
+        "output_tokens": 895,
+        "cache_read_tokens": 2146,
+        "cache_write_tokens": 10,
+    }
+    assert models._usage(local) == local
+    cloud = {"prompt_tokens": 500, "completion_tokens": 20, "cached_tokens": 300}
+    assert models._usage(cloud)["cache_read_tokens"] == 300
+
+
 def test_a_failed_model_step_still_leaves_its_transcript(sentry_workflow, monkeypatch):
     _profiles(sentry_workflow / sentry.WORKFLOW, {"triage": "light"})
     sentry._serve(monkeypatch, sentry.Services())
