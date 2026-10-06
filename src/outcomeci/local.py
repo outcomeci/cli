@@ -607,45 +607,59 @@ def _run_model_step(
     scope: dict[str, Any],
     capability_env: dict[str, str],
     options: ExecutionOptions,
-) -> str:
-    """One model step invocation: its tool loop, then its result file."""
+    outcome_root: Path,
+) -> tuple[str, int]:
+    """One model step invocation: its tool loop, then its result file.
+
+    Returns the step's summary and how many usage records its transcript
+    holds. The transcript is written however the loop ends, since a failed
+    step is the one someone needs to read."""
     context = scope["context"]
     returns = context.get("returns")
     client = options.model_client or models.local_client(compiled, options.credential_resolver)
-    result, text = models.run(
-        client,
-        step=step,
-        profile=step_block["reasoning"]["profile"],
-        system=compiled["instructions"]["orchestrator"]["content"]
-        + "\n\n## Step: "
-        + step
-        + "\n\n"
-        + compiled["instructions"]["steps"][step]["content"],
-        user=templates.MODEL_STEP_TASK.format(
-            returns_hint=(
-                f"Finish by calling {models.RESULT} with the step's result."
-                if returns
-                else "Stop calling tools when the step is done."
+    profile = step_block["reasoning"]["profile"]
+    provider = str(compiled.get("reasoning", {}).get(profile, {}).get("model", "")).split("/")[0]
+    turns: list[dict[str, Any]] = []
+    try:
+        result, text = models.run(
+            client,
+            step=step,
+            profile=profile,
+            turns=turns,
+            system=compiled["instructions"]["orchestrator"]["content"]
+            + "\n\n## Step: "
+            + step
+            + "\n\n"
+            + compiled["instructions"]["steps"][step]["content"],
+            user=templates.MODEL_STEP_TASK.format(
+                returns_hint=(
+                    f"Finish by calling {models.RESULT} with the step's result."
+                    if returns
+                    else "Stop calling tools when the step is done."
+                ),
+                context_json=json.dumps(
+                    {key: value for key, value in context.items() if key != "capabilities"},
+                    separators=(",", ":"),
+                ),
             ),
-            context_json=json.dumps(
-                {key: value for key, value in context.items() if key != "capabilities"},
-                separators=(",", ":"),
+            capabilities=[
+                {"capability": name, **described}
+                for name, described in zip(
+                    compiled["instructions"]["steps"][step].get("capabilities", []),
+                    context["capabilities"],
+                    strict=True,
+                )
+            ],
+            call=lambda capability, inputs: invoke_integration(
+                capability, inputs, env=capability_env
             ),
-        ),
-        capabilities=[
-            {"capability": name, **described}
-            for name, described in zip(
-                compiled["instructions"]["steps"][step].get("capabilities", []),
-                context["capabilities"],
-                strict=True,
-            )
-        ],
-        call=lambda capability, inputs: invoke_integration(capability, inputs, env=capability_env),
-        returns=returns["schema"] if returns else None,
-    )
+            returns=returns["schema"] if returns else None,
+        )
+    finally:
+        transcript = models.write_transcript(outcome_root, step, provider or "model", turns)
     if returns and result is not None:
         Path(returns["path"]).write_text(json.dumps(result), encoding="utf-8")
-    return text or f"{step} done"
+    return text or f"{step} done", transcript["usage_records"]
 
 
 def _run_step(
@@ -675,6 +689,7 @@ def _run_step(
     checkout_auth = Authenticator(rotate=getattr(credential_resolver, "rotate", None))
     try:
         summaries = []
+        model_usage_records = 0
         for index, (prompt, scope) in enumerate(invocations):
             # A model step has no filesystem; an agent gets fresh checkouts of
             # its own item's repositories only, removed once it finishes.
@@ -708,11 +723,17 @@ def _run_step(
                     inputs=(scope or {}).get("inputs"),
                 ) as capability_env:
                     if models.is_model_step(step_block):
-                        summaries.append(
-                            _run_model_step(
-                                compiled, step, step_block, scope or {}, capability_env, options
-                            )
+                        summary, records = _run_model_step(
+                            compiled,
+                            step,
+                            step_block,
+                            scope or {},
+                            capability_env,
+                            options,
+                            outcome_root,
                         )
+                        summaries.append(summary)
+                        model_usage_records += records
                         continue
                     summaries.append(
                         invoke(
@@ -799,8 +820,12 @@ def _run_step(
             # or output validation is exactly the case someone needs to inspect
             # what the agent actually did, and this used to run only on the
             # success path, leaving failed runs with no transcript at all.
-            transcripts = _transcripts(
-                runner, outcome_root, step, workspace=root, since=step_started_at
+            transcripts = (
+                # A model step wrote its own transcript and usage as it ran;
+                # there is no agent session to collect.
+                {"usage_records": model_usage_records}
+                if models.is_model_step(step_block)
+                else _transcripts(runner, outcome_root, step, workspace=root, since=step_started_at)
             )
     except (ExecutionError, OSError, json.JSONDecodeError) as exc:
         state.update({"status": "error", "error": str(exc)})

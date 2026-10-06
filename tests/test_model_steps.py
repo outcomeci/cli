@@ -61,7 +61,11 @@ class Model:
         turn = self.script[step].pop(0)
         if callable(turn):
             turn = turn(messages)
-        return {"message": {"content": turn.get("text"), "tool_calls": turn.get("calls", [])}}
+        return {
+            "message": {"content": turn.get("text"), "tool_calls": turn.get("calls", [])},
+            "finish_reason": turn.get("finish_reason", "stop"),
+            "usage": turn.get("usage", {}),
+        }
 
 
 def _call(name: str, arguments: dict, index: int = 1) -> dict:
@@ -118,7 +122,10 @@ def test_a_model_step_calls_its_granted_tools_through_the_broker(sentry_workflow
                         _call("slack__post", {"text": "*Sentry alert -- KeyError: 'plan'*"}, 2),
                     ]
                 },
-                {"calls": [_call("return_result", TRIAGE, 3)]},
+                {
+                    "calls": [_call("return_result", TRIAGE, 3)],
+                    "usage": {"input_tokens": 1200, "output_tokens": 80},
+                },
             ],
             "announce": [
                 {"calls": [_call("slack__post", {"text": "PR opened"}, 1)]},
@@ -130,6 +137,24 @@ def test_a_model_step_calls_its_granted_tools_through_the_broker(sentry_workflow
     result = _sentry_run(sentry_workflow, model, agent, monkeypatch)
 
     assert result["status"] == "completed"
+    # A model step leaves a transcript of its turns and the usage they
+    # reported, where an agent step leaves its session, so a run shows what the
+    # model saw and spent.
+    run_dir = sentry_workflow / ".outcomeci/outcomes" / result["run_id"]
+    turns = [
+        json.loads(line)
+        for line in (run_dir / "transcripts/triage/model/01-turns.jsonl").read_text().splitlines()
+    ]
+    assert [turn["turn"] for turn in turns] == [0, 1, 2]
+    assert "return_result" in turns[0]["tools"] and turns[0]["user"]
+    assert [item["name"] for item in turns[1]["tool_results"]] == ["slack__post", "slack__post"]
+    assert "channel" in json.loads(turns[1]["tool_results"][0]["content"])["error"]
+    usage = json.loads((run_dir / "transcripts/triage/usage.json").read_text())
+    assert usage["provider"] == "anthropic"
+    assert [
+        (r["input_tokens"], r["output_tokens"], r["source_line"]) for r in usage["records"]
+    ] == [(1200, 80, 3)]
+    assert result["usage_records"] == 0  # the last step, announce, reported no usage
     # Only the fix step started an agent; triage and announce were model calls.
     assert list(agent.prompts) == ["fix"]
     assert [call["profile"] for call in model.calls] == ["light"] * 4
@@ -183,6 +208,150 @@ def test_a_model_that_never_returns_fails_the_step():
             returns={"type": "object"},
         )
     assert model.calls[1]["messages"][-1]["content"].startswith("Call return_result")
+
+
+def test_a_reply_cut_off_at_the_output_limit_fails_at_once_and_says_why():
+    # A truncated return_result is not JSON; before, it went back to the model
+    # as "invalid arguments" and the model repeated the same cut-off reply
+    # until the tool-call budget ran out, minutes later.
+    cut = {
+        "calls": [{"id": "call_1", "name": "return_result", "arguments": '{"posts": [{"id": "1'}],
+        "finish_reason": "length",
+    }
+    model = Model({"s": [cut] * models.MAX_TOOL_CALLS})
+
+    with pytest.raises(ExecutionError, match="cut off at its output limit.*return less"):
+        models.run(
+            model,
+            step="s",
+            profile="light",
+            system="x",
+            user="y",
+            capabilities=[],
+            call=lambda capability, inputs: {},
+            returns={"type": "object"},
+        )
+    assert len(model.calls) == 1
+
+
+def test_a_tool_result_over_the_limit_stays_valid_json():
+    # One page of X search results is about 32,000 characters; a result past
+    # the limit was cut mid-document, so the model got JSON it could not read.
+    big = {"posts": [{"id": str(n), "text": "x" * 200} for n in range(1000)]}
+
+    message = models._tool({"id": "call_1"}, big)
+
+    content = json.loads(message["content"])
+    assert content["truncated"] is True
+    assert len(content["partial"]) == models.TOOL_RESULT_LIMIT
+    assert models.TOOL_RESULT_LIMIT >= 100_000
+
+    small = models._tool({"id": "call_2"}, {"posts": []})
+    assert json.loads(small["content"]) == {"posts": []}
+
+
+def test_a_local_turn_allows_a_long_reply_and_reports_its_usage(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    seen = {}
+
+    def completion(**kwargs):
+        seen.update(kwargs)
+        message = SimpleNamespace(content="done", tool_calls=None)
+        usage = SimpleNamespace(
+            prompt_tokens=900,
+            completion_tokens=40,
+            prompt_tokens_details=SimpleNamespace(cached_tokens=600),
+            cache_creation_input_tokens=100,
+        )
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=message, finish_reason="stop")], usage=usage
+        )
+
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
+    client = models.local_client({"reasoning": {"light": {"model": "anthropic/x"}}})
+
+    answer = client(step="s", profile="light", messages=[], tools=[])
+
+    assert answer["finish_reason"] == "stop"
+    assert seen["max_tokens"] == models.MAX_OUTPUT_TOKENS >= 16384
+    assert answer["usage"] == {
+        "input_tokens": 900,
+        "output_tokens": 40,
+        "cache_read_tokens": 600,
+        "cache_write_tokens": 100,
+    }
+
+
+def test_an_anthropic_turn_marks_its_prompt_for_caching(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    seen = {}
+
+    def completion(**kwargs):
+        seen.update(kwargs)
+        message = SimpleNamespace(content="done", tool_calls=None)
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=message, finish_reason="stop")], usage=None
+        )
+
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
+    messages = [
+        {"role": "system", "content": "rules"},
+        {"role": "user", "content": "context"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]},
+        {"role": "tool", "tool_call_id": "c1", "content": '{"posts": []}'},
+    ]
+    tools = [
+        {"type": "function", "function": {"name": "a"}},
+        {"type": "function", "function": {"name": "b"}},
+    ]
+
+    client = models.local_client({"reasoning": {"light": {"model": "anthropic/x"}}})
+    client(step="s", profile="light", messages=messages, tools=tools)
+
+    sent = seen["messages"]
+    cache = {"type": "ephemeral"}
+    # The system prompt and the first user message are breakpoints: every
+    # later turn resends them. The assistant turn and the tool result are not:
+    # a tool result is rarely sent more than once more, and writing it to the
+    # cache costs more than sending it.
+    assert sent[0]["content"] == [{"type": "text", "text": "rules", "cache_control": cache}]
+    assert sent[1]["content"][-1]["cache_control"] == cache
+    assert "cache_control" not in json.dumps(sent[2:])
+    assert "cache_control" not in seen["tools"][0] and seen["tools"][1]["cache_control"] == cache
+    # The caller's lists carry no marks, so the next turn starts clean.
+    assert messages[0]["content"] == "rules" and "cache_control" not in tools[1]
+
+    client = models.local_client({"reasoning": {"light": {"model": "openai/x"}}})
+    client(step="s", profile="light", messages=messages, tools=tools)
+    assert "cache_control" not in json.dumps(seen["messages"]) + json.dumps(seen["tools"])
+
+    # A step whose only tool is return_result usually ends in one turn, where
+    # a cache write would cost more than it saves.
+    client = models.local_client({"reasoning": {"light": {"model": "anthropic/x"}}})
+    only_result = [{"type": "function", "function": {"name": models.RESULT}}]
+    client(step="s", profile="light", messages=messages, tools=only_result)
+    assert "cache_control" not in json.dumps(seen["messages"]) + json.dumps(seen["tools"])
+
+
+def test_a_failed_model_step_still_leaves_its_transcript(sentry_workflow, monkeypatch):
+    _profiles(sentry_workflow / sentry.WORKFLOW, {"triage": "light"})
+    sentry._serve(monkeypatch, sentry.Services())
+    model = Model({"triage": [{"text": "I give up"}, {"text": "still nothing"}]})
+
+    with pytest.raises(ExecutionError, match="without calling return_result; it said: 'still"):
+        _sentry_run(sentry_workflow, model, sentry.Agent(), monkeypatch)
+
+    run_dir = next((sentry_workflow / ".outcomeci/outcomes").iterdir())
+    lines = (run_dir / "transcripts/triage/model/01-turns.jsonl").read_text().splitlines()
+    assert len(lines) == 3
+    assert json.loads(lines[2])["assistant"]["content"] == "still nothing"
 
 
 def test_tool_calls_are_capped():

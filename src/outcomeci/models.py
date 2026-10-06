@@ -15,6 +15,7 @@ import base64
 import json
 import os
 from collections.abc import Callable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -24,8 +25,13 @@ from .integrations import CredentialResolver
 from .process import ExecutionError
 
 MAX_TOOL_CALLS = 20
+# The longest reply one turn may produce. A step's result travels as the
+# arguments of one tool call, so this bounds how much a step can return.
+MAX_OUTPUT_TOKENS = 32768
 RESULT = "return_result"
-TOOL_RESULT_LIMIT = 20_000
+# The longest tool result a turn carries back to the model, in characters. One
+# page of a search, such as 30 X posts with their authors, is about 32,000.
+TOOL_RESULT_LIMIT = 120_000
 # A turn resends the conversation, images included, and OutcomeCI Cloud takes
 # at most 8 MiB per turn: three images of at most 1.5 MiB each fit.
 IMAGE_LIMIT = 3 * 512 * 1024
@@ -58,13 +64,15 @@ def local_client(
         spec = compiled.get("reasoning", {}).get(profile)
         if not spec or "model" not in spec:
             raise ExecutionError(f"step {step}: reasoning profile {profile} is not a model")
+        if str(spec["model"]).startswith("anthropic/"):
+            messages, tools = cached(messages, tools)
         response = litellm.completion(
             model=spec["model"],
             api_key=_key(spec, resolver),
             messages=messages,
             **({"tools": tools} if tools else {}),
-            max_tokens=4096,
-            timeout=60,
+            max_tokens=MAX_OUTPUT_TOKENS,
+            timeout=180,
             num_retries=0,
         )
         choice = response.choices[0]
@@ -81,9 +89,124 @@ def local_client(
                 ],
             },
             "finish_reason": choice.finish_reason,
+            "usage": _usage(getattr(response, "usage", None)),
         }
 
     return call
+
+
+CACHE_CONTROL = {"type": "ephemeral"}
+
+
+def cached(messages: list[dict], tools: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Copies of a turn's messages and tools with Anthropic prompt-cache
+    breakpoints on what every turn of the step resends: the system prompt,
+    the tool definitions, and the first user message with the step's context.
+    Writing a segment costs a quarter more than sending it and reading it back
+    costs a tenth, so a segment pays only once a later turn reuses it. The
+    static prefix is reused by every turn after the first; the tool results a
+    turn adds are usually sent once more at most, so they are left unmarked.
+    OpenAI caches a repeated prefix on its own and takes no marks. The
+    caller's lists are left alone, so marks never accumulate over turns."""
+
+    def marked(message: dict) -> dict:
+        content = message.get("content")
+        if isinstance(content, str):
+            blocks = [{"type": "text", "text": content}]
+        elif isinstance(content, list) and content:
+            blocks = [dict(block) for block in content]
+        else:
+            return message
+        blocks[-1] = {**blocks[-1], "cache_control": CACHE_CONTROL}
+        return {**message, "content": blocks}
+
+    if all(item.get("function", {}).get("name") == RESULT for item in tools):
+        # A step with nothing to call but return_result usually ends in one
+        # turn, and a segment written once and never read costs more than
+        # sending it plain.
+        return messages, tools
+    result = list(messages)
+    first_user = next((i for i, m in enumerate(result) if m.get("role") == "user"), -1)
+    for index, message in enumerate(result):
+        if message.get("role") == "system" or index == first_user:
+            result[index] = marked(message)
+    marked_tools = list(tools)
+    if marked_tools:
+        marked_tools[-1] = {**marked_tools[-1], "cache_control": CACHE_CONTROL}
+    return result, marked_tools
+
+
+def _usage(usage: Any) -> dict[str, int]:
+    """The tokens one turn used, in the fields every agent's usage records share."""
+    if usage is None:
+        return {}
+
+    def field(*names: str) -> int:
+        for name in names:
+            value = usage.get(name) if isinstance(usage, Mapping) else getattr(usage, name, None)
+            if isinstance(value, int | float):
+                return int(value)
+        return 0
+
+    details = (
+        usage.get("prompt_tokens_details")
+        if isinstance(usage, Mapping)
+        else getattr(usage, "prompt_tokens_details", None)
+    )
+    cached = 0
+    if details is not None:
+        cached = (
+            details.get("cached_tokens")
+            if isinstance(details, Mapping)
+            else getattr(details, "cached_tokens", None)
+        ) or 0
+    return {
+        "input_tokens": field("prompt_tokens", "input_tokens"),
+        "output_tokens": field("completion_tokens", "output_tokens"),
+        "cache_read_tokens": int(cached) or field("cache_read_input_tokens"),
+        "cache_write_tokens": field("cache_creation_input_tokens"),
+    }
+
+
+def write_transcript(root: Path, step: str, provider: str, turns: list[dict[str, Any]]) -> dict:
+    """Keep a model step's turns beside an agent's transcripts, with the same
+    usage.json an agent step gets, so a run shows what the model saw and spent."""
+    target = root / "transcripts" / step / "model"
+    target.mkdir(parents=True, exist_ok=True)
+    transcript = target / "01-turns.jsonl"
+    transcript.write_text(
+        "".join(json.dumps(turn, default=str) + "\n" for turn in turns), encoding="utf-8"
+    )
+    relative = str(transcript.relative_to(root))
+    records = [
+        {
+            "provider": provider,
+            "source_line": line,
+            "occurred_at": turn.get("occurred_at"),
+            "transcript_path": relative,
+            **turn["usage"],
+        }
+        for line, turn in enumerate(turns, 1)
+        if turn.get("usage")
+    ]
+    usage_path = root / "transcripts" / step / "usage.json"
+    usage_path.write_text(
+        json.dumps(
+            {"schema_version": 1, "provider": provider, "step": step, "records": records},
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return {
+        "provider": provider,
+        "step": step,
+        "files": [{"path": relative, "byte_size": transcript.stat().st_size}],
+        "usage_path": str(usage_path.relative_to(root)),
+        "usage_records": len(records),
+        "usage": records,
+    }
 
 
 def _key(spec: Mapping[str, Any], resolver: CredentialResolver | None) -> str:
@@ -171,12 +294,14 @@ def run(
     call: Callable[[str, dict[str, Any]], dict[str, Any]],
     returns: Mapping[str, Any] | None = None,
     images: list[dict] | None = None,
+    turns: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     """Run one model step to its result: (the result or None, the model's last text).
 
     `call(capability, inputs)` executes a capability through the broker. A
     result that does not match `returns` goes back to the model with the
-    reason, within the same budget of tool calls."""
+    reason, within the same budget of tool calls. Each turn is appended to
+    `turns` as it happens, so a transcript survives however the step ends."""
     allowed = {tool_name(item["capability"]): item["capability"] for item in capabilities}
     offered = tools(capabilities, returns)
     messages: list[dict[str, Any]] = [
@@ -185,10 +310,40 @@ def run(
         if images
         else {"role": "user", "content": user},
     ]
+    if turns is not None:
+        turns.append(
+            {
+                "turn": 0,
+                "occurred_at": datetime.now(UTC).isoformat(),
+                "system": system,
+                "user": user,
+                "tools": [item["function"]["name"] for item in offered],
+                "images": len(images or []),
+            }
+        )
     used, nudged, text = 0, False, ""
     shown = len(images or [])
     while True:
         answer = client(step=step, profile=profile, messages=messages, tools=offered)
+        if turns is not None:
+            turns.append(
+                {
+                    "turn": len(turns),
+                    "occurred_at": datetime.now(UTC).isoformat(),
+                    "finish_reason": answer.get("finish_reason"),
+                    "usage": answer.get("usage") or {},
+                    "assistant": answer.get("message") or {},
+                    "tool_results": [],
+                }
+            )
+        if answer.get("finish_reason") == "length":
+            # A reply cut off mid-way is unusable: a truncated tool call is not
+            # JSON, and sending it back only repeats the cut until the call
+            # budget runs out. Say what happened instead.
+            raise ExecutionError(
+                f"step {step}: the model's reply was cut off at its output limit; "
+                "have the step return less, such as a shortlist instead of every item"
+            )
         message = answer.get("message") or {}
         calls = message.get("tool_calls") or []
         text = message.get("content") or text
@@ -216,11 +371,23 @@ def run(
             if not returns:
                 return None, text
             if nudged:
-                raise ExecutionError(f"step {step}: the model finished without calling {RESULT}")
+                said = f"; it said: {text.strip()[:300]!r}" if text and text.strip() else ""
+                raise ExecutionError(
+                    f"step {step}: the model finished without calling {RESULT}{said}"
+                )
             nudged = True
             messages.append({"role": "user", "content": f"Call {RESULT} with the step's result."})
             continue
         seen: list[dict] = []
+
+        def reply(item: Mapping[str, Any], result: Any) -> None:
+            message = _tool(item, result)
+            messages.append(message)
+            if turns is not None:
+                turns[-1]["tool_results"].append(
+                    {"id": item["id"], "name": item.get("name"), "content": message["content"]}
+                )
+
         for item in calls:
             used += 1
             if used > MAX_TOOL_CALLS:
@@ -230,24 +397,24 @@ def run(
                 if not isinstance(arguments, dict):
                     raise ValueError("arguments must be a JSON object")
             except ValueError as exc:
-                messages.append(_tool(item, {"error": f"invalid arguments: {exc}"}))
+                reply(item, {"error": f"invalid arguments: {exc}"})
                 continue
             if item["name"] == RESULT and returns:
                 try:
                     jsonschema.validate(arguments, returns)
                 except jsonschema.ValidationError as exc:
-                    messages.append(_tool(item, {"error": f"result is invalid: {exc.message}"}))
+                    reply(item, {"error": f"result is invalid: {exc.message}"})
                     continue
                 return arguments, text
             capability = allowed.get(item["name"])
             if capability is None:
-                messages.append(_tool(item, {"error": f"{item['name']} is not a tool here"}))
+                reply(item, {"error": f"{item['name']} is not a tool here"})
                 continue
             try:
                 result = call(capability, arguments)
             except ExecutionError as exc:
                 result = {"error": str(exc)}
-            messages.append(_tool(item, result))
+            reply(item, result)
             file = (result.get("output") or {}).get("file") if isinstance(result, dict) else None
             if isinstance(file, dict):
                 seen.append(file)
@@ -265,5 +432,10 @@ def run(
 def _tool(item: Mapping[str, Any], result: Any) -> dict[str, Any]:
     content = json.dumps(result, separators=(",", ":"), default=str)
     if len(content) > TOOL_RESULT_LIMIT:
-        content = content[:TOOL_RESULT_LIMIT] + " [truncated]"
+        # Cutting the JSON itself hands the model a document it cannot parse;
+        # wrap the cut so what it receives is still one valid object.
+        content = json.dumps(
+            {"truncated": True, "limit": TOOL_RESULT_LIMIT, "partial": content[:TOOL_RESULT_LIMIT]},
+            separators=(",", ":"),
+        )
     return {"role": "tool", "tool_call_id": item["id"], "content": content}
