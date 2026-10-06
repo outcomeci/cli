@@ -24,6 +24,9 @@ from .integrations import CredentialResolver
 from .process import ExecutionError
 
 MAX_TOOL_CALLS = 20
+# The longest reply one turn may produce. A step's result travels as the
+# arguments of one tool call, so this bounds how much a step can return.
+MAX_OUTPUT_TOKENS = 16384
 RESULT = "return_result"
 TOOL_RESULT_LIMIT = 20_000
 # A turn resends the conversation, images included, and OutcomeCI Cloud takes
@@ -63,8 +66,8 @@ def local_client(
             api_key=_key(spec, resolver),
             messages=messages,
             **({"tools": tools} if tools else {}),
-            max_tokens=4096,
-            timeout=60,
+            max_tokens=MAX_OUTPUT_TOKENS,
+            timeout=180,
             num_retries=0,
         )
         choice = response.choices[0]
@@ -189,6 +192,14 @@ def run(
     shown = len(images or [])
     while True:
         answer = client(step=step, profile=profile, messages=messages, tools=offered)
+        if answer.get("finish_reason") == "length":
+            # A reply cut off mid-way is unusable: a truncated tool call is not
+            # JSON, and sending it back only repeats the cut until the call
+            # budget runs out. Say what happened instead.
+            raise ExecutionError(
+                f"step {step}: the model's reply was cut off at its output limit; "
+                "have the step return less, such as a shortlist instead of every item"
+            )
         message = answer.get("message") or {}
         calls = message.get("tool_calls") or []
         text = message.get("content") or text

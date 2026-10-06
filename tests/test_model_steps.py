@@ -61,7 +61,10 @@ class Model:
         turn = self.script[step].pop(0)
         if callable(turn):
             turn = turn(messages)
-        return {"message": {"content": turn.get("text"), "tool_calls": turn.get("calls", [])}}
+        return {
+            "message": {"content": turn.get("text"), "tool_calls": turn.get("calls", [])},
+            "finish_reason": turn.get("finish_reason", "stop"),
+        }
 
 
 def _call(name: str, arguments: dict, index: int = 1) -> dict:
@@ -183,6 +186,51 @@ def test_a_model_that_never_returns_fails_the_step():
             returns={"type": "object"},
         )
     assert model.calls[1]["messages"][-1]["content"].startswith("Call return_result")
+
+
+def test_a_reply_cut_off_at_the_output_limit_fails_at_once_and_says_why():
+    # A truncated return_result is not JSON; before, it went back to the model
+    # as "invalid arguments" and the model repeated the same cut-off reply
+    # until the tool-call budget ran out, minutes later.
+    cut = {
+        "calls": [{"id": "call_1", "name": "return_result", "arguments": '{"posts": [{"id": "1'}],
+        "finish_reason": "length",
+    }
+    model = Model({"s": [cut] * models.MAX_TOOL_CALLS})
+
+    with pytest.raises(ExecutionError, match="cut off at its output limit.*return less"):
+        models.run(
+            model,
+            step="s",
+            profile="light",
+            system="x",
+            user="y",
+            capabilities=[],
+            call=lambda capability, inputs: {},
+            returns={"type": "object"},
+        )
+    assert len(model.calls) == 1
+
+
+def test_a_local_turn_allows_a_long_reply(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    seen = {}
+
+    def completion(**kwargs):
+        seen.update(kwargs)
+        message = SimpleNamespace(content="done", tool_calls=None)
+        return SimpleNamespace(choices=[SimpleNamespace(message=message, finish_reason="stop")])
+
+    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
+    client = models.local_client({"reasoning": {"light": {"model": "anthropic/x"}}})
+
+    answer = client(step="s", profile="light", messages=[], tools=[])
+
+    assert answer["finish_reason"] == "stop"
+    assert seen["max_tokens"] == models.MAX_OUTPUT_TOKENS >= 16384
 
 
 def test_tool_calls_are_capped():
