@@ -28,7 +28,9 @@ MAX_TOOL_CALLS = 20
 # arguments of one tool call, so this bounds how much a step can return.
 MAX_OUTPUT_TOKENS = 16384
 RESULT = "return_result"
-TOOL_RESULT_LIMIT = 20_000
+# The longest tool result a turn carries back to the model, in characters. One
+# page of a search, such as 30 X posts with their authors, is about 32,000.
+TOOL_RESULT_LIMIT = 120_000
 # A turn resends the conversation, images included, and OutcomeCI Cloud takes
 # at most 8 MiB per turn: three images of at most 1.5 MiB each fit.
 IMAGE_LIMIT = 3 * 512 * 1024
@@ -227,7 +229,10 @@ def run(
             if not returns:
                 return None, text
             if nudged:
-                raise ExecutionError(f"step {step}: the model finished without calling {RESULT}")
+                said = f"; it said: {text.strip()[:300]!r}" if text and text.strip() else ""
+                raise ExecutionError(
+                    f"step {step}: the model finished without calling {RESULT}{said}"
+                )
             nudged = True
             messages.append({"role": "user", "content": f"Call {RESULT} with the step's result."})
             continue
@@ -276,5 +281,10 @@ def run(
 def _tool(item: Mapping[str, Any], result: Any) -> dict[str, Any]:
     content = json.dumps(result, separators=(",", ":"), default=str)
     if len(content) > TOOL_RESULT_LIMIT:
-        content = content[:TOOL_RESULT_LIMIT] + " [truncated]"
+        # Cutting the JSON itself hands the model a document it cannot parse;
+        # wrap the cut so what it receives is still one valid object.
+        content = json.dumps(
+            {"truncated": True, "limit": TOOL_RESULT_LIMIT, "partial": content[:TOOL_RESULT_LIMIT]},
+            separators=(",", ":"),
+        )
     return {"role": "tool", "tool_call_id": item["id"], "content": content}

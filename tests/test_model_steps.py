@@ -212,6 +212,22 @@ def test_a_reply_cut_off_at_the_output_limit_fails_at_once_and_says_why():
     assert len(model.calls) == 1
 
 
+def test_a_tool_result_over_the_limit_stays_valid_json():
+    # One page of X search results is about 32,000 characters; a result past
+    # the limit was cut mid-document, so the model got JSON it could not read.
+    big = {"posts": [{"id": str(n), "text": "x" * 200} for n in range(1000)]}
+
+    message = models._tool({"id": "call_1"}, big)
+
+    content = json.loads(message["content"])
+    assert content["truncated"] is True
+    assert len(content["partial"]) == models.TOOL_RESULT_LIMIT
+    assert models.TOOL_RESULT_LIMIT >= 100_000
+
+    small = models._tool({"id": "call_2"}, {"posts": []})
+    assert json.loads(small["content"]) == {"posts": []}
+
+
 def test_a_local_turn_allows_a_long_reply(monkeypatch):
     import sys
     from types import SimpleNamespace
