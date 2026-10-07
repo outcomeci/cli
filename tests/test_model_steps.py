@@ -620,6 +620,9 @@ def test_the_review_profile_decides_a_local_review(tmp_path, monkeypatch):
     )
 
     assert decision == {"decision": "deny", "reason": "too broad", "proposal_sha256": "a" * 64}
+    from outcomeci.policy import INCREMENTAL_REVIEW_INSTRUCTIONS
+
+    assert INCREMENTAL_REVIEW_INSTRUCTIONS in sent[0]["messages"][0]["content"]
     assert sent[0]["model"] == "anthropic/claude-sonnet-5"
     assert sent[0]["api_key"] == "key-for:vault:anthropic/api-key"
 

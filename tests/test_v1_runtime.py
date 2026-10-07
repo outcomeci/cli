@@ -354,6 +354,7 @@ def test_a_step_policy_review_inside_the_container_uses_no_nested_sandbox(tmp_pa
 
     def invoke(runner, model, prompt, workspace, timeout, **kwargs):
         seen.update(kwargs)
+        seen["prompt"] = prompt
         return '{"decision": "allow", "proposal_sha256": "x", "reason": "ok"}'
 
     monkeypatch.setattr(policy_module, "invoke", invoke)
@@ -365,6 +366,7 @@ def test_a_step_policy_review_inside_the_container_uses_no_nested_sandbox(tmp_pa
 
     assert seen["container_isolated"] is True
     assert seen["read_only"] is True
+    assert policy_module.INCREMENTAL_REVIEW_INSTRUCTIONS in seen["prompt"]
 
 
 def test_a_review_sees_earlier_requests_but_not_their_response_bodies(workflow, monkeypatch):
@@ -376,7 +378,9 @@ def test_a_review_sees_earlier_requests_but_not_their_response_bodies(workflow, 
 
     receipts = reviews[0]["receipts"]
     assert receipts and all(
-        set(item) == {"capability", "step", "status", "request"} for item in receipts
+        set(item)
+        <= {"capability", "step", "status", "request", "sequence", "proposal_sha256", "result"}
+        for item in receipts
     )
 
 

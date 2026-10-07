@@ -211,3 +211,109 @@ def test_reads_skip_the_step_policy_review(tmp_path):
     broker = executor(tmp_path, lambda proposal: reviewed.append(proposal) or allow(proposal))
     broker.execute("slack.request", {"method": "GET", "path": "/api/users.list"}, step="notify")
     assert reviewed == []
+
+
+def test_receipts_keep_recorded_order_across_journal_roundtrips(tmp_path):
+    proposals = []
+
+    def review(proposal):
+        proposals.append(proposal)
+        if len(proposals) == 1:
+            return {**allow(proposal), "decision": "deny"}
+        return allow(proposal)
+
+    broker = executor(tmp_path, review)
+    for index in range(8):
+        request = {"method": "POST", "path": "/api/chat.postMessage", "body": {"text": str(index)}}
+        if index == 0:
+            with pytest.raises(IntegrationError, match="policy did not approve"):
+                broker.execute("slack.request", request, step="notify")
+        else:
+            broker.execute("slack.request", request, step="notify")
+    receipts = proposals[-1]["receipts"]
+    assert [item["sequence"] for item in receipts] == list(range(1, 9))
+    assert [item["status"] for item in receipts] == ["denied"] + ["confirmed"] * 6 + ["reviewing"]
+    assert "result" not in receipts[0] and "result" not in receipts[-1]
+    assert receipts[-1]["proposal_sha256"] == proposals[-1]["proposal_sha256"]
+    assert all(item["result"]["ok"] for item in receipts[1:-1])
+    # Dynamic HTTP's root body exposure never enters the review.
+    assert all("output" not in item["result"] for item in receipts[1:-1])
+
+
+def test_receipt_result_contains_only_bounded_explicit_effect_identifiers():
+    output = {
+        "ts": "123.456",
+        "channel": "C123",
+        "id": "x" * 501,
+        "number": 7,
+        "sha": {"secret": "private"},
+        "ref": "private-token",
+        "result": {"access_token": "private-token"},
+        "token": "private-token",
+    }
+    call = {"status": "confirmed", "result": {"ok": True, "status": 200, "output": output}}
+    operation = {
+        "response": {
+            "expose": {
+                "ts": "body.ts",
+                "channel": "body.channel",
+                "id": "body.id",
+                "number": "body.number",
+                "sha": "body.sha",
+                "ref": "body.access_token",
+                "result": "body",
+                "token": "body.token",
+            }
+        }
+    }
+    projected = policy._receipt_result(call, operation)
+    assert projected == {
+        "result": {
+            "ok": True,
+            "status": 200,
+            "output": {"ts": "123.456", "channel": "C123", "number": 7},
+        }
+    }
+    assert "private" not in json.dumps(projected)
+    for status in ("denied", "unsent", "pending", "uncertain", "reviewing"):
+        assert policy._receipt_result({**call, "status": status}, operation) == {}
+    output["result"]["ok"] = False
+    assert policy._receipt_result(call, operation) == {"result": {"ok": False, "status": 200}}
+
+
+def test_receipt_identifiers_use_credential_redacted_connector_output(tmp_path):
+    proposals = []
+
+    def review(proposal):
+        proposals.append(proposal)
+        return allow(proposal)
+
+    broker = executor(
+        tmp_path,
+        review,
+        lambda _: httpx.Response(
+            200,
+            json={
+                "ok": True,
+                "ts": "123.456",
+                "channel": "private-token",
+                "token": "private-token",
+            },
+        ),
+    )
+    operation = broker.executor.compiled["workflow"]["spec"]["integrations"]["slack"]["operations"][
+        "request"
+    ]
+    operation["response"]["expose"].update(
+        {"ts": "body.ts", "channel": "body.channel", "token": "body.token"}
+    )
+    for text in ("header", "reply"):
+        broker.execute(
+            "slack.request",
+            {"method": "POST", "path": "/api/chat.postMessage", "body": {"text": text}},
+            step="notify",
+        )
+    result = proposals[1]["receipts"][0]["result"]
+    assert result["output"]["ts"] == "123.456"
+    assert "private-token" not in json.dumps(result)
+    assert "token" not in result["output"]
