@@ -16,7 +16,7 @@ from typing import Any
 from jsonschema import ValidationError
 from jsonschema import validate as validate_json
 
-from . import checkouts, models, templates
+from . import checkouts, models, run_records, templates
 from .auth import Authenticator
 from .capability import invoke_integration
 from .capability import serve as serve_capability
@@ -757,6 +757,7 @@ def _run_step(
 
             v1_runtime.gather(root, state["run_id"], step_block, len(invocations))
         _write_effect_receipts(root, outcome_root, state["run_id"], step)
+        run_records.write_run_records(root, outcome_root, state["run_id"])
         try:
             try:
                 _validate_outputs(compiled, outcome_root, step)
