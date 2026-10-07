@@ -97,7 +97,9 @@ RECEIPT_TEXT_LIMIT = 500
 # from authorization of each prerequisite call.
 INCREMENTAL_REVIEW_INSTRUCTIONS = (
     "Review the current call incrementally within the step policy, not as a completed "
-    "whole-step submission. Only confirmed successful receipts prove completed effects; "
+    "whole-step submission. This is pre-execution authorization: the current call normally "
+    "has no result yet. Do not require its own success receipt or returned identifiers "
+    "before allowing it. Only confirmed successful receipts prove completed effects; "
     "denied, unsent, and reviewing entries are not completed actions. The reviewing entry "
     "matching proposal_sha256 is this proposal, not an earlier execution. Pending or "
     "uncertain receipts may already have taken effect: do not assume they failed or "
