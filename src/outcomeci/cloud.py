@@ -400,3 +400,51 @@ def vault_request(workspace_id: str, operation: str, **values: Any) -> dict[str,
     status, result = _authorized_request(path, method=method, body=body)
     _raise_for_status(status, result, expected, f"Vault request failed ({status})")
     return result
+
+
+def storage_directory(
+    workspace_id: str, path: str = "", cursor: str | None = None
+) -> dict[str, Any]:
+    """One page of a workspace storage folder: its files and subfolders."""
+    query = str(
+        httpx.QueryParams({"path": path, "limit": "200", **({"cursor": cursor} if cursor else {})})
+    )
+    status, value = _authorized_request(f"/workspaces/{workspace_id}/storage?{query}")
+    _raise_for_status(status, value, 200, "could not list workspace storage", require_dict=True)
+    return value
+
+
+def storage_view_link(workspace_id: str, object_id: str, version_id: str | None) -> dict[str, Any]:
+    status, value = _authorized_request(
+        f"/workspaces/{workspace_id}/storage/view-link",
+        method="POST",
+        body={"object_id": object_id, "version_id": version_id},
+    )
+    _raise_for_status(status, value, 200, "could not open a stored file", require_dict=True)
+    return value
+
+
+def download_object(workspace_id: str, entry: dict[str, Any]) -> bytes:
+    """A stored file's bytes, through a short-lived view link."""
+    link = storage_view_link(workspace_id, entry["object_id"], entry.get("version_id"))
+    try:
+        response = httpx.get(link["url"], timeout=60, follow_redirects=True)
+    except httpx.HTTPError as exc:
+        raise CloudRequestError(f"could not download a stored file: {exc}", None) from exc
+    if response.status_code != 200:
+        raise CloudRequestError(
+            f"could not download a stored file (HTTP {response.status_code})", response.status_code
+        )
+    return response.content
+
+
+def list_workflows(workspace_id: str) -> list[dict[str, Any]]:
+    status, value = _authorized_request(f"/workspaces/{workspace_id}/workflows")
+    _raise_for_status(status, value, 200, "could not list workflows")
+    return value if isinstance(value, list) else []
+
+
+def list_workflow_runs(workspace_id: str, workflow_id: str) -> list[dict[str, Any]]:
+    status, value = _authorized_request(f"/workspaces/{workspace_id}/workflows/{workflow_id}/runs")
+    _raise_for_status(status, value, 200, "could not list workflow runs")
+    return value if isinstance(value, list) else []

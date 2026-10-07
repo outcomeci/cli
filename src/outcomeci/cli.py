@@ -278,6 +278,25 @@ def parser() -> argparse.ArgumentParser:
     workflow_mode = workflow_sync.add_mutually_exclusive_group(required=True)
     workflow_mode.add_argument("--create", action="store_true")
     workflow_mode.add_argument("--version", action="store_true")
+    dataset = commands.add_parser("dataset", help="Check and export the records every run stores")
+    dataset_commands = dataset.add_subparsers(dest="dataset_command", required=True)
+    dataset_export = dataset_commands.add_parser(
+        "export",
+        help="Walk run directories, report what each holds, and write one JSON line per run",
+    )
+    dataset_export.add_argument(
+        "--workspace-id", help="Cloud workspace whose stored runs to export"
+    )
+    dataset_export.add_argument(
+        "--workflow-id", help="Only this workflow's runs (with --workspace-id)"
+    )
+    _add_dir_argument(dataset_export)
+    dataset_export.add_argument(
+        "--out", help="JSON lines file to write (default: no rows, report only)"
+    )
+    dataset_export.add_argument(
+        "--check", action="store_true", help="Report each run's completeness without writing rows"
+    )
     vault = commands.add_parser(
         "vault", help="Manage workspace credentials through OutcomeCI Vault"
     )
@@ -512,6 +531,30 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             _print_json(result)
             return 0
+        if args.command == "dataset":
+            from . import dataset as dataset_module
+
+            rows: list[dict[str, object]] = []
+            check_only = args.check or not args.out
+            if args.workspace_id:
+                report = dataset_module.workspace_export(
+                    args.workspace_id,
+                    workflow_id=args.workflow_id,
+                    check_only=check_only,
+                    emit=rows.append,
+                )
+            else:
+                report = dataset_module.local_export(
+                    args.dir.resolve(), check_only=check_only, emit=rows.append
+                )
+            if args.out and not args.check:
+                with open(args.out, "w", encoding="utf-8") as stream:
+                    for row in rows:
+                        stream.write(json.dumps(row, default=str, separators=(",", ":")) + "\n")
+                report["out"] = args.out
+                report["rows"] = len(rows)
+            _print_json(report)
+            return 0 if report["incomplete"] == 0 else 1
         if args.command == "vault":
             if args.vault_command == "local":
                 workspace = args.dir.resolve()
