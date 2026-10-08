@@ -19,3 +19,11 @@ Managed children receive a validated dispatcher envelope with parent/root lineag
 ## Acceptance
 
 Existing workflows compile and execute unchanged. A dispatcher can choose a support route, enqueue support once, skip engineering, and finish without leasing an agent. Retry after dispatch failure retains the completed decision. Both provider adapters execute through LiteLLM 1.104.2's shared Decisions interface. Invalid answers never dispatch children.
+
+## Ordinary model BYOK extension
+
+Ordinary model steps, conversations, and their fallback profiles accept the reviewed chat providers in `outcomeci.model_providers.CHAT_PROVIDERS`: OpenAI, Anthropic, Gemini, Groq, Mistral, DeepSeek, xAI, Together AI, Fireworks AI, Cerebras, OpenRouter, Cohere Chat, SambaNova, Perplexity, NVIDIA NIM, and DeepInfra. New providers require an explicit declared Vault key, including when used as a fallback. Existing OpenAI/Anthropic platform-key behavior is preserved; policy reviewers remain restricted to those two providers. Decision providers and OpenAI decision-model constraints are unchanged.
+
+The shared immutable registry fixes official API endpoints and explicit LiteLLM provider selection. Model identifiers permit provider namespaces and colon variants, but reject URLs, query strings, fragments, backslashes, empty segments, traversal, and identifiers longer than 256 characters. Workflows cannot configure custom endpoints. Perplexity is tool-free only: requesting capabilities or typed returns fails before a provider call. Other models must support the requested tools; unsupported parameters are never silently removed.
+
+Output tokens are bounded by valid SDK model metadata up to the runtime limit. Unknown or malformed metadata uses at most 4096 tokens. Providers remain responsible for validating current availability and limits. Provider errors expose the model and error class without copying keys or prompts into run error artifacts.

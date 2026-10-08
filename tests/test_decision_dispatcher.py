@@ -41,7 +41,7 @@ def document():
         "name": "slack-router",
         "type": "dispatcher",
         "trigger": "manual",
-        "reasoning": {"router": {"model": "openai/decision-model"}},
+        "reasoning": {"router": {"model": "openai/gpt-6-luna"}},
         "steps": [
             {
                 "route": {
@@ -133,7 +133,7 @@ def test_conditional_dispatch_runs_without_agent_and_retains_evidence(tmp_path, 
     def decide(**kwargs):
         calls.append(("decision", kwargs))
         return {
-            "model": "openai/decision-model",
+            "model": "openai/gpt-6-luna",
             "answers": [ANSWER],
             "usage": {
                 "input_tokens": 10,
@@ -325,7 +325,10 @@ def test_real_litellm_decisions_translates_both_providers(tmp_path, monkeypatch,
 
     doc = document()
     doc["secrets"] = {"model": "vault:test/model"}
-    doc["reasoning"]["router"] = {"model": f"{provider}/decision-model", "key": "secrets.model"}
+    doc["reasoning"]["router"] = {
+        "model": ("openai/gpt-6-luna" if provider == "openai" else "typesafe/jev-latest"),
+        "key": "secrets.model",
+    }
     compiled = compile_workflow(write(tmp_path, doc))
     with httpx.Client(transport=httpx.MockTransport(reply)) as http_client:
         litellm.in_memory_llm_clients_cache.set_cache(
@@ -377,3 +380,13 @@ def test_predicate_and_score_answers_preserve_typed_evidence(question, answer):
     }
     with pytest.raises(ExecutionError):
         decisions.validate_answers({"result": question}, {"answers": [{**answer, "name": "other"}]})
+
+
+@pytest.mark.parametrize(
+    "model", ["openai/gpt-5.5", "openai/unknown-model", "openai/gpt-6-luna-unknown"]
+)
+def test_unsupported_openai_decision_model_rejected(tmp_path, model):
+    doc = document()
+    doc["reasoning"]["router"]["model"] = model
+    with pytest.raises(ConfigError, match="require openai/gpt-6-luna"):
+        compile_workflow(write(tmp_path, doc))

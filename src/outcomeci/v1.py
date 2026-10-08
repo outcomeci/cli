@@ -22,6 +22,7 @@ from typing import Any
 import yaml
 
 from .config import IDENTIFIER, RUNNERS, ConfigError, validate_lowered
+from .model_providers import CHAT_PROVIDERS, REVIEW_PROVIDERS, parse_model
 
 API_VERSION = "outcomeci.workflow/v1"
 ENTRY_POINT_GROUP = "outcomeci.connectors"
@@ -326,7 +327,7 @@ def _reason(value: Any, base: Path, field: str) -> str | dict[str, Any]:
     return {"content": text}
 
 
-MODEL_PROVIDERS = {"anthropic", "openai"}
+MODEL_PROVIDERS = set(CHAT_PROVIDERS)
 
 
 def _reasoning(
@@ -384,6 +385,13 @@ def _model(
             f"{field}.model must be <provider>/<model> with provider "
             f"{' or '.join(sorted(MODEL_PROVIDERS))}"
         )
+    if provider != "typesafe":
+        try:
+            parse_model(model)
+        except ValueError as exc:
+            raise ConfigError(f"{field}.model: {exc}") from exc
+    if field == "reasoning.review" and provider not in REVIEW_PROVIDERS:
+        raise ConfigError("reasoning.review supports OpenAI and Anthropic only")
     result: dict[str, Any] = {"model": model}
     if "key" in item:
         key = str(item["key"])
@@ -392,6 +400,12 @@ def _model(
             raise ConfigError(f"{field}.key must name a declared secret as secrets.<name>")
         result["key"] = secret
         result["credential"] = str(secrets[secret])
+    if (
+        provider in CHAT_PROVIDERS
+        and not CHAT_PROVIDERS[provider].platform_key
+        and "key" not in result
+    ):
+        raise ConfigError(f"{field}: {provider} requires an explicit key: secrets.<name>")
     if provider == "typesafe" and ("key" not in result or field == "reasoning.review"):
         raise ConfigError(f"{field}: TypeSafe requires an explicit key and cannot review policy")
     if "fallback" in item:
@@ -640,6 +654,8 @@ def _decision_step(name, step, node, block, reads, *, scope: _Scope, apis, base:
     spec = scope.profiles[profile]
     if str(spec.get("model", "")).split("/")[0] not in {"openai", "typesafe"} or "fallback" in spec:
         raise ConfigError(f"{field}.using requires an OpenAI or TypeSafe model without fallback")
+    if str(spec.get("model", "")).startswith("openai/") and spec["model"] != "openai/gpt-6-luna":
+        raise ConfigError(f"{field}.using: OpenAI decision steps require openai/gpt-6-luna")
     schema = questions_schema(step["decision"])
     for question in step["decision"]:
         _identifier(question, f"{field}.decision")

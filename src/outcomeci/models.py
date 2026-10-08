@@ -22,6 +22,7 @@ from typing import Any
 import jsonschema
 
 from .integrations import CredentialResolver
+from .model_providers import completion_max_tokens, completion_options, provider_for_model
 from .process import ExecutionError
 
 MAX_TOOL_CALLS = 20
@@ -48,7 +49,6 @@ TOOL_RESULT_LIMIT = 120_000
 IMAGE_LIMIT = 3 * 512 * 1024
 MAX_IMAGES = 3
 IMAGE_TYPES = {"image/png", "image/jpeg", "image/gif", "image/webp"}
-PROVIDER_KEYS = {"anthropic": "ANTHROPIC_API_KEY", "openai": "OPENAI_API_KEY"}
 
 # (step, profile, messages, tools) -> {"message": {"content", "tool_calls"}, ...}
 ModelClient = Callable[..., dict[str, Any]]
@@ -85,6 +85,14 @@ def local_client(
         )
         for index, chosen in enumerate(choices):
             model = str(chosen["model"])
+            try:
+                supports_tools = provider_for_model(model).supports_tools
+            except ValueError as exc:
+                raise ExecutionError(str(exc)) from exc
+            if tools and not supports_tools:
+                raise ExecutionError(
+                    f"step {step}: {model.split('/')[0]} does not support tools or typed returns"
+                )
             turn_messages, turn_tools = (
                 cached(messages, tools) if model.startswith("anthropic/") else (messages, tools)
             )
@@ -94,14 +102,22 @@ def local_client(
                     api_key=_key(chosen, resolver),
                     messages=turn_messages,
                     **({"tools": turn_tools} if turn_tools else {}),
-                    max_tokens=MAX_OUTPUT_TOKENS,
+                    max_tokens=completion_max_tokens(model, MAX_OUTPUT_TOKENS),
                     timeout=TURN_TIMEOUT_SECONDS,
-                    num_retries=0,
+                    **completion_options(model),
                 )
                 break
             except transient as exc:
                 if index == len(choices) - 1:
-                    raise ExecutionError(f"step {step}: {model} is unavailable: {exc}") from exc
+                    raise ExecutionError(
+                        f"step {step}: {model} is unavailable ({type(exc).__name__})"
+                    ) from None
+            except ExecutionError:
+                raise
+            except Exception as exc:
+                raise ExecutionError(
+                    f"step {step}: {model} provider call failed ({type(exc).__name__})"
+                ) from None
         choice = response.choices[0]
         return {
             "message": {
@@ -251,11 +267,15 @@ def _key(spec: Mapping[str, Any], resolver: CredentialResolver | None) -> str:
             raise ExecutionError(f"{spec['credential']} holds no API key")
         return value
     provider = str(spec["model"]).split("/", 1)[0]
-    value = os.environ.get(PROVIDER_KEYS[provider], "")
+    try:
+        definition = provider_for_model(str(spec["model"]))
+    except ValueError as exc:
+        raise ExecutionError(str(exc)) from exc
+    if not definition.platform_key or not definition.env_key:
+        raise ExecutionError(f"{provider} requires an explicit Vault key")
+    value = os.environ.get(definition.env_key, "")
     if not value:
-        raise ExecutionError(
-            f"set {PROVIDER_KEYS[provider]}, or give the profile a key: secrets.<name>"
-        )
+        raise ExecutionError(f"set {definition.env_key}, or give the profile a key: secrets.<name>")
     return value
 
 
