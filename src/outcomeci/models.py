@@ -14,6 +14,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -21,6 +22,7 @@ from typing import Any
 
 import jsonschema
 
+from .execution_events import safe_text
 from .integrations import CredentialResolver
 from .model_capabilities import (
     CapabilityError,
@@ -163,6 +165,7 @@ def local_client(
                     f"step {step}: {model} provider call failed ({type(exc).__name__})"
                 ) from None
         choice = response.choices[0]
+        fallback_from = str(choices[0]["model"]) if index else None
         return {
             "message": {
                 "content": choice.message.content,
@@ -180,6 +183,11 @@ def local_client(
             "model": model,
             "model_capabilities": reports,
             "capability_warnings": flatten_warnings(reports),
+            "provider": model.split("/", 1)[0],
+            "fallback_from": fallback_from,
+            # Which credential paid: a Vault key the profile names, or the
+            # provider's environment variable. Never the key itself.
+            "credential": {"source": "vault" if chosen.get("credential") else "environment"},
         }
 
     return call
@@ -423,8 +431,24 @@ def run(
     used, nudged, text = 0, False, ""
     shown = len(images or [])
     while True:
-        answer = client(step=step, profile=profile, messages=messages, tools=offered)
+        started = time.monotonic()
+        try:
+            answer = client(step=step, profile=profile, messages=messages, tools=offered)
+        except Exception as exc:
+            # A turn that failed is part of the record too: what was asked,
+            # when, and why it failed (the provider's text never gets here).
+            if turns is not None:
+                turns.append(
+                    {
+                        "turn": len(turns),
+                        "occurred_at": datetime.now(UTC).isoformat(),
+                        "latency_ms": round((time.monotonic() - started) * 1000),
+                        "error": safe_text(str(exc), 500),
+                    }
+                )
+            raise
         if turns is not None:
+            latency = answer.get("latency_ms")
             turns.append(
                 {
                     "turn": len(turns),
@@ -436,6 +460,14 @@ def run(
                     "model": answer.get("model"),
                     "model_capabilities": answer.get("model_capabilities", []),
                     "capability_warnings": answer.get("capability_warnings", []),
+                    "provider": answer.get("provider"),
+                    "fallback_from": answer.get("fallback_from"),
+                    # The provider's own time when OutcomeCI Cloud reports it,
+                    # otherwise the turn's round trip as the runner saw it.
+                    "latency_ms": latency
+                    if isinstance(latency, int)
+                    else round((time.monotonic() - started) * 1000),
+                    "credential": answer.get("credential"),
                     "assistant": answer.get("message") or {},
                     "tool_results": [],
                 }

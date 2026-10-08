@@ -1,0 +1,156 @@
+{
+  "edges": [
+    {
+      "from": "trigger",
+      "kind": "data",
+      "label": null,
+      "to": "scan"
+    },
+    {
+      "from": "scan",
+      "kind": "data",
+      "label": null,
+      "to": "digest"
+    },
+    {
+      "from": "trigger",
+      "kind": "data",
+      "label": null,
+      "to": "share_header"
+    },
+    {
+      "from": "digest",
+      "kind": "data",
+      "label": null,
+      "to": "share_header"
+    },
+    {
+      "from": "digest",
+      "kind": "data",
+      "label": null,
+      "to": "share_replies"
+    },
+    {
+      "from": "share_header",
+      "kind": "condition",
+      "label": "share_header.posted == true",
+      "to": "share_replies"
+    }
+  ],
+  "name": "x-engagement",
+  "nodes": [
+    {
+      "connectors": [
+        {
+          "api": "x_company",
+          "operations": [
+            "search_recent"
+          ],
+          "provider": "x"
+        }
+      ],
+      "id": "scan",
+      "kind": "model",
+      "label": "scan",
+      "model": {
+        "fallback": {
+          "model": "openai/gpt-5.5",
+          "provider": "openai"
+        },
+        "model": "anthropic/claude-sonnet-5",
+        "provider": "anthropic"
+      },
+      "order": 0,
+      "reviewed": false,
+      "summary": "Scan for the company account"
+    },
+    {
+      "connectors": [],
+      "id": "digest",
+      "kind": "model",
+      "label": "digest",
+      "model": {
+        "fallback": {
+          "model": "openai/gpt-5.5",
+          "provider": "openai"
+        },
+        "model": "anthropic/claude-sonnet-5",
+        "provider": "anthropic"
+      },
+      "order": 1,
+      "reviewed": false,
+      "summary": "Choose what @outcomeci engages with"
+    },
+    {
+      "connectors": [
+        {
+          "api": "slack",
+          "operations": [
+            "post"
+          ],
+          "provider": "slack"
+        }
+      ],
+      "id": "share_header",
+      "kind": "model",
+      "label": "share_header",
+      "model": {
+        "fallback": {
+          "model": "openai/gpt-5.5",
+          "provider": "openai"
+        },
+        "model": "anthropic/claude-sonnet-5",
+        "provider": "anthropic"
+      },
+      "order": 2,
+      "reviewed": true,
+      "summary": "Post the thread header"
+    },
+    {
+      "condition": {
+        "op": "==",
+        "ref": "share_header.posted",
+        "value": true
+      },
+      "connectors": [
+        {
+          "api": "slack",
+          "operations": [
+            "post"
+          ],
+          "provider": "slack"
+        }
+      ],
+      "for_each": {
+        "as": "candidate",
+        "over": "digest.candidates"
+      },
+      "id": "share_replies",
+      "kind": "model",
+      "label": "share_replies",
+      "model": {
+        "fallback": {
+          "model": "openai/gpt-5.5",
+          "provider": "openai"
+        },
+        "model": "anthropic/claude-sonnet-5",
+        "provider": "anthropic"
+      },
+      "order": 3,
+      "reviewed": true,
+      "summary": "Post one recommendation in the confirmed header thread"
+    }
+  ],
+  "schema_version": "outcomeci.workflow-diagram/v1",
+  "trigger": {
+    "id": "trigger",
+    "label": "Schedule",
+    "provider": null,
+    "schedule": {
+      "expression": "5 12 * * *",
+      "timezone": "America/Chicago"
+    },
+    "type": "cron"
+  },
+  "workflow_revision": "0ee269c1c4a199f95e8e43cffe86b4286bf8063376753cd0df4ea0ed878c6a9b"
+}

@@ -169,6 +169,7 @@ def test_effect_receipts_keep_no_request_or_response_content(tmp_path: Path) -> 
             {
                 "calls": {
                     "digest": {
+                        "step": "notify",
                         "capability": "slack.post",
                         "proposal_sha256": "a" * 64,
                         "status": "confirmed",
@@ -191,6 +192,7 @@ def test_effect_receipts_keep_no_request_or_response_content(tmp_path: Path) -> 
         "step": "notify",
         "effects": [
             {
+                "step": "notify",
                 "capability": "slack.post",
                 "proposal_sha256": "a" * 64,
                 "status": "confirmed",

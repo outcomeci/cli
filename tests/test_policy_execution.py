@@ -120,7 +120,16 @@ def test_integration_failure_records_the_http_status_as_detail(tmp_path):
 
     journal = json.loads((tmp_path / ".broker" / "journal.json").read_text())
     failed = next(e for e in journal["events"] if e["event_type"] == "integration.failed")
-    assert failed["detail"] == "integration request returned HTTP 401"
+    assert failed["detail"] == "integration request returned HTTP 401: invalid_auth"
+    assert failed["http_status"] == 401
+    assert failed["message"] == "Integration request refused by the provider"
+    (call,) = journal["calls"].values()
+    assert call["status"] == "failed"
+    assert call["result"] == {
+        "ok": False,
+        "status": 401,
+        "error": "integration request returned HTTP 401: invalid_auth",
+    }
 
 
 def test_integration_failure_detail_is_scrubbed_of_credential_shaped_text(tmp_path):
@@ -317,3 +326,74 @@ def test_receipt_identifiers_use_credential_redacted_connector_output(tmp_path):
     assert result["output"]["ts"] == "123.456"
     assert "private-token" not in json.dumps(result)
     assert "token" not in result["output"]
+
+
+def test_a_refused_write_is_recorded_as_failed_and_still_never_resent(tmp_path):
+    """X answers a reply it will not allow with 403 and a reason. The receipt
+    keeps the status and the reason, and the write is not sent a second time."""
+    calls = []
+
+    def send(request):
+        calls.append(request)
+        return httpx.Response(
+            403,
+            json={
+                "title": "Forbidden",
+                "detail": "Reply to this conversation is not allowed because you have "
+                "not been mentioned or otherwise engaged by the author.",
+                "type": "about:blank",
+                "status": 403,
+            },
+        )
+
+    broker = executor(tmp_path, handler=send)
+    inputs = {"method": "POST", "path": "/api/chat.postMessage", "body": {"text": "Hi"}}
+    with pytest.raises(IntegrationError, match="not been mentioned"):
+        broker.execute("slack.request", inputs, step="notify")
+    with pytest.raises(IntegrationError, match="refused"):
+        broker.execute("slack.request", inputs, step="notify")
+    assert len(calls) == 1
+    journal = json.loads((tmp_path / ".broker" / "journal.json").read_text())
+    (call,) = journal["calls"].values()
+    assert call["status"] == "failed"
+    assert call["result"]["status"] == 403
+    assert call["result"]["error"].startswith(
+        "integration request returned HTTP 403: Forbidden | Reply to this conversation"
+    )
+
+
+@pytest.mark.parametrize("status", [500, 503, 408])
+def test_a_server_error_or_timeout_status_stays_uncertain(tmp_path, status):
+    """A 5xx or 408 may still have been processed, so its delivery is unknown."""
+
+    def send(request):
+        return httpx.Response(status, json={"message": "try later"})
+
+    broker = executor(tmp_path, handler=send)
+    inputs = {"method": "POST", "path": "/api/chat.postMessage", "body": {"text": "Hi"}}
+    with pytest.raises(IntegrationError, match="try later"):
+        broker.execute("slack.request", inputs, step="notify")
+    journal = json.loads((tmp_path / ".broker" / "journal.json").read_text())
+    (call,) = journal["calls"].values()
+    assert call["status"] == "uncertain"
+    assert "result" not in call or call["result"] is None
+
+
+def test_the_provider_reason_is_bounded_and_never_carries_the_credential(tmp_path):
+    def send(request):
+        return httpx.Response(
+            400,
+            json={
+                "message": "bad token private-token " + "x" * 2000,
+                "documentation_url": "https://example.com",
+            },
+        )
+
+    broker = executor(tmp_path, handler=send)
+    inputs = {"method": "POST", "path": "/api/chat.postMessage", "body": {"text": "Hi"}}
+    with pytest.raises(IntegrationError) as raised:
+        broker.execute("slack.request", inputs, step="notify")
+    reason = str(raised.value).split(": ", 1)[1]
+    assert "private-token" not in str(raised.value)
+    assert len(reason) <= 300
+    assert "documentation_url" not in str(raised.value)

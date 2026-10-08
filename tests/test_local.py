@@ -117,6 +117,7 @@ def test_write_effect_receipts_reports_provider_override_as_not_ok(tmp_path: Pat
     effects = json.loads(target.read_text(encoding="utf-8"))
     assert effects["effects"] == [
         {
+            "step": None,
             "capability": "slack.post_message",
             "proposal_sha256": "abc",
             "status": "confirmed",

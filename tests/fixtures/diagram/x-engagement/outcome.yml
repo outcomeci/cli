@@ -1,0 +1,113 @@
+# Recommend X posts worth a reply from the company account, @outcomeci: draft a
+# reply for each and post the list as a thread in #growth, each with a one-click
+# link that opens X with the reply pre-filled. Nothing is posted to X by this
+# workflow; a person reviews each draft and posts it from @outcomeci.
+#
+#   The company X account is connected in the workspace Vault as x/outcomeci:
+#   oci auth login
+#   oci workflow run --cloud --workspace-id WORKSPACE_ID --workflow-id WORKFLOW_ID \
+#     --payload .outcomeci/request.json
+apiVersion: outcomeci.workflow/v1
+name: x-engagement
+
+trigger: {type: cron, expression: "5 12 * * *", timezone: America/Chicago}
+
+secrets:
+  x_company: vault:x/outcomeci
+  slack: vault:slack/bot-token
+  anthropic: vault:anthropic/outcomeci-prd
+  openai: vault:openai/outcomeci-prd
+
+apis:
+  x_company: {uses: x, auth: secrets.x_company}
+  slack: {uses: slack, auth: secrets.slack}
+
+reasoning:
+  scan:
+    model: anthropic/claude-sonnet-5
+    key: secrets.anthropic
+    fallback: {model: openai/gpt-5.5, key: secrets.openai}
+  digest:
+    model: anthropic/claude-sonnet-5
+    key: secrets.anthropic
+    fallback: {model: openai/gpt-5.5, key: secrets.openai}
+  review: {model: anthropic/claude-sonnet-5, key: secrets.anthropic}
+
+steps:
+  # Read-only: the X grant is search only, so this workflow cannot post to X.
+  - scan:
+      reason: scan-company.md
+      using: scan
+      can:
+        - x_company.search_recent
+      returns:
+        posts:
+          - id: string
+            url: string
+            author: string
+            author_followers: int
+            posted_at: string
+            text: string
+            likes: int
+            replies: int
+            query: string
+        already_replied: int
+
+  - digest:
+      reason: digest.md
+      using: digest
+      with: scan
+      returns:
+        candidates:
+          - priority: int
+            id: string
+            url: string
+            author: string
+            posted_at: string
+            text: string
+            why: string
+            draft_reply: string
+        summary: string
+
+  - share_header:
+      reason: share-header.md
+      using: digest
+      with: [digest, trigger]
+      can:
+        - slack.post: {channel: growth}
+      policy: >-
+        Review only this single header call. Permit one successful top-level post
+        to growth whose first line starts with "Daily X leads for @outcomeci on"
+        followed by the date, candidate count and digest summary, followed by a
+        short note on how to use the recommendations. thread_ts must be absent.
+        This step posts no replies; a later step posts them after this call
+        returns its ts. Their absence is not a violation. Denied or reviewing
+        attempts are not completed posts. Deny a second successful header or any
+        other content.
+      returns:
+        posted: bool
+
+  - share_replies:
+      reason: share-reply.md
+      using: digest
+      with: [share_header.calls.slack.post, candidate]
+      when: share_header.posted == true
+      for_each: digest.candidates as candidate
+      can:
+        - slack.post:
+            channel: growth
+            thread_ts: share_header.calls.slack.post.ts
+      policy: >-
+        Review this invocation's one candidate, not the whole digest. Permit one
+        successful post to growth with thread_ts exactly equal to
+        share_header.calls.slack.post.ts from the confirmed header call supplied
+        in context. Include only this candidate's priority, author, URL, Why,
+        unchanged Draft, and one x.com/intent/post link whose in_reply_to is this
+        candidate's status ID. Never permit a top-level message, invented or
+        PENDING thread_ts, extra candidate, a link to any other site, or a second
+        successful reply in this invocation. Other candidates are separate
+        invocations and need not appear in these receipts. Denied or reviewing
+        attempts are not completed posts.
+      returns:
+        posted: bool
+        priority: int

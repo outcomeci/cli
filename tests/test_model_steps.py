@@ -504,6 +504,64 @@ def test_a_turn_records_its_model_and_normalizes_cloud_usage():
     assert turns[1]["model"] is None
 
 
+def test_a_turn_records_what_cloud_reports_about_it():
+    """OutcomeCI Cloud says which credential paid, which model answered, and
+    how long the provider took; the runner's transcript is where that lives."""
+    turns = []
+
+    def cloud(**_):
+        return {
+            "message": {"content": "done", "tool_calls": []},
+            "finish_reason": "stop",
+            "usage": {"prompt_tokens": 5, "completion_tokens": 1},
+            "model": "openai/gpt-5.5",
+            "provider": "openai",
+            "fallback_from": "anthropic/claude-sonnet-5",
+            "latency_ms": 812,
+            "credential": {"source": "vault", "vault_entry_id": "e1", "vault_version": 3},
+        }
+
+    models.run(
+        cloud,
+        step="s",
+        profile="light",
+        system="x",
+        user="y",
+        capabilities=[],
+        call=lambda c, i: {},
+        turns=turns,
+    )
+
+    turn = turns[1]
+    assert turn["model"] == "openai/gpt-5.5" and turn["provider"] == "openai"
+    assert turn["fallback_from"] == "anthropic/claude-sonnet-5"
+    assert turn["latency_ms"] == 812
+    assert turn["credential"] == {"source": "vault", "vault_entry_id": "e1", "vault_version": 3}
+
+
+def test_a_failed_turn_is_recorded_before_the_step_fails():
+    turns = []
+
+    def refused(**_):
+        raise ExecutionError("core_rejected: model-turn returned HTTP 503: model step failed")
+
+    with pytest.raises(ExecutionError, match="model step failed"):
+        models.run(
+            refused,
+            step="s",
+            profile="light",
+            system="x",
+            user="y",
+            capabilities=[],
+            call=lambda c, i: {},
+            turns=turns,
+        )
+
+    assert len(turns) == 2
+    assert turns[1]["error"] == ("core_rejected: model-turn returned HTTP 503: model step failed")
+    assert isinstance(turns[1]["latency_ms"], int)
+
+
 def test_usage_normalization_keeps_cache_counts_on_a_second_pass():
     # A local turn's usage is normalized by the client and again by the turn
     # loop; the v0.52.0 release lost the cache counts on the second pass.

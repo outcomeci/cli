@@ -230,6 +230,7 @@ def _write_effect_receipts(root: Path, outcome_root: Path, run_id: str, step: st
         result = receipt.get("result") if isinstance(receipt.get("result"), dict) else {}
         calls.append(
             {
+                "step": receipt.get("step"),
                 "capability": receipt.get("capability"),
                 "proposal_sha256": receipt.get("proposal_sha256"),
                 "status": receipt.get("status"),
@@ -860,7 +861,18 @@ def _run_step(
         state_repository=None,
         context_provider="outcomeci",
         context_revision_id=context_revision,
-        repository_base_commits={repository: _local_revision(root)},
+        repository_base_commits={
+            repository: _local_revision(root),
+            # Every repository the run has checked out so far, at the commit it
+            # read (the latest, if one was checked out more than once). The
+            # manifest is one run-level file that each step rewrites, so a final
+            # step without checkouts must still carry the earlier steps' commits.
+            **{
+                str(item["repo"]): item.get("commit")
+                for item in state.get("repository_checkouts") or []
+                if isinstance(item, dict) and item.get("repo")
+            },
+        },
         runner=runner,
         model=chosen_model,
         transcript=transcripts,
