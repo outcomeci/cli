@@ -115,11 +115,11 @@ class ContractTests(unittest.TestCase):
             client.workflow_model_turn(
                 "lease", step="triage", profile="light", messages=[], tools=[]
             )
-        self.assertEqual(raised.exception.category, "core_unavailable")
+        self.assertEqual(raised.exception.category, "core_rejected")
         self.assertFalse(raised.exception.retryable)
         self.assertEqual(
             str(raised.exception),
-            "core_unavailable: model-turn returned HTTP 422: "
+            "core_rejected: model-turn returned HTTP 422: "
             "body.messages.1.content: Value should have at most 100 items",
         )
 

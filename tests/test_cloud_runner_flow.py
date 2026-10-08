@@ -1623,7 +1623,7 @@ class FinalReportTests(unittest.TestCase):
         client, completions = self.http_client([400, 200])
         code, events = self.run_workflow(client)
         self.assertIsInstance(code, CoreError)
-        self.assertEqual(code.category, "core_unavailable")
+        self.assertEqual(code.category, "core_rejected")
         self.assertFalse(code.retryable)
         self.assertEqual([item["status"] for item in completions], ["completed", "failed"])
         self.assertIs(completions[1]["retryable"], False)
