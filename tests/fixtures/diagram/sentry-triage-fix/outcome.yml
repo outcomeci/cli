@@ -1,0 +1,95 @@
+# A Sentry alert becomes a verified plan posted in #sentry, a thread where the
+# team asks questions and refines it, and, once someone approves, one pull
+# request per repository the plan names.
+apiVersion: outcomeci.workflow/v1
+name: sentry-triage-fix
+trigger: webhook
+
+secrets:
+  slack: vault:slack/bot-token
+  github: vault:github/pat
+
+apis:
+  slack:  {uses: slack,  auth: secrets.slack}
+  github: {uses: github, auth: secrets.github}
+
+reasoning:
+  default: {runner: claude}
+  triage-model: {model: anthropic/claude-sonnet-5-5}
+
+steps:
+  # Cheap read of the raw webhook: what happened, how bad, where it probably lives.
+  - triage:
+      using: triage-model
+      reason: triage.md
+      from: trigger
+      returns:
+        decision: enum[actionable, insufficient_evidence, ignore]
+        severity: enum[critical, high, medium, low]
+        title: string
+        summary: string
+        sentry_url: string
+        repo_hint: string
+        missing_evidence: string
+        suspect_frames: [string]
+        hypothesis: string
+        environment: string
+        release: string
+        event_count: string
+        user_count: string
+        issue_short_id: string
+
+  # Finds the code on GitHub, checks the hypothesis against it, and posts one
+  # message to #sentry: the plan plus the questions it could not answer alone.
+  # Always posts, so ignored noise still leaves a one-line trace.
+  - draft:
+      reason: draft.md
+      with: triage
+      can:
+        - github.read
+        - slack.post: {channel: "#sentry"}
+      returns:
+        plan: {summary, repos: [{repo: {owner, name}, steps: [string]}], questions: [string]}
+
+  # The thread under that message is the conversation. Anyone in #sentry can
+  # answer questions, correct the repo, or reshape the plan; nothing is written
+  # until a person approves. The run parks between replies, so a reply days
+  # later still resumes it (the platform caps a parked wait at seven days).
+  - discuss:
+      when: triage.decision != "ignore"
+      converse: slack.thread(draft.calls.slack.post)
+      with: draft.plan
+      reason: discuss.md
+      until: converged
+      max_turns: 40
+      timeout: 7d
+      returns: [plan, status]
+
+  # One agent implements every repository in the approved plan, in order. Each
+  # grant is scoped to one repository of that plan; an empty position grants
+  # nothing. Up to three repos.
+  - fix:
+      when: discuss.status == "converged"
+      reason: fix.md
+      using: {runner: claude, model: claude-opus-5-5}
+      with: [discuss.plan, triage.title, triage.sentry_url, triage.suspect_frames]
+      can:
+        - github.write: {repo: discuss.plan.repos.0.repo, as: repo_1}
+        - github.write: {repo: discuss.plan.repos.1.repo, as: repo_2}
+        - github.write: {repo: discuss.plan.repos.2.repo, as: repo_3}
+      policy: >
+        Per repository in the approved plan: one new branch named
+        sentry-fix/<short-slug>, one pull request, and only the files that
+        repo's steps name. Never write to the default branch, never force-push,
+        never merge, and never change CI config, workflow files, or secrets.
+      returns:
+        prs: [{repo: string, url, number: int, branch}]
+        skipped: [{repo: string, reason: string}]
+
+  # Closes the loop in the same thread: one line per repo in the plan's order.
+  - report:
+      when: discuss.status == "converged"
+      with: [fix, discuss.plan, triage.title]
+      reason: report.md
+      can:
+        - slack.post: {channel: "#sentry", thread_ts: draft.calls.slack.post.ts}
