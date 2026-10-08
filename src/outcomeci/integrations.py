@@ -22,6 +22,7 @@ import httpx
 import jsonschema
 
 from .auth import Authenticator, AuthError, shape_check
+from .execution_events import safe_text
 from .process import ExecutionError
 
 CredentialResolver = Callable[[str], Mapping[str, str] | str]
@@ -38,10 +39,14 @@ class IntegrationError(ExecutionError):
         *,
         category: str,
         retryable: bool = False,
+        http_status: int | None = None,
     ):
         super().__init__(message, retryable)
         self.code = code
         self.category = category
+        # Set when the provider answered with an HTTP error: the request
+        # reached it and was refused, so delivery is known, not uncertain.
+        self.http_status = http_status
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -269,6 +274,39 @@ def _diagnostic(event: str, **fields: Any) -> None:
     bodies or credentials.
     """
     print(json.dumps({"event": event, "at": time.time(), **fields}), file=sys.stderr, flush=True)
+
+
+PROVIDER_REASON_LIMIT = 300
+
+
+def _provider_reason(response: httpx.Response, secrets: list[str]) -> str | None:
+    """The reason a provider gave for refusing a request, bounded and redacted.
+
+    Only the fields providers use for an error's explanation are read (X:
+    `detail`/`title`/`errors[].message`, GitHub: `message`, OAuth-style:
+    `error_description`/`error`), never the whole body, which can echo the
+    request."""
+    try:
+        body = response.json()
+    except ValueError:
+        return None
+    if not isinstance(body, dict):
+        return None
+    parts: list[str] = []
+    for key in ("title", "detail", "message", "error_description", "error"):
+        value = body.get(key)
+        if isinstance(value, str) and value.strip() and value.strip() not in parts:
+            parts.append(value.strip())
+    errors = body.get("errors")
+    if isinstance(errors, list):
+        for item in errors[:3]:
+            value = item.get("message") if isinstance(item, dict) else None
+            if isinstance(value, str) and value.strip() and value.strip() not in parts:
+                parts.append(value.strip())
+    if not parts:
+        return None
+    reason = _redact(" | ".join(parts), secrets)
+    return safe_text(" ".join(str(reason).split()), PROVIDER_REASON_LIMIT)
 
 
 def _redact(value: Any, secrets: list[str]) -> Any:
@@ -751,6 +789,7 @@ class IntegrationExecutor:
         credential = connection["auth"].get("credential")
         resolved = self.resolver(credential) if credential else None
         started = time.monotonic()
+        sensitive: list[Any] = []
         try:
             with httpx.Client(
                 transport=self.transport,
@@ -820,13 +859,17 @@ class IntegrationExecutor:
         except httpx.HTTPStatusError as exc:
             status = exc.response.status_code
             category = "authorization" if status in {401, 403} else "transport"
+            reason = _provider_reason(
+                exc.response, [item for item in sensitive if isinstance(item, str)]
+            )
             raise IntegrationError(
                 "integration.authorization_failed"
                 if category == "authorization"
                 else "integration.http_failed",
-                f"integration request returned HTTP {status}",
+                f"integration request returned HTTP {status}" + (f": {reason}" if reason else ""),
                 category=category,
                 retryable=status == 429 or status >= 500,
+                http_status=status,
             ) from exc
         except httpx.HTTPError as exc:
             raise IntegrationError(

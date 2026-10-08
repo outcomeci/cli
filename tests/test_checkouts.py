@@ -270,6 +270,15 @@ def test_each_item_reads_only_its_own_repository_locally(
     assert [
         (item["item"], item["repo"], item["commit"]) for item in result["repository_checkouts"]
     ] == [(0, "outcomeci/cli", cli), (1, "outcomeci/api", api)]
+    # The final manifest names every repository the run read and its commit,
+    # even though the last step (the Slack announcement) checked nothing out.
+    manifest = json.loads((outcome / "manifest.json").read_text())
+    assert manifest["step"] != "implement"
+    assert {
+        key: value
+        for key, value in manifest["repository_base_commits"].items()
+        if key.startswith("outcomeci/")
+    } == {"outcomeci/cli": cli, "outcomeci/api": api}
     checkout_events = [item for item in events if item["message"].startswith("Checked out")]
     assert len(checkout_events) == 2
     assert {item["event_type"] for item in events} <= POLICY_EVENT_TYPES

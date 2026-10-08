@@ -22,6 +22,18 @@ from .integrations import IntegrationError, IntegrationExecutor, same
 from .process import invoke
 
 
+def _refused_status(error: BaseException) -> int | None:
+    """The HTTP status of a request the provider received and refused.
+
+    A 4xx means the provider answered without acting (408 excepted: the
+    request timed out and may still land). A 5xx or a transport error may
+    have been processed, so its delivery stays uncertain."""
+    status = getattr(error, "http_status", None)
+    if isinstance(status, int) and 400 <= status < 500 and status != 408:
+        return status
+    return None
+
+
 def _within(path: Any, prefix: str) -> bool:
     """Whether a request path is `prefix` itself or a path beneath it."""
     if not isinstance(path, str):
@@ -475,7 +487,7 @@ class PolicyExecutor:
                     return {**previous["result"], "replayed": True}
                 raise IntegrationError(
                     "integration.effect_not_replayable",
-                    "previous request was denied or its delivery is uncertain; inspect the receipt before continuing",
+                    "previous request was denied, refused, or its delivery is uncertain; inspect the receipt before continuing",
                     category="policy",
                 )
             # The budget is per agent run: a step, or one item of a
@@ -667,17 +679,30 @@ class PolicyExecutor:
                         call["status"] = "unsent"
                         self._save(state)
                         raise
-                    else:
-                        self._event(
-                            state,
-                            "integration.failed",
-                            step,
-                            capability,
-                            "Integration request failed or delivery is uncertain",
-                            proposal_sha256=fingerprint,
-                            detail=str(exc),
-                            level="error",
+                    refused = _refused_status(exc)
+                    self._event(
+                        state,
+                        "integration.failed",
+                        step,
+                        capability,
+                        (
+                            "Integration request refused by the provider"
+                            if refused is not None
+                            else "Integration request failed or delivery is uncertain"
+                        ),
+                        proposal_sha256=fingerprint,
+                        detail=str(exc),
+                        http_status=refused,
+                        level="error",
+                    )
+                    if refused is not None:
+                        # The provider answered and refused: nothing was created,
+                        # and the receipt says why. It is still never resent.
+                        call.update(
+                            status="failed",
+                            result={"ok": False, "status": refused, "error": str(exc)},
                         )
-                    call["status"] = "uncertain"
+                    else:
+                        call["status"] = "uncertain"
                     self._save(state)
                 raise
