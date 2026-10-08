@@ -251,6 +251,23 @@ def test_a_tool_result_over_the_limit_stays_valid_json():
 
 
 def test_a_local_turn_allows_a_long_reply_and_reports_its_usage(monkeypatch):
+    from outcomeci import model_capabilities
+
+    monkeypatch.setattr(
+        model_capabilities,
+        "_catalog",
+        lambda: (
+            {
+                "anthropic/x": {
+                    "litellm_provider": "anthropic",
+                    "mode": "chat",
+                    "max_output_tokens": 65536,
+                }
+            },
+            "1.104.2",
+            "known",
+        ),
+    )
     import sys
     from types import SimpleNamespace
 

@@ -20,3 +20,13 @@ Validation uses an isolated test environment with the current connectors origin/
 - [x] Bounded per-model output tokens with conservative unknown-model default
 - [x] Actual SDK HTTP tests for sixteen providers and typed tool returns where supported
 - [x] Final full regression suite and packaging after BYOK extension: 684 tests passed, Ruff clean, wheel and sdist built; provider-error traceback sentinel checks passed
+
+## Model capability validation
+
+- [x] Offline bundled catalog reader with exact provider-aware IDs and tri-state capability fields
+- [x] Known incompatibility rejection for ordinary primary/fallback tools and model mode
+- [x] Post-digest compiler and CLI reports, including explicit SDK/metadata-unavailable state
+- [x] Runtime tool/vision validation before keys, offline message/tool/image token estimate, bounded context/output budget
+- [x] Preserve primary/fallback reports and warnings in model transcript evidence
+- [x] Focused tests for metadata absence, false values, provider identity, revision stability, no-network counting, context overflow, key ordering, and transcript reports
+- [x] Final validation: 701 CLI tests passed; Ruff and diff checks clean; wheel and sdist built. Shared API validation: 887 tests passed and real PostgreSQL integration passed.

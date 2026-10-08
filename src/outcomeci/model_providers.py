@@ -130,21 +130,9 @@ def completion_options(model: str) -> dict:
 
 
 def completion_max_tokens(model: str, limit: int = 32768) -> int:
-    """Bound requests by known model limits, conservatively when uncatalogued.
-
-    Metadata is advisory: the provider still validates its current model limits.
-    Importing this registry alone never imports LiteLLM or fetches its catalog.
-    """
-    provider, _ = parse_model(model)
+    """Bound output using the same offline metadata as capability validation."""
     if type(limit) is not int or limit <= 0:
         raise ValueError("completion token limit must be a positive integer")
-    import litellm
+    from .model_capabilities import get_capabilities
 
-    try:
-        info = litellm.get_model_info(model=model, custom_llm_provider=provider)
-    except Exception:
-        return min(limit, 4096)
-    maximum = info.get("max_output_tokens") if isinstance(info, dict) else None
-    if type(maximum) is not int or maximum <= 0:
-        return min(limit, 4096)
-    return min(limit, maximum)
+    return min(limit, get_capabilities(model).max_output_tokens or 4096)

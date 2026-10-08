@@ -22,7 +22,14 @@ from typing import Any
 import jsonschema
 
 from .integrations import CredentialResolver
-from .model_providers import completion_max_tokens, completion_options, provider_for_model
+from .model_capabilities import (
+    CapabilityError,
+    flatten_warnings,
+    preflight,
+    request_requirements,
+    validate_requirements,
+)
+from .model_providers import completion_options, provider_for_model
 from .process import ExecutionError
 
 MAX_TOOL_CALLS = 20
@@ -65,6 +72,28 @@ def local_client(
     provider's environment variable."""
 
     def call(*, step: str, profile: str, messages: list[dict], tools: list[dict]) -> dict[str, Any]:
+        spec = compiled.get("reasoning", {}).get(profile)
+        if not spec or "model" not in spec:
+            raise ExecutionError(f"step {step}: reasoning profile {profile} is not a model")
+        # The profile's model first; on a provider that is rate limited, down,
+        # or unreachable, the profile's fallback model, once.
+        choices = [spec, *([spec["fallback"]] if spec.get("fallback") else [])]
+        for index, choice in enumerate(choices):
+            try:
+                validate_requirements(choice["model"], **request_requirements(messages, tools))
+            except CapabilityError as exc:
+                raise ExecutionError(
+                    str(
+                        CapabilityError(
+                            exc.code,
+                            exc.model,
+                            exc.capability,
+                            step=step,
+                            profile=profile,
+                            role="primary" if index == 0 else "fallback",
+                        )
+                    )
+                ) from None
         try:
             import litellm
         except ImportError as exc:
@@ -72,12 +101,27 @@ def local_client(
                 "a model step on your machine needs LiteLLM: pip install 'outcomeci-cli[models]'"
             ) from exc
 
-        spec = compiled.get("reasoning", {}).get(profile)
-        if not spec or "model" not in spec:
-            raise ExecutionError(f"step {step}: reasoning profile {profile} is not a model")
-        # The profile's model first; on a provider that is rate limited, down,
-        # or unreachable, the profile's fallback model, once.
-        choices = [spec, *([spec["fallback"]] if spec.get("fallback") else [])]
+        reports = []
+        for index, choice in enumerate(choices):
+            role = "primary" if index == 0 else "fallback"
+            try:
+                report = preflight(
+                    choice["model"], messages=messages, tools=tools, output_limit=MAX_OUTPUT_TOKENS
+                )
+            except CapabilityError as exc:
+                raise ExecutionError(
+                    str(
+                        CapabilityError(
+                            exc.code,
+                            exc.model,
+                            exc.capability,
+                            step=step,
+                            profile=profile,
+                            role=role,
+                        )
+                    )
+                ) from None
+            reports.append({**report, "step": step, "profile": profile, "role": role})
         transient = tuple(
             getattr(litellm, name)
             for name in TRANSIENT_ERRORS
@@ -102,7 +146,7 @@ def local_client(
                     api_key=_key(chosen, resolver),
                     messages=turn_messages,
                     **({"tools": turn_tools} if turn_tools else {}),
-                    max_tokens=completion_max_tokens(model, MAX_OUTPUT_TOKENS),
+                    max_tokens=reports[index]["max_tokens"],
                     timeout=TURN_TIMEOUT_SECONDS,
                     **completion_options(model),
                 )
@@ -134,6 +178,8 @@ def local_client(
             "finish_reason": choice.finish_reason,
             "usage": _usage(getattr(response, "usage", None)),
             "model": model,
+            "model_capabilities": reports,
+            "capability_warnings": flatten_warnings(reports),
         }
 
     return call
@@ -388,6 +434,8 @@ def run(
                     # names; a local one already in the shared ones.
                     "usage": _usage(answer.get("usage")) if answer.get("usage") else {},
                     "model": answer.get("model"),
+                    "model_capabilities": answer.get("model_capabilities", []),
+                    "capability_warnings": answer.get("capability_warnings", []),
                     "assistant": answer.get("message") or {},
                     "tool_results": [],
                 }

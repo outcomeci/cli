@@ -884,7 +884,7 @@ def _compile(document: dict[str, Any], root: Path) -> dict[str, Any]:
     revision = hashlib.sha256(
         json.dumps(revision_input, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
-    return {
+    compiled = {
         "schema_version": "outcomeci.workflow/v1",
         "api_version": document["apiVersion"],
         "engine_version": "2",
@@ -892,6 +892,15 @@ def _compile(document: dict[str, Any], root: Path) -> dict[str, Any]:
         "workflow_revision": revision,
         **revision_input,
     }
+    from .model_capabilities import CapabilityError, flatten_warnings, workflow_report
+
+    try:
+        reports = workflow_report(compiled)
+    except CapabilityError as exc:
+        raise ConfigError(str(exc)) from None
+    compiled["model_capabilities"] = reports
+    compiled["capability_warnings"] = flatten_warnings(reports)
+    return compiled
 
 
 def validate_delivery_config(value: dict[str, Any]) -> dict[str, Any]:

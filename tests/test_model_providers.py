@@ -250,7 +250,7 @@ def test_perplexity_tools_fail_before_provider_request(monkeypatch):
     compiled = {
         "reasoning": {"model": {"model": "perplexity/sonar", "credential": "vault:model/key"}}
     }
-    with pytest.raises(ExecutionError, match="does not support tools"):
+    with pytest.raises(ExecutionError, match="unsupported_tools"):
         models.local_client(compiled, lambda reference: "test-key")(
             step="work",
             profile="model",
@@ -307,25 +307,35 @@ def test_provider_errors_do_not_expose_keys_or_prompts(monkeypatch, error_name):
 )
 def test_unknown_or_invalid_model_limits_use_conservative_bound(monkeypatch, metadata):
     monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "true")
-    litellm = pytest.importorskip("litellm")
+    from outcomeci import model_capabilities
     from outcomeci.model_providers import completion_max_tokens
 
-    monkeypatch.setattr(litellm, "get_model_info", lambda **k: metadata)
+    monkeypatch.setattr(
+        model_capabilities,
+        "_catalog",
+        lambda: (
+            {"deepseek/new-model": {"litellm_provider": "deepseek", **metadata}},
+            "1.104.2",
+            "known",
+        ),
+    )
     assert completion_max_tokens("deepseek/new-model") == 4096
     assert completion_max_tokens("deepseek/new-model", 2048) == 2048
 
 
 def test_known_and_unavailable_model_limits(monkeypatch):
-    monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "true")
-    litellm = pytest.importorskip("litellm")
+    from outcomeci import model_capabilities
     from outcomeci.model_providers import completion_max_tokens
 
     assert completion_max_tokens("deepseek/deepseek-chat") <= 8192
-    monkeypatch.setattr(litellm, "get_model_info", lambda **k: {"max_output_tokens": 1024})
+    monkeypatch.setattr(
+        model_capabilities,
+        "_catalog",
+        lambda: (
+            {"deepseek/deepseek-chat": {"litellm_provider": "deepseek", "max_output_tokens": 1024}},
+            "1.104.2",
+            "known",
+        ),
+    )
     assert completion_max_tokens("deepseek/deepseek-chat") == 1024
-
-    def missing(**kwargs):
-        raise ValueError("uncatalogued")
-
-    monkeypatch.setattr(litellm, "get_model_info", missing)
     assert completion_max_tokens("deepseek/unknown") == 4096
