@@ -1,0 +1,181 @@
+{
+  "edges": [
+    {
+      "from": "trigger",
+      "kind": "data",
+      "label": null,
+      "to": "triage"
+    },
+    {
+      "from": "triage",
+      "kind": "data",
+      "label": null,
+      "to": "draft"
+    },
+    {
+      "from": "triage",
+      "kind": "condition",
+      "label": "triage.decision != ignore",
+      "to": "discuss"
+    },
+    {
+      "from": "draft",
+      "kind": "data",
+      "label": null,
+      "to": "discuss"
+    },
+    {
+      "from": "triage",
+      "kind": "data",
+      "label": null,
+      "to": "fix"
+    },
+    {
+      "from": "discuss",
+      "kind": "condition",
+      "label": "discuss.status == converged",
+      "to": "fix"
+    },
+    {
+      "from": "triage",
+      "kind": "data",
+      "label": null,
+      "to": "report"
+    },
+    {
+      "from": "draft",
+      "kind": "data",
+      "label": null,
+      "to": "report"
+    },
+    {
+      "from": "discuss",
+      "kind": "condition",
+      "label": "discuss.status == converged",
+      "to": "report"
+    },
+    {
+      "from": "fix",
+      "kind": "data",
+      "label": null,
+      "to": "report"
+    }
+  ],
+  "name": "sentry-triage-fix",
+  "nodes": [
+    {
+      "connectors": [],
+      "id": "triage",
+      "kind": "model",
+      "label": "triage",
+      "model": {
+        "model": "anthropic/claude-sonnet-5-5",
+        "provider": "anthropic"
+      },
+      "order": 0,
+      "reviewed": false,
+      "summary": "You receive a raw Sentry webhook."
+    },
+    {
+      "connectors": [
+        {
+          "api": "github",
+          "operations": [
+            "read"
+          ],
+          "provider": "github"
+        },
+        {
+          "api": "slack",
+          "operations": [
+            "post"
+          ],
+          "provider": "slack"
+        }
+      ],
+      "id": "draft",
+      "kind": "agent",
+      "label": "draft",
+      "order": 1,
+      "reviewed": false,
+      "runner": "claude",
+      "summary": "You have the triage of a Sentry issue in `triage`."
+    },
+    {
+      "condition": {
+        "op": "!=",
+        "ref": "triage.decision",
+        "value": "ignore"
+      },
+      "connectors": [],
+      "gate": {
+        "max_turns": 40,
+        "provider": "slack",
+        "signal": "thread",
+        "subject": "draft.plan",
+        "timeout_seconds": 604800,
+        "type": "converse"
+      },
+      "id": "discuss",
+      "kind": "converse",
+      "label": "discuss",
+      "order": 2,
+      "reviewed": false,
+      "summary": "You are discussing a Sentry fix plan with the team in a #sentry thread."
+    },
+    {
+      "condition": {
+        "op": "==",
+        "ref": "discuss.status",
+        "value": "converged"
+      },
+      "connectors": [
+        {
+          "api": "github",
+          "operations": [
+            "write"
+          ],
+          "provider": "github"
+        }
+      ],
+      "id": "fix",
+      "kind": "agent",
+      "label": "fix",
+      "order": 3,
+      "reviewed": true,
+      "runner": "claude",
+      "summary": "You are implementing a plan the team approved in Slack."
+    },
+    {
+      "condition": {
+        "op": "==",
+        "ref": "discuss.status",
+        "value": "converged"
+      },
+      "connectors": [
+        {
+          "api": "slack",
+          "operations": [
+            "post"
+          ],
+          "provider": "slack"
+        }
+      ],
+      "id": "report",
+      "kind": "agent",
+      "label": "report",
+      "order": 4,
+      "reviewed": false,
+      "runner": "claude",
+      "summary": "Reply once in the triage thread, in Slack mrkdwn, one block per repository in the plan's order, blank line between blocks:"
+    }
+  ],
+  "schema_version": "outcomeci.workflow-diagram/v1",
+  "trigger": {
+    "id": "trigger",
+    "label": "Webhook",
+    "provider": null,
+    "type": "webhook"
+  },
+  "workflow_revision": "14b36092666cbdcf673d1a6115646e62dc40d6e35cc9cfe4da899aebf4cefb3c"
+}
