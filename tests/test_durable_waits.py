@@ -260,3 +260,51 @@ def test_reaction_wait_deadline_survives_restart_and_accepts_captured_signal(
         is approved
     )
     assert finished == ["approved" if approved else "expired"]
+
+
+def test_cloud_checkpoint_resumes_under_the_claimed_revision_id(tmp_path, monkeypatch):
+    """A cloud checkpoint is identified by the revision id the claim named, so a
+    runner whose compiled hash differs (another connector or compiler build of
+    the same revision) still resumes it; another revision id does not."""
+    root = _slack_root(tmp_path, monkeypatch)
+    config = root / example.WORKFLOW
+    slack, agent = example.Slack([]), example.Agent()
+    real = httpx.Client
+    monkeypatch.setattr(
+        integrations.httpx,
+        "Client",
+        lambda *a, **kw: real(*a, **{**kw, "transport": httpx.MockTransport(slack)}),
+    )
+    monkeypatch.setattr(local, "invoke", agent)
+    options = local.ExecutionOptions(
+        durable_waits=True,
+        workflow_revision_id="rev-1",
+        credential_resolver=lambda ref: "xoxb-test",
+        policy_reviewer=lambda p: {
+            "decision": "allow",
+            "proposal_sha256": p["proposal_sha256"],
+            "reason": "ok",
+        },
+    )
+    first = local.trigger(root, config, "webhook", example._payload(), options=options)
+    with pytest.raises(v1_runtime.DurableWait):
+        local.continue_run(root, config, first["run_id"], approve=True, options=options)
+    state = json.loads((root / ".outcomeci/outcomes" / first["run_id"] / "run.json").read_text())
+    assert state["resume_workflow_revision_id"] == "rev-1"
+    assert state["resume_workflow_revision"]
+
+    snapshot = checkpoint.capture(root, first["run_id"])
+    fresh = tmp_path / "fresh"
+    shutil.copytree(example.EXAMPLES, fresh)
+    rebuilt = fresh / example.WORKFLOW
+    # The same revision compiled by a different build: its hash no longer matches.
+    rebuilt.write_text(
+        config.read_text().replace("Find every repository", "Carefully find every repository")
+    )
+    checkpoint.restore(fresh, first["run_id"], snapshot)
+    with pytest.raises(v1_runtime.DurableWait):
+        local.resume_wait(fresh, rebuilt, first["run_id"], options=options)
+
+    other = local.ExecutionOptions(durable_waits=True, workflow_revision_id="rev-2")
+    with pytest.raises(local.ExecutionError, match="workflow changed"):
+        local.resume_wait(fresh, rebuilt, first["run_id"], options=other)

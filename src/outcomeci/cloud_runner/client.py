@@ -121,12 +121,12 @@ class CoreClient:
                         elif "policy review digest" in detail:
                             category, retryable = "policy_review_conflict", False
                     raise CoreError(category, retryable)
+                if response.status_code >= 500:
+                    raise CoreError("core_unavailable", True, _refusal(suffix, response))
                 if response.status_code >= 400:
-                    raise CoreError(
-                        "core_unavailable",
-                        response.status_code >= 500,
-                        _refusal(suffix, response),
-                    )
+                    # The api understood the request and refused it; retrying
+                    # the same request cannot help, and the reason is the story.
+                    raise CoreError("core_rejected", False, _refusal(suffix, response))
                 raw = _read_bounded(response, self._max_response + 1)
         except httpx.HTTPError as error:
             raise CoreError("core_unavailable", True) from error

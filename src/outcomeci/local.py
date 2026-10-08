@@ -44,6 +44,10 @@ class ExecutionOptions:
     model_client: Callable[..., dict[str, Any]] | None = None
     durable_waits: bool = False
     resume_response: dict[str, Any] | None = None
+    # The cloud's identifier for the revision being run. A checkpoint resumes
+    # under this revision; compiled hashes differ across runner or connector
+    # builds of the same revision, so they cannot identify it alone.
+    workflow_revision_id: str | None = None
     _container_isolated: bool = False
 
 
@@ -950,6 +954,8 @@ def _settle(
                     "resume_workflow_revision": compiled["workflow_revision"],
                 }
             )
+            if options.workflow_revision_id:
+                state["resume_workflow_revision_id"] = options.workflow_revision_id
             state["steps"] = _step_states(compiled, state)
             _write(root, state)
             raise
@@ -1063,6 +1069,20 @@ def status(root: Path, run_id: str | None) -> dict[str, Any]:
     return _read(root, records[0].parent.name) if records else {"status": "no_runs"}
 
 
+def _same_revision(
+    state: dict[str, Any], compiled: dict[str, Any], options: ExecutionOptions
+) -> bool:
+    """Whether a checkpoint was made by the revision now resuming it.
+
+    In the cloud the claim names the revision, and that identity holds across
+    runner and connector builds whose compiled hashes differ. A local run has
+    only the compiled hash."""
+    recorded = state.get("resume_workflow_revision_id")
+    if options.workflow_revision_id and recorded:
+        return recorded == options.workflow_revision_id
+    return state.get("resume_workflow_revision") == compiled["workflow_revision"]
+
+
 def resume_wait(
     root: Path, config: Path, run_id: str, *, options: ExecutionOptions
 ) -> dict[str, Any]:
@@ -1071,7 +1091,7 @@ def resume_wait(
     if state.get("status") != "waiting":
         raise ExecutionError("outcome is not waiting for a durable continuation")
     compiled = compile_workflow(config)
-    if state.get("resume_workflow_revision") != compiled["workflow_revision"]:
+    if not _same_revision(state, compiled, options):
         raise ExecutionError("workflow changed since its durable checkpoint")
     if not _settle(root, compiled, state, options):
         return state

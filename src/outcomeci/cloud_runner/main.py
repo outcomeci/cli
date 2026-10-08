@@ -406,6 +406,11 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 model_client=model_turn,
                 durable_waits=True,
                 resume_response=resume.get("response") if resume else None,
+                workflow_revision_id=(
+                    str(claim["workflow_revision_id"])
+                    if claim.get("workflow_revision_id")
+                    else None
+                ),
                 _container_isolated=True,
             )
 
@@ -518,7 +523,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                     agent_credential=agent_update,
                     resource_usage=resource_sampler.stop(),
                 )
-        except Exception:
+        except Exception as pause_error:
             # If pause was accepted but its response was lost, complete is fenced
             # by the now-released lease. Otherwise fail closed: do not replay effects.
             with suppress(CoreError):
@@ -527,6 +532,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                     "failed",
                     run_id=run_id,
                     category="workflow_checkpoint_failed",
+                    detail=redact_diagnostic(pause_error),
                     expected_credential_version=credential_version,
                     agent_credential=agent_update,
                     retryable=False,
