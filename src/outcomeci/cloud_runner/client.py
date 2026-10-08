@@ -190,6 +190,16 @@ class CoreClient:
             timeout=MODEL_TURN_TIMEOUT_SECONDS,
         )
 
+    def workflow_decision(self, lease_token: str, *, step: str, input: dict) -> dict[str, Any]:
+        return self._post(
+            "decision",
+            {"lease_token": lease_token, "step": step, "input": input},
+            timeout=MODEL_TURN_TIMEOUT_SECONDS,
+        )
+
+    def workflow_dispatch(self, lease_token: str, *, step: str, input: dict) -> dict[str, Any]:
+        return self._post("dispatch", {"lease_token": lease_token, "step": step, "input": input})
+
     def workflow_credential(self, lease_token: str, reference: str) -> Any:
         return self._post(
             "credentials/resolve",

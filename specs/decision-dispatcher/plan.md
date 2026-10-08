@@ -1,0 +1,11 @@
+# Implementation plan
+
+Extend `v1.py` with distinct decision and dispatch lowering and `config.py` with explicit dispatcher trigger validation. Keep provider restrictions at profile use sites so TypeSafe cannot leak into chat execution. Infer strict output schemas from declared questions and validate responses before downstream conditions can read them.
+
+Add a standalone `decisions.py` adapter calling LiteLLM's shared OpenAI-shaped interface. Pin the minimum supported models extra to 1.104.2, bind provider endpoints, disable logging/caching/retries, use existing credential resolution, and bound provider calls to sixty seconds. Validate both adapters against the actual SDK using an in-memory HTTP transport.
+
+Extend runtime execution options and the managed runner client with decision and dispatch callbacks. Execute these steps alongside existing runtime-driven waits, preserving completion/skip/retry semantics. Retain evidence before validation; publish outputs only after successful validation. Decode child dispatcher envelopes only when resolving references, preserving lineage in run state.
+
+Use compiler rejection tests, an end-to-end conditional runtime test, retry coverage, actual SDK translation tests, and explicit cloud wire-contract tests. Run repository formatting/lint, the full regression suite, and wheel/source builds. Existing developer checkouts remain untouched in favor of this isolated worktree.
+
+The actual 1.104.2 SDK rewrites OpenAI answer names positionally and reconstructs probability maps. Add a scoped HTTP response hook for the two fixed Decisions endpoints before that normalization: verify raw answer names/order and declared probability entries. Shared cached clients install the hook once, concurrent requests read only their own request body, and ordinary completions are unaffected. API reuses this CLI module for async calls. Integration tests cover both providers, sync/async paths, malformed raw answers, and client hook behavior.

@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "properties": {
+    "schema_version": {
+      "const": "outcomeci.trigger.dispatcher/v1"
+    },
+    "type": {
+      "const": "dispatcher"
+    },
+    "event_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "parent_invocation_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "parent_step": {
+      "type": "string",
+      "minLength": 1
+    },
+    "root_invocation_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "depth": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 8
+    },
+    "payload": {
+      "type": "object"
+    },
+    "dispatcher": {
+      "type": "string",
+      "minLength": 1
+    }
+  },
+  "required": [
+    "schema_version",
+    "type",
+    "event_id",
+    "parent_invocation_id",
+    "parent_step",
+    "root_invocation_id",
+    "depth",
+    "payload",
+    "dispatcher"
+  ],
+  "additionalProperties": false
+}

@@ -32,7 +32,7 @@ SIDE_EFFECTS = {"read", "create", "update", "delete", "execute"}
 GRANT_KINDS = ("field", "path_prefix", "response_in", "query_qualifier")
 APPROVAL_POLICIES = {"none", "required", "inherit"}
 IDEMPOTENCY_POLICIES = {"none", "supported", "required"}
-TRIGGER_TYPES = {"manual", "email.received", "webhook.received", "cron"}
+TRIGGER_TYPES = {"dispatcher", "manual", "email.received", "webhook.received", "cron"}
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9_-]{0,62}$")
 
 
@@ -201,6 +201,14 @@ def _triggers(value: Any) -> dict[str, dict[str, Any]]:
         trigger_type = trigger.get("type")
         if trigger_type not in TRIGGER_TYPES:
             raise ConfigError(f"{field}.type is unsupported")
+        if trigger_type == "dispatcher":
+            if set(trigger) != {"type", "dispatcher"}:
+                raise ConfigError(f"{field} requires type and dispatcher")
+            dispatcher = _non_empty_str(
+                trigger.get("dispatcher"), f"{field}.dispatcher is required"
+            )
+            normalized[name] = {"type": trigger_type, "dispatcher": dispatcher}
+            continue
         if trigger_type == "webhook.received":
             normalized[name] = {
                 "type": trigger_type,
