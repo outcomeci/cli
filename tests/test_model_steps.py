@@ -251,6 +251,23 @@ def test_a_tool_result_over_the_limit_stays_valid_json():
 
 
 def test_a_local_turn_allows_a_long_reply_and_reports_its_usage(monkeypatch):
+    from outcomeci import model_capabilities
+
+    monkeypatch.setattr(
+        model_capabilities,
+        "_catalog",
+        lambda: (
+            {
+                "anthropic/x": {
+                    "litellm_provider": "anthropic",
+                    "mode": "chat",
+                    "max_output_tokens": 65536,
+                }
+            },
+            "1.104.2",
+            "known",
+        ),
+    )
     import sys
     from types import SimpleNamespace
 
@@ -269,7 +286,13 @@ def test_a_local_turn_allows_a_long_reply_and_reports_its_usage(monkeypatch):
             choices=[SimpleNamespace(message=message, finish_reason="stop")], usage=usage
         )
 
-    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(
+            completion=completion, get_model_info=lambda **kwargs: {"max_output_tokens": 65536}
+        ),
+    )
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
     client = models.local_client({"reasoning": {"light": {"model": "anthropic/x"}}})
 
@@ -298,7 +321,13 @@ def test_an_anthropic_turn_marks_its_prompt_for_caching(monkeypatch):
             choices=[SimpleNamespace(message=message, finish_reason="stop")], usage=None
         )
 
-    monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(completion=completion))
+    monkeypatch.setitem(
+        sys.modules,
+        "litellm",
+        SimpleNamespace(
+            completion=completion, get_model_info=lambda **kwargs: {"max_output_tokens": 65536}
+        ),
+    )
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-env")
     messages = [
@@ -422,7 +451,9 @@ def test_a_profile_without_a_fallback_reports_the_unavailable_model(monkeypatch)
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-env")
     client = models.local_client({"reasoning": {"light": {"model": "anthropic/x"}}})
 
-    with pytest.raises(ExecutionError, match="anthropic/x is unavailable: 503"):
+    with pytest.raises(
+        ExecutionError, match=r"anthropic/x is unavailable \(ServiceUnavailableError\)"
+    ):
         client(step="s", profile="light", messages=[], tools=[])
 
 
@@ -435,7 +466,7 @@ def test_a_request_error_does_not_fall_back(monkeypatch):
     compiled = {"reasoning": {"light": {"model": "anthropic/x", "fallback": {"model": "openai/y"}}}}
     client = models.local_client(compiled)
 
-    with pytest.raises(ValueError, match="bad request"):
+    with pytest.raises(ExecutionError, match=r"provider call failed \(ValueError\)"):
         client(step="s", profile="light", messages=[], tools=[])
 
 
@@ -697,7 +728,7 @@ def test_a_platform_funded_local_profile_reads_the_provider_env_var(monkeypatch)
     ("reasoning", "using", "message"),
     [
         ({"review": {"runner": "claude"}}, None, "review is a model"),
-        ({"light": {"model": "mistral/large"}}, None, "<provider>/<model>"),
+        ({"light": {"model": "mistral/large"}}, None, "requires an explicit key"),
         ({"light": {"model": "anthropic/x", "key": "secrets.missing"}}, None, "declared secret"),
         (
             {"light": {"model": "anthropic/x", "temperature": 1}},

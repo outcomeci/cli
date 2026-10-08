@@ -169,7 +169,10 @@ def value(
     if bound and head in bound:
         return _lookup(bound[head], parts)
     if head == "trigger":
-        payload = (state.get("trigger") or {}).get("value")
+        trigger = state.get("trigger") or {}
+        payload = trigger.get("value")
+        if trigger.get("type") == "dispatcher" and isinstance(payload, dict):
+            payload = payload.get("payload")
         found = _lookup(payload, parts)
         if found is MISSING and parts:
             found = _lookup(_decoded_body(payload), parts)
@@ -896,3 +899,71 @@ def _model_turn(compiled, step, spec, consultation, prompt, reasoning, options) 
     if answer is None or not answer["message"].strip():
         raise ExecutionError(f"step {step}: the discussion turn gave no answer")
     return answer
+
+
+def run_dispatcher_step(root, compiled, state, step, options) -> None:
+    """Run a tool-free decision or durable dispatch and retain its evidence."""
+    from . import decisions, models
+
+    step_block = block(compiled, step)
+    resolved = inputs(root, state, step_block)
+    kind = step_block["kind"]
+    if kind == "decision":
+        payload = {item["name"]: item["value"] for item in resolved}
+        client = options.decision_client or decisions.local_client(
+            compiled, options.credential_resolver
+        )
+    else:
+        payload = resolved[0]["value"]
+        if not isinstance(payload, dict):
+            raise ExecutionError(f"step {step}: dispatched input must be an object")
+        client = options.dispatch_client
+        if client is None:
+            raise ExecutionError(
+                "dispatch steps require OutcomeCI Cloud or a managed dispatch client"
+            )
+    result = client(step=step, input=payload)
+    if not isinstance(result, dict):
+        raise ExecutionError(f"step {step}: invalid {kind} response")
+    target = outputs_path(root, state["run_id"], step)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # Retain evidence even when strict answer validation refuses to continue.
+    _save(target.parent / f"{kind}.json", result)
+    if kind == "decision":
+        provider = str(step_block["reasoning"]["model"]).split("/")[0]
+        usage = result.get("usage") or {}
+        if not isinstance(usage, dict):
+            raise ExecutionError("decision response has invalid usage")
+        details = usage.get("input_tokens_details") or {}
+        if not isinstance(details, dict) or any(
+            type(count) is not int or count < 0
+            for count in [
+                usage.get("input_tokens", 0),
+                usage.get("output_tokens", 0),
+                details.get("cached_tokens", 0),
+                details.get("cache_write_tokens", 0),
+            ]
+        ):
+            raise ExecutionError("decision response has invalid usage")
+        usage = models._usage(
+            {
+                **usage,
+                "cached_tokens": details.get("cached_tokens", 0),
+                "cache_write_tokens": details.get("cache_write_tokens", 0),
+            }
+        )
+        transcript = models.write_transcript(
+            target.parent.parent,
+            step,
+            provider,
+            [{"input": payload, "response": result, "usage": usage}],
+        )
+        state["usage_records"] = state.get("usage_records", 0) + transcript["usage_records"]
+        outputs = decisions.validate_answers(step_block["decision"], result)
+    else:
+        outputs = result
+        try:
+            jsonschema.validate(outputs, step_block["returns"]["schema"])
+        except jsonschema.ValidationError as exc:
+            raise ExecutionError(f"step {step}: invalid dispatch receipt") from exc
+    _save(target, outputs)

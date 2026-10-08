@@ -42,6 +42,8 @@ class ExecutionOptions:
     policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     # Runs a model step's turns; without one, local runs call the provider.
     model_client: Callable[..., dict[str, Any]] | None = None
+    decision_client: Callable[..., dict[str, Any]] | None = None
+    dispatch_client: Callable[..., dict[str, Any]] | None = None
     durable_waits: bool = False
     resume_response: dict[str, Any] | None = None
     # The cloud's identifier for the revision being run. A checkpoint resumes
@@ -945,7 +947,10 @@ def _settle(
         state.update({"step": step, "status": "running"})
         _write(root, state)
         try:
-            if step_block["kind"] == "converse":
+            if step_block["kind"] in {"decision", "dispatch"}:
+                v1_runtime.run_dispatcher_step(root, compiled, state, step, options)
+                approved = True
+            elif step_block["kind"] == "converse":
                 v1_runtime.run_converse(root, compiled, state, step, options)
                 approved = True
             else:

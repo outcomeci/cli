@@ -630,7 +630,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_json({"created": initialize(args.dir)})
         elif args.command == "validate":
             result = compile_workflow((args.dir / args.config).resolve())
-            _print_json({"valid": True, "workflow_revision": result["workflow_revision"]})
+            _print_json(
+                {
+                    "valid": True,
+                    "workflow_revision": result["workflow_revision"],
+                    "model_capabilities": result["model_capabilities"],
+                    "capability_warnings": result["capability_warnings"],
+                }
+            )
         elif args.command == "integration" and args.integration_command in {
             "list",
             "describe",

@@ -22,6 +22,7 @@ from typing import Any
 import yaml
 
 from .config import IDENTIFIER, RUNNERS, ConfigError, validate_lowered
+from .model_providers import CHAT_PROVIDERS, REVIEW_PROVIDERS, parse_model
 
 API_VERSION = "outcomeci.workflow/v1"
 ENTRY_POINT_GROUP = "outcomeci.connectors"
@@ -33,8 +34,10 @@ TRIGGERS = {
     "manual": {"type": "manual"},
     "email": {"type": "email.received"},
 }
-TOP_LEVEL = {"apiVersion", "name", "trigger", "secrets", "apis", "reasoning", "steps"}
+TOP_LEVEL = {"type", "apiVersion", "name", "trigger", "secrets", "apis", "reasoning", "steps"}
 STEP_FIELDS = {
+    "decision": {"decision", "with", "using", "when"},
+    "dispatch": {"dispatch", "with", "when"},
     "agent": {"reason", "from", "with", "can", "policy", "returns", "when", "using", "for_each"},
     "await": {"await", "timeout", "when"},
     "converse": {
@@ -324,7 +327,7 @@ def _reason(value: Any, base: Path, field: str) -> str | dict[str, Any]:
     return {"content": text}
 
 
-MODEL_PROVIDERS = {"anthropic", "openai"}
+MODEL_PROVIDERS = set(CHAT_PROVIDERS)
 
 
 def _reasoning(
@@ -377,11 +380,18 @@ def _model(
         )
     model = item.get("model")
     provider, _, name = str(model or "").partition("/")
-    if not isinstance(model, str) or provider not in MODEL_PROVIDERS or not name:
+    if not isinstance(model, str) or provider not in MODEL_PROVIDERS | {"typesafe"} or not name:
         raise ConfigError(
             f"{field}.model must be <provider>/<model> with provider "
             f"{' or '.join(sorted(MODEL_PROVIDERS))}"
         )
+    if provider != "typesafe":
+        try:
+            parse_model(model)
+        except ValueError as exc:
+            raise ConfigError(f"{field}.model: {exc}") from exc
+    if field == "reasoning.review" and provider not in REVIEW_PROVIDERS:
+        raise ConfigError("reasoning.review supports OpenAI and Anthropic only")
     result: dict[str, Any] = {"model": model}
     if "key" in item:
         key = str(item["key"])
@@ -390,6 +400,14 @@ def _model(
             raise ConfigError(f"{field}.key must name a declared secret as secrets.<name>")
         result["key"] = secret
         result["credential"] = str(secrets[secret])
+    if (
+        provider in CHAT_PROVIDERS
+        and not CHAT_PROVIDERS[provider].platform_key
+        and "key" not in result
+    ):
+        raise ConfigError(f"{field}: {provider} requires an explicit key: secrets.<name>")
+    if provider == "typesafe" and ("key" not in result or field == "reasoning.review"):
+        raise ConfigError(f"{field}: TypeSafe requires an explicit key and cannot review policy")
     if "fallback" in item:
         result["fallback"] = _model(
             _mapping(item["fallback"], f"{field}.fallback"),
@@ -411,6 +429,11 @@ def _using(value: Any, profiles: dict[str, dict[str, Any]], node, block, field: 
     if "agent" in profile:
         node.update(profile["agent"])
     else:
+        if any(
+            str(item.get("model", "")).startswith("typesafe/")
+            for item in (profile, profile.get("fallback", {}))
+        ):
+            raise ConfigError(f"{field}: TypeSafe is only supported for decision steps")
         block["reasoning"] = {"profile": value, **profile}
 
 
@@ -522,6 +545,14 @@ def _receiver(value: Any, secrets: dict[str, Any]) -> dict[str, Any]:
 def _trigger(value: Any, secrets: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     if isinstance(value, str) and value in TRIGGERS:
         return value, dict(TRIGGERS[value])
+    if isinstance(value, dict) and value.get("type") == "dispatcher":
+        if (
+            set(value) != {"type", "dispatcher"}
+            or not isinstance(value["dispatcher"], str)
+            or not value["dispatcher"].strip()
+        ):
+            raise ConfigError("trigger.dispatcher must name its dispatcher workflow")
+        return "dispatcher", dict(value)
     if isinstance(value, dict) and value.get("type") == "cron":
         return "cron", dict(value)
     if isinstance(value, dict) and set(value) == {"webhook"}:
@@ -611,6 +642,52 @@ def _agent_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Pa
     outputs = _returns(block, name, gathered)
     block["returns"]["item"] = {"path": f"{name}/items/{{index}}.json", "schema": schema}
     return outputs
+
+
+def _decision_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Path):
+    from .decisions import questions_schema
+
+    field = f"steps.{name}"
+    profile = step.get("using")
+    if not isinstance(profile, str) or profile == "review" or profile not in scope.profiles:
+        raise ConfigError(f"{field}.using must name a decision model profile")
+    spec = scope.profiles[profile]
+    if str(spec.get("model", "")).split("/")[0] not in {"openai", "typesafe"} or "fallback" in spec:
+        raise ConfigError(f"{field}.using requires an OpenAI or TypeSafe model without fallback")
+    if str(spec.get("model", "")).startswith("openai/") and spec["model"] != "openai/gpt-6-luna":
+        raise ConfigError(f"{field}.using: OpenAI decision steps require openai/gpt-6-luna")
+    schema = questions_schema(step["decision"])
+    for question in step["decision"]:
+        _identifier(question, f"{field}.decision")
+    block["decision"] = step["decision"]
+    block["reasoning"] = {"profile": profile, **spec}
+    node["instructions"] = {"content": "Answer the declared decision questions."}
+    _read_inputs(step, block, reads, scope, field)
+    return _returns(block, name, schema)
+
+
+def _dispatch_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Path):
+    from .decisions import object_schema
+
+    field = f"steps.{name}"
+    target = step["dispatch"]
+    if not isinstance(target, str) or not target.strip():
+        raise ConfigError(f"{field}.dispatch must name a child workflow")
+    if not isinstance(step.get("with"), str):
+        raise ConfigError(f"{field}.with must be one input reference")
+    _read_inputs(step, block, reads, scope, field)
+    block["dispatch"] = target
+    node["instructions"] = {"content": "Dispatch the declared child workflow."}
+    schema = object_schema(
+        {
+            **{
+                key: {"type": "string", "minLength": 1}
+                for key in ("run_id", "workflow_id", "workflow_revision_id")
+            },
+            "status": {"const": "queued"},
+        }
+    )
+    return _returns(block, name, schema)
 
 
 def _await_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Path):
@@ -749,6 +826,8 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
     )
     apis, connections, integrations = _apis(document)
     trigger_name, trigger = _trigger(document.get("trigger"), document.get("secrets") or {})
+    if "type" in document and document["type"] != "dispatcher":
+        raise ConfigError("type must be dispatcher when specified")
     raw_steps = document.get("steps")
     if not isinstance(raw_steps, list) or not raw_steps:
         raise ConfigError("steps must be a non-empty list")
@@ -766,7 +845,12 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
         if name in scope.steps or name in {"trigger", "calls"}:
             raise ConfigError(f"{field} is a duplicate or reserved step name")
         step = _mapping(raw, field)
-        kind = "await" if "await" in step else "converse" if "converse" in step else "agent"
+        discriminants = set(step) & {"await", "converse", "decision", "dispatch"}
+        if len(discriminants) > 1:
+            raise ConfigError(f"{field} must declare one step kind")
+        kind = next(iter(discriminants), "agent")
+        if kind in {"decision", "dispatch"} and document.get("type") != "dispatcher":
+            raise ConfigError(f"{field}: {kind} requires type: dispatcher")
         extra = set(step) - STEP_FIELDS[kind]
         if extra:
             raise ConfigError(
@@ -776,7 +860,13 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
         node: dict[str, Any] = {"needs": list(order), "expects": {"inputs": [], "outputs": []}}
         block: dict[str, Any] = {"kind": kind, "when": when, "inputs": [], "grants": []}
         reads = {when["step"]} if when and when["step"] else set()
-        lowering = {"agent": _agent_step, "await": _await_step, "converse": _converse_step}[kind]
+        lowering = {
+            "agent": _agent_step,
+            "await": _await_step,
+            "converse": _converse_step,
+            "decision": _decision_step,
+            "dispatch": _dispatch_step,
+        }[kind]
         outputs = lowering(name, step, node, block, reads, scope=scope, apis=apis, base=base)
         if block.get("returns"):
             node["expects"]["outputs"].append(

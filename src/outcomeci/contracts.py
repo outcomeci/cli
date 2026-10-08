@@ -29,6 +29,7 @@ def _date_time(value: Any) -> bool:
 
 
 CONTRACT_FILES = {
+    "dispatcher": "dispatcher-received-v1.schema.json",
     "email.received": "email-received-v1.schema.json",
     "webhook.received": "webhook-received-v1.schema.json",
     "cron": "cron-received-v1.schema.json",
@@ -59,6 +60,6 @@ def validate_contract(name: str, value: Any) -> None:
 def validate_trigger_payload(trigger_type: str, value: Any) -> None:
     if trigger_type == "manual":
         if not isinstance(value, dict):
-            raise ContractError("manual trigger payload must be an object")
+            raise ContractError(f"{trigger_type} trigger payload must be an object")
         return
     validate_contract(trigger_type, value)
