@@ -229,7 +229,7 @@ def test_a_typed_credential_is_checked_before_it_is_sent(monkeypatch, capsys) ->
 def test_the_local_vault_stores_typed_credentials_like_the_cloud(
     monkeypatch, tmp_path, capsys
 ) -> None:
-    from outcomeci.local_vault import resolve
+    from outcomeci.vault.local import resolve
 
     monkeypatch.setenv("OUTCOMECI_CONFIG_HOME", str(tmp_path / "config"))
     assert cli.main(["vault", "local", "init", "--dir", str(tmp_path)]) == 0
@@ -263,8 +263,8 @@ def test_the_local_vault_stores_typed_credentials_like_the_cloud(
 def test_a_local_rotation_replaces_only_the_rotated_field(monkeypatch, tmp_path) -> None:
     import json
 
-    from outcomeci.integrations import local_credential_resolver
-    from outcomeci.local_vault import initialize, put, resolve
+    from outcomeci.broker.executor import local_credential_resolver
+    from outcomeci.vault.local import initialize, put, resolve
 
     monkeypatch.setenv("OUTCOMECI_CONFIG_HOME", str(tmp_path / "config"))
     initialize(tmp_path)

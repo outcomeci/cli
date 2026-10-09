@@ -7,11 +7,12 @@ import yaml
 from outcomeci_connectors.providers.google.analytics import PROVIDER
 from test_auth_kinds import rsa_key, typed, verified_claims
 
-from outcomeci import integrations, v1
-from outcomeci.config import compile_workflow
-from outcomeci.integrations import IntegrationExecutor
-from outcomeci.policy import PolicyExecutor
-from outcomeci.process import ExecutionError
+from outcomeci.broker import executor as integrations
+from outcomeci.broker.executor import IntegrationExecutor
+from outcomeci.broker.policy import PolicyExecutor
+from outcomeci.runtime.process import ExecutionError
+from outcomeci.workflow import language as v1
+from outcomeci.workflow.compiler import compile_workflow
 
 
 @pytest.mark.parametrize("kind", ["oauth2", "jwt_bearer"])

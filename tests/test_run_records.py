@@ -3,7 +3,7 @@
 import json
 from pathlib import Path
 
-from outcomeci import run_records
+from outcomeci.artifacts import records as run_records
 
 JOURNAL = {
     "calls": {

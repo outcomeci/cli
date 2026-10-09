@@ -10,10 +10,10 @@ import pytest
 import test_v1_sentry as sentry
 import test_v1_slack as slack_example
 
-from outcomeci import v1_runtime
-from outcomeci.config import compile_workflow
-from outcomeci.integrations import IntegrationError, IntegrationExecutor
-from outcomeci.policy import PolicyExecutor
+from outcomeci.broker.executor import IntegrationError, IntegrationExecutor
+from outcomeci.broker.policy import PolicyExecutor
+from outcomeci.runtime import steps as v1_runtime
+from outcomeci.workflow.compiler import compile_workflow
 
 SHARED_IN = ["body.file.channels", "body.file.groups", "body.file.ims"]
 IMAGE = b"\x89PNG\r\n\x1a\n" + b"x" * 64
@@ -218,8 +218,8 @@ def test_any_grant_that_holds_opens_the_file_and_is_recorded(tmp_path, monkeypat
 
 
 def test_a_download_is_saved_with_the_runs_artifacts(tmp_path):
+    from outcomeci.broker.executor import attachments_path
     from outcomeci.cloud_runner.main import workflow_artifacts
-    from outcomeci.integrations import attachments_path
 
     target = attachments_path(tmp_path, "run-1") / "abc-shot.png"
     target.parent.mkdir(parents=True)

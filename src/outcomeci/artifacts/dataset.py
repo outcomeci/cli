@@ -18,7 +18,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
-from . import cloud
+from outcomeci import cloud
 
 ROW_SCHEMA = "outcomeci.dataset.run/v1"
 # Files every finished run carries at its root.

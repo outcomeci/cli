@@ -7,7 +7,7 @@ from pathlib import Path
 import httpx
 
 from outcomeci import cloud
-from outcomeci.repository import initialize
+from outcomeci.workflow.scaffold import initialize
 
 
 def test_request_builds_the_httpx_call_and_parses_a_json_response(monkeypatch) -> None:

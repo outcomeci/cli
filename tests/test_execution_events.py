@@ -5,7 +5,7 @@ import json
 import pytest
 from test_policy_execution import executor
 
-from outcomeci.integrations import IntegrationError
+from outcomeci.broker.executor import IntegrationError
 
 
 def events(broker):

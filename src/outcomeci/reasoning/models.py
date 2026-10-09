@@ -22,17 +22,17 @@ from typing import Any
 
 import jsonschema
 
-from .execution_events import safe_text
-from .integrations import CredentialResolver
-from .model_capabilities import (
+from outcomeci.broker.executor import CredentialResolver
+from outcomeci.reasoning.capabilities import (
     CapabilityError,
     flatten_warnings,
     preflight,
     request_requirements,
     validate_requirements,
 )
-from .model_providers import completion_options, provider_for_model
-from .process import ExecutionError
+from outcomeci.reasoning.providers import completion_options, provider_for_model
+from outcomeci.runtime.events import safe_text
+from outcomeci.runtime.process import ExecutionError
 
 MAX_TOOL_CALLS = 20
 # The longest reply one turn may produce. A step's result travels as the

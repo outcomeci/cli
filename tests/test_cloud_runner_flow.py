@@ -27,7 +27,7 @@ from outcomeci.cloud_runner.main import (
 )
 from outcomeci.cloud_runner.models import AuthorizationClaim, ContractError, Launch
 from outcomeci.cloud_runner.process import ProcessResult
-from outcomeci.process import ExecutionError
+from outcomeci.runtime.process import ExecutionError
 
 cloud_runner_main = importlib.import_module("outcomeci.cloud_runner.main")
 
@@ -149,9 +149,9 @@ class FlowTests(unittest.TestCase):
                     "outcomeci.cloud_runner.main.tempfile.mkdtemp",
                     return_value=str(root),
                 ),
-                mock.patch("outcomeci.local.trigger", side_effect=trigger),
+                mock.patch("outcomeci.runtime.engine.trigger", side_effect=trigger),
                 mock.patch(
-                    "outcomeci.config.compile_workflow",
+                    "outcomeci.workflow.compiler.compile_workflow",
                     return_value={
                         "instructions": {"steps": {"resolve_analytics": {}}},
                         "workflow": {"spec": {"agents": {"default": {}}}},
@@ -339,9 +339,9 @@ class FlowTests(unittest.TestCase):
                     "outcomeci.cloud_runner.main.tempfile.mkdtemp",
                     return_value=str(root),
                 ),
-                mock.patch("outcomeci.local.trigger", side_effect=trigger),
+                mock.patch("outcomeci.runtime.engine.trigger", side_effect=trigger),
                 mock.patch(
-                    "outcomeci.config.compile_workflow",
+                    "outcomeci.workflow.compiler.compile_workflow",
                     return_value={
                         "instructions": {"steps": {"notify": {}}},
                         "workflow": {"spec": {"agents": {"default": {}}}},
@@ -419,9 +419,9 @@ class FlowTests(unittest.TestCase):
             with (
                 mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
                 mock.patch("outcomeci.cloud_runner.main.tempfile.mkdtemp", return_value=str(root)),
-                mock.patch("outcomeci.local.trigger", side_effect=trigger),
+                mock.patch("outcomeci.runtime.engine.trigger", side_effect=trigger),
                 mock.patch(
-                    "outcomeci.config.compile_workflow",
+                    "outcomeci.workflow.compiler.compile_workflow",
                     return_value={
                         "instructions": {
                             "steps": {
@@ -513,10 +513,10 @@ class FlowTests(unittest.TestCase):
                     "outcomeci.cloud_runner.main.tempfile.mkdtemp",
                     return_value=str(root),
                 ),
-                mock.patch("outcomeci.local.trigger", side_effect=trigger),
-                mock.patch("outcomeci.local.continue_run", side_effect=continue_run),
+                mock.patch("outcomeci.runtime.engine.trigger", side_effect=trigger),
+                mock.patch("outcomeci.runtime.engine.continue_run", side_effect=continue_run),
                 mock.patch(
-                    "outcomeci.config.compile_workflow",
+                    "outcomeci.workflow.compiler.compile_workflow",
                     return_value={
                         "instructions": {"steps": {"resolve_analytics": {}, "notify": {}}},
                         "workflow": {"spec": {"agents": {"default": {}}}},
@@ -622,11 +622,11 @@ class FlowTests(unittest.TestCase):
                     "outcomeci.cloud_runner.main.tempfile.mkdtemp",
                     return_value=str(root),
                 ),
-                mock.patch("outcomeci.local.trigger", side_effect=trigger),
-                mock.patch("outcomeci.local.retry", side_effect=retry),
-                mock.patch("outcomeci.local.continue_run", side_effect=continue_run),
+                mock.patch("outcomeci.runtime.engine.trigger", side_effect=trigger),
+                mock.patch("outcomeci.runtime.engine.retry", side_effect=retry),
+                mock.patch("outcomeci.runtime.engine.continue_run", side_effect=continue_run),
                 mock.patch(
-                    "outcomeci.config.compile_workflow",
+                    "outcomeci.workflow.compiler.compile_workflow",
                     return_value={
                         "instructions": {"steps": {"resolve_analytics": {}, "notify": {}}},
                         "workflow": {
@@ -724,10 +724,10 @@ class FlowTests(unittest.TestCase):
                     "outcomeci.cloud_runner.main.tempfile.mkdtemp",
                     return_value=str(root),
                 ),
-                mock.patch("outcomeci.local.trigger", side_effect=trigger),
-                mock.patch("outcomeci.local.retry", side_effect=retry),
+                mock.patch("outcomeci.runtime.engine.trigger", side_effect=trigger),
+                mock.patch("outcomeci.runtime.engine.retry", side_effect=retry),
                 mock.patch(
-                    "outcomeci.config.compile_workflow",
+                    "outcomeci.workflow.compiler.compile_workflow",
                     return_value={
                         "instructions": {"steps": {"resolve_analytics": {}, "notify": {}}},
                         "workflow": {
@@ -806,9 +806,9 @@ class FlowTests(unittest.TestCase):
                     "outcomeci.cloud_runner.main.tempfile.mkdtemp",
                     return_value=str(root),
                 ),
-                mock.patch("outcomeci.local.trigger", side_effect=trigger),
+                mock.patch("outcomeci.runtime.engine.trigger", side_effect=trigger),
                 mock.patch(
-                    "outcomeci.config.compile_workflow",
+                    "outcomeci.workflow.compiler.compile_workflow",
                     return_value={
                         "instructions": {"steps": {"resolve_analytics": {}}},
                         "workflow": {"spec": {"agents": {"default": {}}}},
@@ -892,13 +892,13 @@ class FlowTests(unittest.TestCase):
                     "outcomeci.cloud_runner.main.tempfile.mkdtemp",
                     return_value=str(root),
                 ),
-                mock.patch("outcomeci.local.trigger", side_effect=trigger),
+                mock.patch("outcomeci.runtime.engine.trigger", side_effect=trigger),
                 mock.patch(
-                    "outcomeci.local.retry",
+                    "outcomeci.runtime.engine.retry",
                     side_effect=AssertionError("retry should not be called"),
                 ),
                 mock.patch(
-                    "outcomeci.config.compile_workflow",
+                    "outcomeci.workflow.compiler.compile_workflow",
                     return_value={
                         "instructions": {"steps": {"notify": {}}},
                         "workflow": {
@@ -980,9 +980,9 @@ class FlowTests(unittest.TestCase):
                     "outcomeci.cloud_runner.main.tempfile.mkdtemp",
                     return_value=str(root),
                 ),
-                mock.patch("outcomeci.local.trigger", side_effect=trigger),
+                mock.patch("outcomeci.runtime.engine.trigger", side_effect=trigger),
                 mock.patch(
-                    "outcomeci.config.compile_workflow",
+                    "outcomeci.workflow.compiler.compile_workflow",
                     return_value={
                         "instructions": {"steps": {"notify": {}}},
                         "workflow": {"spec": {"agents": {"default": {}}}},
@@ -1470,9 +1470,9 @@ class MultiRunnerTests(unittest.TestCase):
             with (
                 mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
                 mock.patch("outcomeci.cloud_runner.main.tempfile.mkdtemp", return_value=str(root)),
-                mock.patch("outcomeci.local.trigger", side_effect=trigger),
+                mock.patch("outcomeci.runtime.engine.trigger", side_effect=trigger),
                 mock.patch(
-                    "outcomeci.config.compile_workflow",
+                    "outcomeci.workflow.compiler.compile_workflow",
                     return_value={
                         "instructions": {"steps": {"only": {}}},
                         "workflow": {"spec": {"agents": {"default": {}}}},
@@ -1569,9 +1569,9 @@ class FinalReportTests(unittest.TestCase):
                     "outcomeci.cloud_runner.main.HEARTBEAT_INTERVAL_SECONDS",
                     0 if heartbeat_failure else 15.0,
                 ),
-                mock.patch("outcomeci.local.trigger", side_effect=trigger),
+                mock.patch("outcomeci.runtime.engine.trigger", side_effect=trigger),
                 mock.patch(
-                    "outcomeci.config.compile_workflow",
+                    "outcomeci.workflow.compiler.compile_workflow",
                     return_value={
                         "instructions": {"steps": {"only": {}}},
                         "workflow": {"spec": {"agents": {"default": {}}}},
@@ -1644,7 +1644,7 @@ def test_publication_worker_completes_real_validation_and_preserves_package_dige
 ):
     from test_publication import sanitize_slack_package, slack_publication_source
 
-    from outcomeci import publication
+    from outcomeci.workflow import publication
 
     source = slack_publication_source(tmp_path / "source")
     claim = publication_claim()
@@ -1673,7 +1673,7 @@ def test_publication_worker_completes_real_validation_and_preserves_package_dige
 
 
 def test_publication_failure_category_does_not_contain_private_diagnostics():
-    from outcomeci.publication import PublicationValidationError
+    from outcomeci.workflow.publication import PublicationValidationError
 
     failure = PublicationValidationError(
         "publication_privacy_failed", "private/path: confidential value"

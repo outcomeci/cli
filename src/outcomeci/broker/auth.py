@@ -29,7 +29,7 @@ import httpx
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 
-from .process import ExecutionError
+from outcomeci.runtime.process import ExecutionError
 
 # A Vault `credential_type` and the connector kind it authenticates as.
 KIND_OF_TYPE = {

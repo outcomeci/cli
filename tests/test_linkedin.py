@@ -7,8 +7,8 @@ import pytest
 from outcomeci_connectors.providers.linkedin import PROVIDER, SCOPES
 from test_auth_kinds import typed
 
-from outcomeci.auth import Authenticator, AuthError
-from outcomeci.v1 import providers
+from outcomeci.broker.auth import Authenticator, AuthError
+from outcomeci.workflow.language import providers
 
 
 def auth():

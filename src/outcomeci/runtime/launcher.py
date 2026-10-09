@@ -28,7 +28,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .cloud import (
+from outcomeci.cloud import (
     CloudRequestError,
     complete_debug_agent_lease,
     credentials_path,
@@ -36,16 +36,16 @@ from .cloud import (
     renew_debug_agent_lease,
     rotate_debug_vault_credential,
 )
-from .config import compile_workflow
-from .process import ExecutionError
-from .run_container import (
+from outcomeci.runtime.container import (
     CONTAINER_OUTPUT,
     CONTAINER_SOURCE,
     OUTPUT_HOME,
     OUTPUT_WORK,
     ROTATIONS,
 )
-from .security import atomic_write_json
+from outcomeci.runtime.process import ExecutionError
+from outcomeci.security import atomic_write_json
+from outcomeci.workflow.compiler import compile_workflow
 
 IMAGE_LEASE_TTL_SECONDS = 3600
 AGENT_RENEW_INTERVAL_SECONDS = 300
@@ -323,7 +323,7 @@ def _check_image(image: str) -> None:
                 "/opt/oci/bin/python",
                 image,
                 "-c",
-                "import outcomeci.run_container",
+                "import outcomeci.runtime.container",
             ],
             capture_output=True,
             text=True,
@@ -334,7 +334,7 @@ def _check_image(image: str) -> None:
         detail = (probe.stderr.strip().splitlines() or ["no output"])[-1]
         raise ExecutionError(
             f"{image} cannot run workflows; it needs an OutcomeCI runner build "
-            f"that includes outcomeci.run_container ({detail})"
+            f"that includes outcomeci.runtime.container ({detail})"
         )
 
 
@@ -453,7 +453,7 @@ def _rotations(output: Path) -> dict[str, dict[str, str]]:
 
 def _save_local_rotations(root: Path, output: Path) -> None:
     """Write rotated secrets back to the local Vault the run's values came from."""
-    from . import local_vault
+    from outcomeci.vault import local as local_vault
 
     for path, secrets in _rotations(output).items():
         try:
@@ -721,7 +721,7 @@ def _run_in_image(
         "/opt/oci/bin/python",
         image,
         "-m",
-        "outcomeci.run_container",
+        "outcomeci.runtime.container",
     ]
     try:
         returncode = _run_container(command, container, json.dumps(bundle))
@@ -796,7 +796,7 @@ def _import_run_state(work: Path, root: Path) -> None:
 
 def default_image() -> str:
     """The runner image published with this CLI release."""
-    from . import __version__
+    from outcomeci import __version__
 
     if not _RELEASE.match(__version__):
         raise ExecutionError(f"oci {__version__} is not a release build; pass --image")
@@ -834,7 +834,7 @@ def _vault_references(compiled: dict[str, Any]) -> list[str]:
 
 
 def _local_values(root: Path, compiled: dict[str, Any]) -> dict[str, Any]:
-    from . import local_vault
+    from outcomeci.vault import local as local_vault
 
     values = {}
     for reference in _vault_references(compiled):
@@ -867,7 +867,7 @@ def _local_login(root: Path, provider: str) -> dict[str, Any]:
         raise ExecutionError(f"unsupported agent {provider!r}")
     value = os.environ.get(variable)
     if not value:
-        from . import local_vault
+        from outcomeci.vault import local as local_vault
 
         try:
             value = local_vault.resolve(root, f"vault:agents/{provider}")

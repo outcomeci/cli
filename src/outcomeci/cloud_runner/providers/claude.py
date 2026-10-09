@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from ..models import AgentLogin, ContractError
+from outcomeci.cloud_runner.models import AgentLogin, ContractError
 
 
 class ClaudeAdapter:

@@ -8,8 +8,8 @@ from typing import Any
 
 import httpx
 
-from .models import AuthorizationClaim
-from .resource_usage import ResourceUsageReport
+from outcomeci.cloud_runner.models import AuthorizationClaim
+from outcomeci.cloud_runner.resource_usage import ResourceUsageReport
 
 
 class CoreError(RuntimeError):

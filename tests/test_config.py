@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from outcomeci.config import ConfigError, compile_workflow
+from outcomeci.workflow.compiler import ConfigError, compile_workflow
 
 WORKFLOW = {
     "apiVersion": "outcomeci.workflow/v1",
@@ -194,7 +194,7 @@ TREE_COMPARE = {
 
 
 def test_a_compare_of_several_files_names_its_entries() -> None:
-    from outcomeci.config import _compare
+    from outcomeci.workflow.compiler import _compare
 
     assert _compare({"compare": [TREE_COMPARE]}, "op") == {"compare": [TREE_COMPARE]}
     for broken in (

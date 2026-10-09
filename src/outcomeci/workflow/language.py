@@ -21,8 +21,8 @@ from typing import Any
 
 import yaml
 
-from .config import IDENTIFIER, RUNNERS, ConfigError, validate_lowered
-from .model_providers import CHAT_PROVIDERS, REVIEW_PROVIDERS, parse_model
+from outcomeci.reasoning.providers import CHAT_PROVIDERS, REVIEW_PROVIDERS, parse_model
+from outcomeci.workflow.compiler import IDENTIFIER, RUNNERS, ConfigError, validate_lowered
 
 API_VERSION = "outcomeci.workflow/v1"
 ENTRY_POINT_GROUP = "outcomeci.connectors"
@@ -645,7 +645,7 @@ def _agent_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Pa
 
 
 def _decision_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Path):
-    from .decisions import questions_schema
+    from outcomeci.reasoning.decisions import questions_schema
 
     field = f"steps.{name}"
     profile = step.get("using")
@@ -667,7 +667,7 @@ def _decision_step(name, step, node, block, reads, *, scope: _Scope, apis, base:
 
 
 def _dispatch_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Path):
-    from .decisions import object_schema
+    from outcomeci.reasoning.decisions import object_schema
 
     field = f"steps.{name}"
     target = step["dispatch"]

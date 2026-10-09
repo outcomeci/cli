@@ -6,12 +6,8 @@ from pathlib import Path
 import pytest
 from lowered import email_payload
 
-from outcomeci.config import ConfigError
-from outcomeci.contracts import (
-    ContractError,
-    contract_schema,
-    validate_contract,
-)
+from outcomeci.workflow.compiler import ConfigError
+from outcomeci.workflow.contracts import ContractError, contract_schema, validate_contract
 
 
 @pytest.mark.parametrize(
@@ -62,7 +58,7 @@ def test_cron_example_validates_and_rejects_unknown_fields() -> None:
 
 
 def test_instruction_symlink_cannot_read_private_vault(tmp_path: Path) -> None:
-    from outcomeci.config import _relative_path
+    from outcomeci.workflow.compiler import _relative_path
 
     private = tmp_path / ".outcomeci" / "vault.enc"
     private.parent.mkdir()

@@ -16,27 +16,30 @@ from outcomeci_connectors.providers.slack.setup import manifest as slack_manifes
 from outcomeci_connectors.providers.slack.setup import setup as setup_slack
 from outcomeci_connectors.providers.slack.setup import status as slack_status
 
-from . import __version__, credentials, mcp_setup, slack_vault, workflow_run
-from .capability import invoke_integration
-from .cloud import auth_status as cloud_auth_status
-from .cloud import credentials_path as cloud_credentials_path
-from .cloud import get_workflow, sync_workflow, vault_request
-from .cloud import login as cloud_login
-from .cloud import login_with_key as cloud_login_with_key
-from .cloud import logout as cloud_logout
-from .config import ConfigError, compile_workflow
-from .integrations import (
+from outcomeci import __version__, mcp_setup
+from outcomeci.broker.executor import (
     IntegrationError,
     IntegrationExecutor,
     doctor,
     local_credential_resolver,
 )
-from .local_vault import initialize as initialize_local_vault
-from .local_vault import list_entries as list_local_vault_entries
-from .local_vault import put as put_local_vault_entry
-from .process import ExecutionError
-from .publication import prepare_publication
-from .repository import initialize
+from outcomeci.broker.server import invoke_integration
+from outcomeci.cloud import auth_status as cloud_auth_status
+from outcomeci.cloud import credentials_path as cloud_credentials_path
+from outcomeci.cloud import get_workflow, sync_workflow, vault_request
+from outcomeci.cloud import login as cloud_login
+from outcomeci.cloud import login_with_key as cloud_login_with_key
+from outcomeci.cloud import logout as cloud_logout
+from outcomeci.runtime import launcher as workflow_run
+from outcomeci.runtime.process import ExecutionError
+from outcomeci.vault import credentials
+from outcomeci.vault import slack as slack_vault
+from outcomeci.vault.local import initialize as initialize_local_vault
+from outcomeci.vault.local import list_entries as list_local_vault_entries
+from outcomeci.vault.local import put as put_local_vault_entry
+from outcomeci.workflow.compiler import ConfigError, compile_workflow
+from outcomeci.workflow.publication import prepare_publication
+from outcomeci.workflow.scaffold import initialize
 
 AGENT_CHOICES = ("codex", "claude", "opencode")
 
@@ -570,7 +573,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             _print_json(result)
             return 0
         if args.command == "dataset":
-            from . import dataset as dataset_module
+            from outcomeci.artifacts import dataset as dataset_module
 
             rows: list[dict[str, object]] = []
             check_only = args.check or not args.out

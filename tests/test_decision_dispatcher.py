@@ -8,9 +8,10 @@ from types import SimpleNamespace
 import pytest
 import yaml
 
-from outcomeci import decisions, local
-from outcomeci.config import ConfigError, compile_workflow
-from outcomeci.process import ExecutionError
+from outcomeci.reasoning import decisions
+from outcomeci.runtime import engine as local
+from outcomeci.runtime.process import ExecutionError
+from outcomeci.workflow.compiler import ConfigError, compile_workflow
 
 QUESTION = {
     "type": "choice",
@@ -232,7 +233,7 @@ def test_local_adapter_uses_unified_input_and_named_questions(tmp_path, monkeypa
         calls.append(kwargs)
         return SimpleNamespace(model_dump=lambda **k: {"answers": [ANSWER]})
 
-    from outcomeci import decision_transport
+    from outcomeci.reasoning import decision_transport
 
     monkeypatch.setattr(decision_transport, "install_decision_response_guard", lambda *a, **k: None)
     monkeypatch.setitem(sys.modules, "litellm", SimpleNamespace(decisions=provider))
@@ -246,8 +247,8 @@ def test_local_adapter_uses_unified_input_and_named_questions(tmp_path, monkeypa
 
 
 def test_dispatcher_envelope_preserves_lineage_and_resolves_selected_input(tmp_path):
-    from outcomeci import v1_runtime
-    from outcomeci.contracts import ContractError, validate_trigger_payload
+    from outcomeci.runtime import steps as v1_runtime
+    from outcomeci.workflow.contracts import ContractError, validate_trigger_payload
 
     envelope = {
         "schema_version": "outcomeci.trigger.dispatcher/v1",

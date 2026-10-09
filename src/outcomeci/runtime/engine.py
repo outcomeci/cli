@@ -16,18 +16,21 @@ from typing import Any
 from jsonschema import ValidationError
 from jsonschema import validate as validate_json
 
-from . import checkouts, models, run_records, templates
-from .auth import Authenticator
-from .capability import invoke_integration
-from .capability import serve as serve_capability
-from .config import compile_workflow
-from .contracts import FORMAT_CHECKER, ContractError, validate_trigger_payload
-from .execution_events import event, safe_text
-from .integrations import CredentialResolver, IntegrationExecutor
-from .manifest import build_manifest
-from .process import ExecutionError, invoke
-from .security import atomic_write_json
-from .transcripts import _transcripts
+from outcomeci.artifacts import records as run_records
+from outcomeci.artifacts.manifest import build_manifest
+from outcomeci.artifacts.transcripts import _transcripts
+from outcomeci.broker.auth import Authenticator
+from outcomeci.broker.executor import CredentialResolver, IntegrationExecutor
+from outcomeci.broker.server import invoke_integration
+from outcomeci.broker.server import serve as serve_capability
+from outcomeci.reasoning import models
+from outcomeci.runtime import checkouts
+from outcomeci.runtime.events import event, safe_text
+from outcomeci.runtime.process import ExecutionError, invoke
+from outcomeci.security import atomic_write_json
+from outcomeci.workflow import templates
+from outcomeci.workflow.compiler import compile_workflow
+from outcomeci.workflow.contracts import FORMAT_CHECKER, ContractError, validate_trigger_payload
 
 
 @dataclass
@@ -470,7 +473,7 @@ def _step_invocations(
 
     Grants resolve here, from the run's records before any of the step's agents
     start, so nothing an item's agent writes can widen a later item's grants."""
-    from . import v1_runtime
+    from outcomeci.runtime import steps as v1_runtime
 
     invocations = []
     for index, bound in enumerate(v1_runtime.items(root, state, step_block)):
@@ -581,7 +584,7 @@ def _step_context(
 ) -> dict[str, Any]:
     """What one step invocation is given: inputs, capabilities, grants, policy
     and where its result goes and in what shape."""
-    from . import v1_runtime
+    from outcomeci.runtime import steps as v1_runtime
 
     describer = IntegrationExecutor(compiled)
     returns = step_block.get("returns")
@@ -760,7 +763,7 @@ def _run_step(
                 checkouts.remove(root)
         summary = "\n".join(summaries)
         if "for_each" in step_block:
-            from . import v1_runtime
+            from outcomeci.runtime import steps as v1_runtime
 
             v1_runtime.gather(root, state["run_id"], step_block, len(invocations))
         _write_effect_receipts(root, outcome_root, state["run_id"], step)
@@ -923,7 +926,7 @@ def _settle(
     Returns True with state["step"] set when an agent step is next, or False
     once every step is done and the run is completed.
     """
-    from . import v1_runtime
+    from outcomeci.runtime import steps as v1_runtime
 
     while True:
         ready = _ready(compiled, state.get("completed_steps", []))

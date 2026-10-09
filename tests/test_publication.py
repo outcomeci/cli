@@ -3,9 +3,9 @@ from pathlib import Path
 
 import pytest
 
-from outcomeci import publication
-from outcomeci.process import ExecutionError
-from outcomeci.repository import initialize
+from outcomeci.runtime.process import ExecutionError
+from outcomeci.workflow import publication
+from outcomeci.workflow.scaffold import initialize
 
 OVERVIEW = """# Workflow overview
 

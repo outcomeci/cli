@@ -12,8 +12,8 @@ from typing import Any
 import httpx
 from outcomeci_connectors.providers.slack.setup import PROJECT_RELATIVE, SlackError, _require_slack
 
-from .cloud import vault_request
-from .local_vault import VAULT_FILE, initialize, is_valid_vault_path, put
+from outcomeci.cloud import vault_request
+from outcomeci.vault.local import VAULT_FILE, initialize, is_valid_vault_path, put
 
 
 def _installation(project: Path, team: str | None) -> dict[str, Any]:

@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from outcomeci import process
+from outcomeci.runtime import process
 
 
 def test_local_codex_can_use_existing_login(monkeypatch, tmp_path: Path) -> None:
@@ -409,7 +409,7 @@ def test_opencode_output_without_text_falls_back_to_the_raw_output(tmp_path: Pat
 
 
 def test_opencode_step_transcript_records_usage(monkeypatch, tmp_path: Path) -> None:
-    from outcomeci import transcripts
+    from outcomeci.artifacts import transcripts
 
     home = tmp_path / "home"
     monkeypatch.setenv("HOME", str(home))
@@ -433,7 +433,7 @@ def test_opencode_step_transcript_records_usage(monkeypatch, tmp_path: Path) -> 
 def test_opencode_session_for_another_workspace_is_not_collected(
     monkeypatch, tmp_path: Path
 ) -> None:
-    from outcomeci import transcripts
+    from outcomeci.artifacts import transcripts
 
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     elsewhere = tmp_path / "elsewhere"

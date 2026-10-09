@@ -11,11 +11,11 @@ import pytest
 import test_v1_sentry as sentry
 import test_v1_slack as slack_example
 
-from outcomeci import local
-from outcomeci.config import compile_workflow
-from outcomeci.integrations import IntegrationError, IntegrationExecutor
-from outcomeci.policy import PolicyExecutor
-from outcomeci.process import ExecutionError
+from outcomeci.broker.executor import IntegrationError, IntegrationExecutor
+from outcomeci.broker.policy import PolicyExecutor
+from outcomeci.runtime import engine as local
+from outcomeci.runtime.process import ExecutionError
+from outcomeci.workflow.compiler import compile_workflow
 
 workflow = sentry.workflow
 
@@ -348,7 +348,7 @@ def test_gathered_outputs_keep_one_entry_per_item(tmp_path, monkeypatch):
 
 
 def test_a_step_policy_review_inside_the_container_uses_no_nested_sandbox(tmp_path, monkeypatch):
-    from outcomeci import policy as policy_module
+    from outcomeci.broker import policy as policy_module
 
     seen = {}
 
@@ -769,7 +769,7 @@ def _journal_with(tmp_path: Path, calls: dict, events: list) -> Path:
     ],
 )
 def test_a_waiting_step_says_why_its_message_is_missing(tmp_path, status, events, expected):
-    from outcomeci.v1_runtime import missing_call
+    from outcomeci.runtime.steps import missing_call
 
     call = {
         "step": "triage",
@@ -784,7 +784,7 @@ def test_a_waiting_step_says_why_its_message_is_missing(tmp_path, status, events
 
 
 def test_a_waiting_step_says_when_its_message_was_never_posted(tmp_path):
-    from outcomeci.v1_runtime import missing_call
+    from outcomeci.runtime.steps import missing_call
 
     root = _journal_with(tmp_path, {}, [])
 
@@ -931,7 +931,7 @@ def _searching(tmp_path: Path, monkeypatch, sent: list, grant: dict) -> PolicyEx
     target's repository, with the grant resolved for one target."""
     import yaml
 
-    from outcomeci import v1_runtime
+    from outcomeci.runtime import steps as v1_runtime
 
     document = {
         "apiVersion": "outcomeci.workflow/v1",

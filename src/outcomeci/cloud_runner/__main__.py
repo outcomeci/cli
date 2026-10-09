@@ -1,3 +1,3 @@
-from .main import main
+from outcomeci.cloud_runner.main import main
 
 raise SystemExit(main())

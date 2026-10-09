@@ -12,7 +12,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
-from .process import ExecutionError
+from outcomeci.runtime.process import ExecutionError
 
 OnRotate = Callable[[str, dict[str, str]], None]
 

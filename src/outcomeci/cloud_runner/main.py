@@ -21,17 +21,22 @@ from typing import Any
 
 import pyte
 
-from ..leases import LeaseResolver
-from ..process import ExecutionError
-from ..publication import REPORT, REQUIREMENTS, PublicationValidationError, prepare_publication
-from ..security import private_path
-from .client import CoreClient, CoreError
-from .models import ContractError, Launch
-from .process import PTY_COLUMNS, PTY_ROWS, run
-from .providers import ADAPTERS
-from .providers.codex import FILE_AUTH_CONFIG as CODEX_FILE_AUTH_CONFIG
-from .redaction import redact_diagnostic
-from .resource_usage import ResourceUsageSampler
+from outcomeci.cloud_runner.client import CoreClient, CoreError
+from outcomeci.cloud_runner.models import ContractError, Launch
+from outcomeci.cloud_runner.process import PTY_COLUMNS, PTY_ROWS, run
+from outcomeci.cloud_runner.providers import ADAPTERS
+from outcomeci.cloud_runner.providers.codex import FILE_AUTH_CONFIG as CODEX_FILE_AUTH_CONFIG
+from outcomeci.cloud_runner.redaction import redact_diagnostic
+from outcomeci.cloud_runner.resource_usage import ResourceUsageSampler
+from outcomeci.runtime.process import ExecutionError
+from outcomeci.security import private_path
+from outcomeci.vault.leases import LeaseResolver
+from outcomeci.workflow.publication import (
+    REPORT,
+    REQUIREMENTS,
+    PublicationValidationError,
+    prepare_publication,
+)
 
 URL = re.compile(r"https://[^\s<>'\"\x00-\x1f\x7f]+")
 USER_CODE = re.compile(r"\b[A-Z0-9]{4,}(?:-[A-Z0-9]{4,})+\b")
@@ -275,10 +280,10 @@ def _completion_report_failed(error: CoreError, status: str) -> None:
 
 def execute_workflow(launch: Launch, client: CoreClient) -> int:
     """Execute one immutable generic workflow claim with broker-private credentials."""
-    from .. import local
-    from ..config import compile_workflow
-    from ..v1_runtime import DurableWait
-    from . import checkpoint
+    from outcomeci.cloud_runner import checkpoint
+    from outcomeci.runtime import engine as local
+    from outcomeci.runtime.steps import DurableWait
+    from outcomeci.workflow.compiler import compile_workflow
 
     claim = _claim_or_skip(client.claim_workflow)
     if claim is None:

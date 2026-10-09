@@ -18,12 +18,12 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from .cloud_runner.main import _inject_agent_credential
-from .cloud_runner.models import ContractError
-from .config import ConfigError, compile_workflow
-from .leases import LeaseResolver
-from .process import ExecutionError
-from .security import atomic_write_json
+from outcomeci.cloud_runner.main import _inject_agent_credential
+from outcomeci.cloud_runner.models import ContractError
+from outcomeci.runtime.process import ExecutionError
+from outcomeci.security import atomic_write_json
+from outcomeci.vault.leases import LeaseResolver
+from outcomeci.workflow.compiler import ConfigError, compile_workflow
 
 # The checkout is mounted read-only at CONTAINER_SOURCE and copied into the
 # private output mount, where the run's work dir and HOME live: the agent runs
@@ -65,7 +65,7 @@ def _continue(
     auto_continue: bool,
 ) -> dict[str, Any]:
     """With auto_continue, drive each ready step in turn."""
-    from . import local
+    from outcomeci.runtime import engine as local
 
     step_count = len(compiled["instructions"]["steps"]) if auto_continue else 0
     while auto_continue and len(result.get("completed_steps", [])) != step_count:
@@ -90,7 +90,7 @@ def resume(
 
     A run is owned by the one container that runs it, so a run still marked
     running here was interrupted, and is recorded as such before the retry."""
-    from . import local
+    from outcomeci.runtime import engine as local
 
     state = local._read(root, run_id)
     if state.get("status") == "running":
@@ -111,14 +111,14 @@ def execute(
     auto_continue: bool,
 ) -> dict[str, Any]:
     """Trigger the run and, with auto_continue, drive each ready step in turn."""
-    from . import local
+    from outcomeci.runtime import engine as local
 
     result = local.trigger(root, config, name, payload, options=options)
     return _continue(root, config, compiled, result, options, auto_continue=auto_continue)
 
 
 def run_bundle(bundle: dict[str, Any], *, source: Path, output: Path) -> int:
-    from . import local
+    from outcomeci.runtime import engine as local
 
     work = output / OUTPUT_WORK
     home = output / OUTPUT_HOME

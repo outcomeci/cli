@@ -6,9 +6,11 @@ import pytest
 import test_v1_slack as example
 from test_v1_runtime import _slack_root
 
-from outcomeci import integrations, local, v1_runtime
+from outcomeci.broker import executor as integrations
 from outcomeci.cloud_runner import checkpoint
 from outcomeci.cloud_runner.models import ContractError
+from outcomeci.runtime import engine as local
+from outcomeci.runtime import steps as v1_runtime
 
 
 @pytest.mark.parametrize(
@@ -182,7 +184,7 @@ def test_cloud_runner_pauses_with_rotation_and_resumes_with_fresh_claim(tmp_path
 
     client = Client()
     monkeypatch.setattr(
-        "outcomeci.config.compile_workflow",
+        "outcomeci.workflow.compiler.compile_workflow",
         lambda _: {
             "workflow": {"spec": {"agents": {"default": {}}}},
             "instructions": {"steps": {"discuss": {}}},
@@ -225,7 +227,7 @@ def test_cloud_runner_pauses_with_rotation_and_resumes_with_fresh_claim(tmp_path
 def test_reaction_wait_deadline_survives_restart_and_accepts_captured_signal(
     tmp_path, monkeypatch, approved
 ):
-    from outcomeci.config import compile_workflow
+    from outcomeci.workflow.compiler import compile_workflow
 
     compiled = compile_workflow(example.EXAMPLES / "sentry-to-github-pr.outcome.yaml")
     step = next(

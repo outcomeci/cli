@@ -6,9 +6,9 @@ import httpx
 import pytest
 from lowered import compile_file, email_notify, email_payload
 
-from outcomeci import policy
-from outcomeci.integrations import IntegrationError, IntegrationExecutor
-from outcomeci.process import ExecutionError
+from outcomeci.broker import policy
+from outcomeci.broker.executor import IntegrationError, IntegrationExecutor
+from outcomeci.runtime.process import ExecutionError
 
 
 def executor(root, reviewer=None, handler=None):

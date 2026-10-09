@@ -4,7 +4,7 @@ import json
 import os
 from pathlib import Path
 
-from ..models import AgentLogin, ContractError
+from outcomeci.cloud_runner.models import AgentLogin, ContractError
 
 # Every Codex credential-file writer in cloud_runner (this adapter and the
 # other two claim protocols in main.py) needs this same one-line config

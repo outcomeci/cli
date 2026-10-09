@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from .templates import WORKFLOW_INSTRUCTIONS, WORKFLOW_REQUEST, WORKFLOW_YAML
+from outcomeci.workflow.templates import WORKFLOW_INSTRUCTIONS, WORKFLOW_REQUEST, WORKFLOW_YAML
 
 
 def _files(root: Path) -> dict[Path, str]:

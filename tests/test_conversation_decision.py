@@ -4,7 +4,7 @@ import copy
 
 import pytest
 
-from outcomeci import v1_runtime
+from outcomeci.runtime import steps as v1_runtime
 
 
 @pytest.mark.parametrize(

@@ -21,9 +21,9 @@ from urllib.parse import quote, urljoin, urlsplit
 import httpx
 import jsonschema
 
-from .auth import Authenticator, AuthError, shape_check
-from .execution_events import safe_text
-from .process import ExecutionError
+from outcomeci.broker.auth import Authenticator, AuthError, shape_check
+from outcomeci.runtime.events import safe_text
+from outcomeci.runtime.process import ExecutionError
 
 CredentialResolver = Callable[[str], Mapping[str, str] | str]
 TEMPLATE = re.compile(r"{{\s*input(?:\.([A-Za-z0-9_.-]+))?\s*}}")
@@ -92,7 +92,7 @@ class LocalCredentialResolver:
 
     def __call__(self, reference: str) -> Mapping[str, Any] | str:
         if reference.startswith("vault:"):
-            from .local_vault import resolve as resolve_local_vault
+            from outcomeci.vault.local import resolve as resolve_local_vault
 
             return resolve_local_vault(self.root, reference)
         return environment_resolver(reference)
@@ -100,7 +100,7 @@ class LocalCredentialResolver:
     def rotate(self, reference: str, secrets: dict[str, str]) -> None:
         if not reference.startswith("vault:"):
             raise ExecutionError("only a local Vault credential can store a rotated secret")
-        from .local_vault import rotate as rotate_local_vault
+        from outcomeci.vault.local import rotate as rotate_local_vault
 
         rotate_local_vault(self.root, reference, secrets)
 

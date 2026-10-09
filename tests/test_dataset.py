@@ -3,7 +3,8 @@
 import json
 from pathlib import Path
 
-from outcomeci import cloud, dataset
+from outcomeci import cloud
+from outcomeci.artifacts import dataset
 
 RUN_STATE = {
     "run_id": "run-1",

@@ -29,11 +29,11 @@ from typing import Any
 
 import httpx
 
-from .auth import Authenticator
-from .execution_events import event, safe_text
-from .integrations import CredentialResolver
-from .policy import _path_fields
-from .process import ExecutionError, terminate_gracefully
+from outcomeci.broker.auth import Authenticator
+from outcomeci.broker.executor import CredentialResolver
+from outcomeci.broker.policy import _path_fields
+from outcomeci.runtime.events import event, safe_text
+from outcomeci.runtime.process import ExecutionError, terminate_gracefully
 
 CHECKOUT_TIMEOUT_SECONDS = 300
 CHECKOUT_MAX_BYTES = 500 * 1024 * 1024

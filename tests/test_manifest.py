@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from outcomeci.manifest import build_manifest
+from outcomeci.artifacts.manifest import build_manifest
 
 
 def test_manifest_has_one_backend_independent_shape(tmp_path: Path) -> None:

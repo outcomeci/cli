@@ -8,9 +8,9 @@ import httpx
 import pytest
 from outcomeci_connectors.providers.slack.setup import PROJECT_RELATIVE, SlackError
 
-from outcomeci import slack_vault
 from outcomeci.cli import main
-from outcomeci.local_vault import list_entries, resolve
+from outcomeci.vault import slack as slack_vault
+from outcomeci.vault.local import list_entries, resolve
 
 BOT = "xoxb-private-test-credential"
 TOOLING = "xoxe-private-tooling-credential"
