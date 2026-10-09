@@ -16,7 +16,7 @@ dependencies = [
     "jsonschema>=4.23",
     "pyte>=0.8",
     # Tavily search requires this connector revision until its next release.
-    "outcomeci-connectors @ git+https://github.com/outcomeci/connectors.git@8fa0288a496b47bb748206e95aa51771498ab9f4",
+    "outcomeci-connectors>=0.11,<0.12",
 ]
 
 [project.scripts]
@@ -58,6 +58,3 @@ select = ["E4", "E7", "E9", "F", "I", "UP", "B", "SIM"]
 [tool.ruff.format]
 quote-style = "double"
 indent-style = "space"
-
-[tool.hatch.metadata]
-allow-direct-references = true
