@@ -1,0 +1,54 @@
+# A Sentry alert is triaged in #sentry; a thumbs-up reaction approves a fix PR.
+apiVersion: outcomeci.workflow/v1
+
+trigger: webhook
+
+secrets:
+  slack: vault:slack/bot-token
+  github: vault:outcomeci-github
+
+apis:
+  slack:  {uses: slack,  auth: secrets.slack}
+  github: {uses: github, auth: secrets.github}
+
+reasoning:
+  default:  {runner: codex,  model: gpt-5.5}
+  fallback: [{runner: claude, model: claude-opus-5-5}]
+
+steps:
+  - triage:
+      reason: triage-and-notify.md
+      from: trigger
+      can:
+        - github.read
+        - slack.post: {channel: sentry}
+      returns:
+        decision: enum[fix, no_op]
+        issue: {title, message, culprit, level, project, url}
+        repo?: {owner, name}
+        reason: string
+
+  - approve:
+      when: triage.decision == "fix"
+      await:
+        slack.reaction: {message: triage.calls.slack.post, emoji: "+1"}
+      timeout: 45m
+
+  - fix:
+      when: triage.decision == "fix"
+      reason: fix-and-open-pr.md
+      with: [trigger, triage]
+      can:
+        - github.write: {repo: triage.repo}
+      policy: "One new branch from the default branch, one PR, only files the fix needs. No force-push."
+      returns:
+        pr?: {url, number: int, branch}
+        reason?: string
+
+  - announce:
+      with: fix   # the PR, or the reason there is none
+      reason: >
+        Reply in the alert's thread with the PR link and a one-line summary of
+        the fix, or, if there is no PR, the reason.
+      can:
+        - slack.post: {channel: sentry, thread_ts: triage.calls.slack.post.ts}
