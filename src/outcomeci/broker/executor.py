@@ -345,9 +345,11 @@ class IntegrationExecutor:
         transport: httpx.BaseTransport | None = None,
         reviewed: bool = False,
         downloads: Path | None = None,
+        connector_client: Callable[..., dict[str, Any]] | None = None,
     ) -> None:
         """`downloads` is where an operation's downloaded files are saved for the
         agent to open; an operation that downloads fails without it."""
+        self.connector_client = connector_client
         self.compiled = compiled
         self.resolver = resolver
         # A resolver that can write a rotated secret back exposes `rotate`.
@@ -693,6 +695,7 @@ class IntegrationExecutor:
         *,
         step: str,
         response_grants: list[list[dict[str, Any]]] | None = None,
+        request_id: str | None = None,
     ) -> dict[str, Any]:
         """Send one authorized request. `response_grants` are the grants a
         request cannot name, checked against the response before any of it is
@@ -767,6 +770,23 @@ class IntegrationExecutor:
         connection = next(
             item for item in spec["connections"] if item["ref"] == integration["connection"]
         )
+        if connection["auth"].get("connector") == "tavily":
+            if self.connector_client is not None:
+                if not request_id:
+                    raise IntegrationError(
+                        "integration.receipt_required",
+                        "Tavily calls require a durable receipt",
+                        category="configuration",
+                    )
+                return self.connector_client(
+                    step=step, capability=capability, request_id=request_id, input=dict(inputs)
+                )
+            if connection["auth"].get("managed"):
+                raise IntegrationError(
+                    "integration.managed_unavailable",
+                    "Platform Tavily credentials require a managed run; configure auth for local use",
+                    category="configuration",
+                )
         request = operation["request"]
         dynamic = request.get("_dynamic", False)
         path = request["path"] if dynamic else _render(request["path"], inputs, path_value=True)

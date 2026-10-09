@@ -190,6 +190,26 @@ class CoreClient:
             timeout=MODEL_TURN_TIMEOUT_SECONDS,
         )
 
+    def workflow_connector_call(
+        self, lease_token: str, *, step: str, capability: str, request_id: str, input: dict
+    ) -> dict[str, Any]:
+        # A lost response must replay the same durable API receipt, never create
+        # a second billable search. A separate broker call gets a new request ID.
+        payload = {
+            "lease_token": lease_token,
+            "step": step,
+            "capability": capability,
+            "request_id": request_id,
+            "input": input,
+        }
+        for attempt in range(2):
+            try:
+                return self._post("connector-call", payload, timeout=60)
+            except CoreError as exc:
+                if attempt or not exc.retryable:
+                    raise
+        raise AssertionError("unreachable")
+
     def workflow_decision(self, lease_token: str, *, step: str, input: dict) -> dict[str, Any]:
         return self._post(
             "decision",

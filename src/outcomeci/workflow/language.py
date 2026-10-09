@@ -279,8 +279,10 @@ def _grants(value: Any, apis: dict[str, dict[str, Any]], scope: _Scope, field: s
             if reference is None and ("path_prefix" in rule or "query_qualifier" in rule):
                 raw = _path_value(raw, rule, f"{entry_field}.{name}")
             if reference is not None:
+                if apis[api]["uses"] == "tavily":
+                    raise ConfigError(f"{entry_field}.{name}: Tavily grants must be static values")
                 rules[name] = reference
-            elif isinstance(raw, (str, int, float, dict)) and not isinstance(raw, bool):
+            elif isinstance(raw, (str, int, float, dict, list)) and not isinstance(raw, bool):
                 rules[name] = {"literal": raw}
             else:
                 raise ConfigError(f"{entry_field}.{name} must be a value or a reference")
@@ -478,7 +480,7 @@ def _apis(document: dict[str, Any]) -> tuple[dict[str, Any], list[dict], dict[st
         accepts = contract["auth"]["accepts"]
         keyless = [item["kind"] for item in accepts] == ["none"]
         auth = binding.get("auth")
-        if auth is None and not keyless:
+        if auth is None and not keyless and found.name != "tavily":
             raise ConfigError(f"{field}.auth is required, such as secrets.{name}")
         if auth is not None and keyless:
             raise ConfigError(f"{field}.auth is not used: {found.name} takes no credential")
@@ -486,6 +488,8 @@ def _apis(document: dict[str, Any]) -> tuple[dict[str, Any], list[dict], dict[st
         if auth is not None:
             secret = _secret(auth, secrets, f"{field}.auth", f"such as secrets.{name}")
             connection_auth["credential"] = secrets[secret]
+        elif found.name == "tavily":
+            connection_auth["managed"] = True
         apis[name] = {"uses": found.name, "contract": contract, "digest": found.digest()}
         connections.append(
             {
@@ -849,7 +853,7 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
         if len(discriminants) > 1:
             raise ConfigError(f"{field} must declare one step kind")
         kind = next(iter(discriminants), "agent")
-        if kind in {"decision", "dispatch"} and document.get("type") != "dispatcher":
+        if kind == "dispatch" and document.get("type") != "dispatcher":
             raise ConfigError(f"{field}: {kind} requires type: dispatcher")
         extra = set(step) - STEP_FIELDS[kind]
         if extra:

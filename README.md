@@ -43,12 +43,28 @@ The full guide is at <https://outcomeci.com/docs/outcomeci>.
   key. Policy-review model profiles support OpenAI and Anthropic.
 - `steps`: agent or model steps with grants (`can:`) and an optional `policy:`, `await`
   steps that wait for a human signal, and `converse` steps that discuss a plan
-  in a thread. Workflows with `type: dispatcher` can also use `decision` steps
-  for typed model decisions and `dispatch` steps to queue child workflows.
+  in a thread, and `decision` steps for typed model decisions. Only workflows
+  with `type: dispatcher` can use `dispatch` steps to queue child workflows.
   Dispatching children requires managed Cloud execution.
 
 `oci validate` compiles the workflow and prints its revision; `oci workflow
 compile` prints the compiled steps, grants, instructions and schemas.
+
+Tavily search supports a platform key in managed Cloud runs:
+
+```yaml
+apis:
+  search: {uses: tavily}
+```
+
+Set `auth: secrets.tavily` and declare `tavily: vault:tavily/key` under
+`secrets` to use your own key. Managed runs proxy both key sources through the
+API and record search credit usage without exposing keys to runners. Local
+runs require your own key. `search.search` accepts `query`, `max_results`,
+`topic`, `search_depth`, `include_domains` and `exclude_domains`; grant-fixed
+fields are filled in by the broker. Tavily grant constraints must be static
+values. A decision can select conditional search steps with different domain
+or topic grants; see [the Slack research example](tests/examples/slack-research/outcome.yml).
 
 ## Credentials
 
