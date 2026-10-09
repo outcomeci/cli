@@ -20,7 +20,7 @@ from typing import Any
 
 from outcomeci import cloud
 
-ROW_SCHEMA = "outcomeci.artifacts.dataset.run/v1"
+ROW_SCHEMA = "outcomeci.dataset.run/v1"
 # Files every finished run carries at its root.
 ROOT_RECORDS = ("run.json", "manifest.json", "effects.json", "calls.json", "policy.json")
 TEXT_SUFFIXES = {".json", ".jsonl", ".md", ".txt", ".yml", ".yaml", ".csv"}
