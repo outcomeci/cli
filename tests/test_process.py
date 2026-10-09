@@ -445,3 +445,79 @@ def test_opencode_session_for_another_workspace_is_not_collected(
         "opencode", tmp_path / "outcome", "greet", workspace=workspace
     )
     assert collected["usage_records"] == 0
+
+
+def _opencode_error_event(message: str, status: int) -> str:
+    """An `opencode run --format json` error event, as OpenCode 1.18 prints it."""
+    import json
+
+    return json.dumps(
+        {
+            "type": "error",
+            "timestamp": 1791563346261,
+            "sessionID": "ses_1",
+            "error": {
+                "name": "APIError",
+                "data": {
+                    "message": message,
+                    "statusCode": status,
+                    "isRetryable": False,
+                    "responseHeaders": {
+                        "set-cookie": "__cf_bm=secret-cookie; Domain=openrouter.ai",
+                        "www-authenticate": 'Bearer error="invalid_token"',
+                    },
+                    "responseBody": json.dumps({"error": {"message": message, "code": status}}),
+                    "metadata": {"url": "https://openrouter.ai/api/v1/chat/completions"},
+                },
+            },
+        }
+    )
+
+
+def test_opencode_failure_reports_the_provider_reason_only(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-secret")
+    monkeypatch.setattr(
+        process,
+        "command",
+        lambda argv, **kwargs: process.Result(
+            1, _opencode_error_event("API key expired.", 401), ""
+        ),
+    )
+    with pytest.raises(process.ExecutionError) as error:
+        process.invoke("opencode", "openrouter/anthropic/claude-sonnet-4", "prompt", tmp_path, 10)
+    assert str(error.value) == (
+        "opencode failed with exit 1: API key expired. (APIError HTTP 401 from openrouter.ai)"
+    )
+    assert "cookie" not in str(error.value) and "invalid_token" not in str(error.value)
+
+
+def test_opencode_rate_limit_still_reads_as_a_usage_limit(monkeypatch, tmp_path: Path) -> None:
+    import importlib
+
+    runner = importlib.import_module("outcomeci.cloud_runner.main")
+
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-secret")
+    monkeypatch.setattr(
+        process,
+        "command",
+        lambda argv, **kwargs: process.Result(
+            1, _opencode_error_event("Provider returned error", 429), ""
+        ),
+    )
+    with pytest.raises(process.ExecutionError) as error:
+        process.invoke_conversation(
+            "opencode", None, "openrouter/anthropic/claude-sonnet-4", "question", tmp_path, 10
+        )
+    assert "HTTP 429" in str(error.value)
+    assert runner._is_usage_limit_error(error.value)
+
+
+def test_opencode_failure_without_an_error_event_keeps_the_raw_output(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-secret")
+    monkeypatch.setattr(
+        process, "command", lambda argv, **kwargs: process.Result(1, "", "opencode: bad flag")
+    )
+    with pytest.raises(process.ExecutionError, match="exit 1: opencode: bad flag"):
+        process.invoke("opencode", "openrouter/anthropic/claude-sonnet-4", "prompt", tmp_path, 10)

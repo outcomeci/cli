@@ -10,6 +10,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 class ExecutionError(RuntimeError):
@@ -138,6 +139,38 @@ def opencode_output(stdout: str, workspace: Path) -> str:
     if texts:
         return texts[-1].strip()
     return stdout.strip()
+
+
+def opencode_error(*outputs: str) -> str | None:
+    """A short reason from OpenCode's error events, or None if it printed none.
+
+    `opencode run --format json` reports a failed provider call as an `error`
+    event whose data carries the provider's message, HTTP status and URL,
+    alongside its response headers, cookies and body. Only the message,
+    status and host are kept, so a failure never copies those into a log.
+    """
+    for output in outputs:
+        for line in reversed(output.splitlines()):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(event, dict) or event.get("type") != "error":
+                continue
+            error = event.get("error") if isinstance(event.get("error"), dict) else {}
+            data = error.get("data") if isinstance(error.get("data"), dict) else {}
+            message = str(data.get("message") or error.get("message") or "").strip()
+            name = str(error.get("name") or "error")
+            details = [name]
+            if isinstance(data.get("statusCode"), int):
+                details.append(f"HTTP {data['statusCode']}")
+            metadata = data.get("metadata") if isinstance(data.get("metadata"), dict) else {}
+            host = urlparse(str(metadata.get("url") or "")).hostname
+            if host:
+                details.append(f"from {host}")
+            reason = message or "OpenCode reported an error"
+            return f"{reason} ({' '.join(details)})"[:1000]
+    return None
 
 
 def _authorize_agent(
@@ -356,10 +389,10 @@ def invoke(
         argv = [*wrapper, *argv]
     result = command(argv, cwd=workspace, timeout=timeout, input_text=input_text, env=env)
     if result.code:
-        raise ExecutionError(
-            f"{agent} failed with exit {result.code}: {(result.stderr or result.stdout)[-1000:]}",
-            True,
-        )
+        detail = (agent == "opencode" and opencode_error(result.stdout, result.stderr)) or (
+            result.stderr or result.stdout
+        )[-1000:]
+        raise ExecutionError(f"{agent} failed with exit {result.code}: {detail}", True)
     if agent == "opencode":
         return opencode_output(result.stdout, workspace)[-4000:]
     return result.stdout.strip()[-4000:]
@@ -423,10 +456,10 @@ def invoke_conversation(
         # from the durable outcome artifacts named in the prompt.
         result = command([*base, "-"], cwd=workspace, timeout=timeout, input_text=prompt, env=env)
     if result.code:
-        raise ExecutionError(
-            f"{agent} conversation failed with exit {result.code}: {(result.stderr or result.stdout)[-1000:]}",
-            True,
-        )
+        detail = (agent == "opencode" and opencode_error(result.stdout, result.stderr)) or (
+            result.stderr or result.stdout
+        )[-1000:]
+        raise ExecutionError(f"{agent} conversation failed with exit {result.code}: {detail}", True)
     if agent == "opencode":
         return opencode_output(result.stdout, workspace)[-12000:]
     return result.stdout.strip()[-12000:]
