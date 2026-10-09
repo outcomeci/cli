@@ -16,9 +16,10 @@ from outcomeci_connectors.providers.slack.setup import manifest as slack_manifes
 from outcomeci_connectors.providers.slack.setup import setup as setup_slack
 from outcomeci_connectors.providers.slack.setup import status as slack_status
 
-from . import __version__, credentials, slack_vault, workflow_run
+from . import __version__, credentials, mcp_setup, slack_vault, workflow_run
 from .capability import invoke_integration
 from .cloud import auth_status as cloud_auth_status
+from .cloud import credentials_path as cloud_credentials_path
 from .cloud import get_workflow, sync_workflow, vault_request
 from .cloud import login as cloud_login
 from .cloud import login_with_key as cloud_login_with_key
@@ -134,6 +135,12 @@ ARGUMENT_HELP: dict[str, dict[str, str]] = {
         "--workflow-id": "Grant this cloud workflow ID access to the token (repeatable)",
     },
     "integration slack manifest": {"--project": "Slack CLI project directory"},
+    "mcp init": {
+        "--agent": "Only set up this agent (repeatable; default: every installed agent)",
+        "--name": "Name the agent lists the server under (default: outcomeci)",
+        "--api-url": "OutcomeCI API whose MCP server to add (default: the one you signed in to)",
+        "--dry-run": "Print the commands without running them",
+    },
 }
 
 
@@ -154,6 +161,7 @@ COMMAND_HELP = {
     "integration slack status": "Check the Slack app and Slack CLI",
     "integration slack manifest": "Print the Slack app manifest",
     "integration slack sync-credentials": "Copy the Slack app's bot token into a Vault",
+    "mcp init": "Add the OutcomeCI MCP server to Claude Code, Codex and OpenCode",
 }
 
 
@@ -336,6 +344,13 @@ def parser() -> argparse.ArgumentParser:
     local_vault_put.add_argument("--value-stdin", action="store_true")
     credentials.add_arguments(local_vault_put)
     _add_dir_argument(local_vault_put)
+    mcp = commands.add_parser("mcp", help="Connect your coding agents to OutcomeCI over MCP")
+    mcp_commands = mcp.add_subparsers(dest="mcp_command", required=True)
+    mcp_init = mcp_commands.add_parser("init")
+    mcp_init.add_argument("--agent", action="append", choices=mcp_setup.AGENT_IDS, default=[])
+    mcp_init.add_argument("--name", default=mcp_setup.DEFAULT_NAME)
+    mcp_init.add_argument("--api-url")
+    mcp_init.add_argument("--dry-run", action="store_true")
     init = commands.add_parser("init", help="Write a starter workflow into a directory")
     init.add_argument("--dir", type=Path, default=Path.cwd())
     validate_command = commands.add_parser(
@@ -411,6 +426,29 @@ def parser() -> argparse.ArgumentParser:
     slack_manifest_command.add_argument("--source", type=Path, help=argparse.SUPPRESS)
     _describe(root)
     return root
+
+
+def _mcp_init(args: argparse.Namespace) -> int:
+    """Add the hosted MCP server to every installed agent, or to --agent only."""
+    api_url = args.api_url or mcp_setup.default_api_url(cloud_credentials_path())
+    result = mcp_setup.init(
+        api_url=api_url,
+        name=args.name,
+        agents=args.agent,
+        dry_run=args.dry_run,
+        login=sys.stdin.isatty(),
+        report=lambda line: print(line, file=sys.stderr),
+    )
+    statuses = [entry["status"] for entry in result["agents"]]
+    if all(status == "not_installed" for status in statuses):
+        names = ", ".join(agent.executable for agent in mcp_setup.AGENTS)
+        raise ExecutionError(
+            f"No supported agent found on PATH ({names}). "
+            f"Add the server by URL in your agent instead: {result['url']}"
+        )
+    _print_json(result)
+    failed = "failed" in statuses or (bool(args.agent) and "not_installed" in statuses)
+    return 1 if failed else 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -626,6 +664,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 result = vault_request(args.workspace_id, "revoke", entry_id=args.entry_id)
             _print_json(result or {"ok": True})
             return 0
+        if args.command == "mcp":
+            return _mcp_init(args)
         if args.command == "init":
             _print_json({"created": initialize(args.dir)})
         elif args.command == "validate":

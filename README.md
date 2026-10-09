@@ -119,6 +119,21 @@ Credentials are stored in `~/.config/outcomeci/credentials.json`, or under
 `OUTCOMECI_CONFIG_HOME` when it is set. Set `OUTCOMECI_API_URL` to use another
 OutcomeCI API.
 
+## Connect your coding agent
+
+```console
+oci mcp init
+```
+
+`oci mcp init` adds the OutcomeCI MCP server to each coding agent it finds on
+your `PATH`: Claude Code, Codex and OpenCode. It runs each agent's own
+`mcp add` command and skips any agent that already reaches OutcomeCI, including
+Claude Code with the OutcomeCI connector from claude.ai. Sign-in happens in your
+browser through the agent: Codex and OpenCode open it straight away, and Claude
+Code signs in from its `/mcp` menu. Use `--agent` to set up one agent and
+`--dry-run` to see the commands first. The server comes from the API you signed
+in to with `oci auth login`, or `OUTCOMECI_API_URL`.
+
 ## Slack
 
 `oci integration slack setup` creates and installs a Slack app with the
