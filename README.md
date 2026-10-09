@@ -39,8 +39,7 @@ The full guide is at <https://outcomeci.com/docs/outcomeci>.
   in a thread.
 
 `oci validate` compiles the workflow and prints its revision; `oci workflow
-compile` prints the compiled steps, grants, instructions and schemas. See
-[`examples/v1`](examples/v1) for two complete workflows.
+compile` prints the compiled steps, grants, instructions and schemas.
 
 ## Credentials
 

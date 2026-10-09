@@ -1,4 +1,4 @@
-"""examples/v1/sentry-to-github-pr.outcome.yaml, run end to end.
+"""tests/examples/sentry-to-github-pr.outcome.yaml, run end to end.
 
 The agent CLI is replaced by a scripted agent that calls capabilities through
 the real broker socket, and Slack and GitHub are served by a mock transport,
@@ -22,7 +22,7 @@ from outcomeci.capability import invoke_integration
 from outcomeci.config import compile_workflow
 from outcomeci.process import ExecutionError
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "v1"
+EXAMPLES = Path(__file__).resolve().parent / "examples"
 WORKFLOW = "sentry-to-github-pr.outcome.yaml"
 SENTRY_ALERT = {
     "action": "triggered",

@@ -76,7 +76,7 @@ def _add_workflow_arguments(command: argparse.ArgumentParser) -> None:
 
 
 def _workflow_path(args: argparse.Namespace) -> Path:
-    return (args.config or args.dir / "outcome.yml").resolve()
+    return (args.dir / (args.config or "outcome.yml")).resolve()
 
 
 def _print_json(value: object, *, compact: bool = False, sort_keys: bool = False) -> None:

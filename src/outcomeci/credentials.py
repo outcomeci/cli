@@ -99,7 +99,7 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         help="oauth2 grant the runtime runs",
     )
     parser.add_argument(
-        "--scope", action="append", default=[], help="oauth2 or oidc scope (repeatable)"
+        "--scope", action="append", default=[], help="oauth2, oidc or jwt_bearer scope (repeatable)"
     )
     parser.add_argument("--audience", help="Token audience")
     parser.add_argument("--account-id", help="oauth2 account id, for providers that need one")
@@ -127,6 +127,8 @@ def build(
         given = getattr(args, option, None)
         if given in (None, [], ""):
             continue
+        if option == "scope" and credential_type == "jwt_bearer":
+            name, given = "scope", " ".join(given)
         if name not in CONFIGURATION_FIELDS[credential_type]:
             raise ExecutionError(
                 f"--{option.replace('_', '-')} does not apply to a {credential_type} credential"

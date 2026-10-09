@@ -9,7 +9,7 @@ from outcomeci.config import ConfigError, compile_workflow
 from outcomeci.policy import _within
 from outcomeci.v1 import duration_seconds, shape_schema
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "v1"
+EXAMPLES = Path(__file__).resolve().parent / "examples"
 
 
 def _write(tmp_path: Path, steps: list, **top) -> Path:

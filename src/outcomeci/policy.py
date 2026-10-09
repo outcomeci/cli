@@ -470,17 +470,19 @@ class PolicyExecutor:
                     "step": step,
                     "capability": capability,
                     "request": {key: value for key, value in request.items() if key != "purpose"},
+                    # Reads must reach the provider again and each consume budget;
+                    # give each attempt its own receipt instead of replaying one.
+                    **(
+                        {"read_id": secrets.token_hex(16)}
+                        if self._reads_only(capability, request)
+                        else {}
+                    ),
                 }
             )
             previous = state["calls"].get(fingerprint)
-            # A call that was never sent, or a read, has no effect to repeat:
-            # it runs again. Anything else that did not confirm may already
-            # have happened, so it is never sent twice.
-            if (
-                previous
-                and previous["status"] != "confirmed"
-                and (previous["status"] == "unsent" or self._reads_only(capability, request))
-            ):
+            # A call that was never sent has no effect to repeat. Anything else
+            # that did not confirm may already have happened, so never resend it.
+            if previous and previous["status"] == "unsent":
                 previous = None
             if previous:
                 if previous["status"] == "confirmed":
