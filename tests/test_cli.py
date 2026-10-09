@@ -4,6 +4,7 @@ import base64
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 from outcomeci import cli
@@ -214,6 +215,32 @@ def test_validate_and_compile_read_the_workflow_in_a_directory(tmp_path: Path, c
     assert compiled["workflow_revision"] == revision
     assert compiled["instructions"]["step"]["path"] == ".outcomeci/instructions/plan.md"
     assert main(["workflow", "compile", *config, "--step", "missing"]) == 2
+
+
+@pytest.mark.parametrize("absolute", [False, True])
+def test_integration_reads_config_and_vault_from_workflow_directory(
+    tmp_path: Path, capsys, monkeypatch, absolute
+) -> None:
+    initialize(tmp_path)
+    config = tmp_path / "triage.outcome.yaml"
+    (tmp_path / "outcome.yml").rename(config)
+    roots = []
+    monkeypatch.setattr(cli, "local_credential_resolver", lambda root: roots.append(root))
+    assert (
+        main(
+            [
+                "integration",
+                "list",
+                "--dir",
+                str(tmp_path),
+                "--config",
+                str(config) if absolute else config.name,
+            ]
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)
+    assert roots == [tmp_path]
 
 
 def test_cloud_run_flags_are_checked_before_anything_runs(capsys) -> None:

@@ -397,3 +397,45 @@ def test_the_provider_reason_is_bounded_and_never_carries_the_credential(tmp_pat
     assert "private-token" not in str(raised.value)
     assert len(reason) <= 300
     assert "documentation_url" not in str(raised.value)
+
+
+@pytest.mark.parametrize("schema_read", [False, True])
+def test_repeated_reads_fetch_fresh_results_and_consume_budget(tmp_path, schema_read):
+    calls = []
+
+    def send(request):
+        calls.append(request)
+        return httpx.Response(200, json={"ok": True, "revision": len(calls)})
+
+    broker = executor(tmp_path, handler=send)
+    integration = broker.executor.compiled["workflow"]["spec"]["integrations"]["slack"]
+    integration["access"]["max_requests"] = 2
+    inputs = {"method": "GET", "path": "/api/users.list"}
+    if schema_read:
+        operation = integration["operations"]["request"]
+        operation["request"] = {
+            "method": "POST",
+            "path": "/api/report",
+            "headers": {},
+            "timeout_seconds": 30,
+        }
+        operation["input"] = {"type": "object"}
+        operation["policy"] = {"side_effect": "read"}
+        inputs = {}
+
+    first = broker.execute("slack.request", inputs, step="notify")
+    second = broker.execute("slack.request", inputs, step="notify")
+    assert first["output"]["result"]["revision"] == 1
+    assert second["output"]["result"]["revision"] == 2
+    assert first["receipt"] != second["receipt"]
+    with pytest.raises(IntegrationError, match="budget"):
+        broker.execute("slack.request", inputs, step="notify")
+    assert len(calls) == 2
+
+    restored = policy.PolicyExecutor(
+        broker.executor, tmp_path / ".broker", {}, allow, step_policy=STEP_POLICY
+    )
+    assert (
+        restored.execute("slack.request", inputs, step="notify")["output"]["result"]["revision"]
+        == 3
+    )
