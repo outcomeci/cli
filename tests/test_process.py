@@ -345,3 +345,103 @@ def test_claude_reads_its_prompt_on_stdin_however_long(monkeypatch, tmp_path: Pa
     )
     assert prompt not in seen["argv"]
     assert seen["input_text"] == prompt
+
+
+# The shape of `opencode run --format json` output, from OpenCode 1.18.
+OPENCODE_STREAM = "\n".join(
+    [
+        '{"type":"step_start","timestamp":1791558858000,"sessionID":"ses_1",'
+        '"part":{"id":"prt_1","sessionID":"ses_1","type":"step-start"}}',
+        '{"type":"text","timestamp":1791558858500,"sessionID":"ses_1",'
+        '"part":{"id":"prt_2","sessionID":"ses_1","type":"text","text":"Reading the request."}}',
+        '{"type":"step_finish","timestamp":1791558858600,"sessionID":"ses_1",'
+        '"part":{"id":"prt_3","type":"step-finish","reason":"tool-calls",'
+        '"tokens":{"total":9000,"input":1200,"output":30,"reasoning":10,'
+        '"cache":{"write":0,"read":7760}},"cost":0.002}}',
+        '{"type":"text","timestamp":1791558859281,"sessionID":"ses_1",'
+        '"part":{"id":"prt_4","sessionID":"ses_1","type":"text",'
+        '"text":"Step completed. The greeting is written."}}',
+        '{"type":"step_finish","timestamp":1791558859281,"sessionID":"ses_1",'
+        '"part":{"id":"prt_5","type":"step-finish","reason":"stop",'
+        '"tokens":{"total":8851,"input":5,"output":46,"reasoning":0,'
+        '"cache":{"write":139,"read":8661}},"cost":0.0038}}',
+    ]
+)
+
+
+def test_opencode_returns_its_final_message_and_keeps_the_stream(
+    monkeypatch, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-secret")
+    monkeypatch.setattr(
+        process, "command", lambda argv, **kwargs: process.Result(0, OPENCODE_STREAM, "")
+    )
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    summary = process.invoke(
+        "opencode", "openrouter/anthropic/claude-sonnet-4", "prompt", workspace, 10
+    )
+    assert summary == "Step completed. The greeting is written."
+    session = home / process.OPENCODE_SESSIONS / "ses_1.jsonl"
+    header, *events = session.read_text().splitlines()
+    assert '"cwd": "' + str(workspace) + '"' in header
+    assert len(events) == 5
+
+
+def test_opencode_conversation_returns_its_final_message(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("OPENROUTER_API_KEY", "openrouter-secret")
+    monkeypatch.setattr(
+        process, "command", lambda argv, **kwargs: process.Result(0, OPENCODE_STREAM, "")
+    )
+    assert (
+        process.invoke_conversation(
+            "opencode", None, "openrouter/anthropic/claude-sonnet-4", "question", tmp_path, 10
+        )
+        == "Step completed. The greeting is written."
+    )
+
+
+def test_opencode_output_without_text_falls_back_to_the_raw_output(tmp_path: Path) -> None:
+    assert process.opencode_output("plain failure text", tmp_path) == "plain failure text"
+
+
+def test_opencode_step_transcript_records_usage(monkeypatch, tmp_path: Path) -> None:
+    from outcomeci import transcripts
+
+    home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(home))
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    process.opencode_output(OPENCODE_STREAM, workspace)
+    outcome = tmp_path / "outcome"
+    collected = transcripts._transcripts(
+        "opencode", outcome, "greet", workspace=workspace, since="2000-01-01T00:00:00+00:00"
+    )
+    assert collected["usage_records"] == 2
+    first, second = sorted(collected["usage"], key=lambda record: record["source_line"])
+    assert (first["input_tokens"], first["output_tokens"]) == (1200, 40)
+    assert (first["cache_read_tokens"], first["cache_write_tokens"]) == (7760, 0)
+    assert (second["input_tokens"], second["output_tokens"]) == (5, 46)
+    assert (second["cache_read_tokens"], second["cache_write_tokens"]) == (8661, 139)
+    assert second["occurred_at"] == 1791558859281
+    assert (outcome / collected["files"][0]["path"]).is_file()
+
+
+def test_opencode_session_for_another_workspace_is_not_collected(
+    monkeypatch, tmp_path: Path
+) -> None:
+    from outcomeci import transcripts
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    process.opencode_output(OPENCODE_STREAM, elsewhere)
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    collected = transcripts._transcripts(
+        "opencode", tmp_path / "outcome", "greet", workspace=workspace
+    )
+    assert collected["usage_records"] == 0
