@@ -1,5 +1,5 @@
 """Private, one-job coding-agent runner."""
 
-from .main import main
+from outcomeci.cloud_runner.main import main
 
 __all__ = ["main"]

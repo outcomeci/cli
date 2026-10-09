@@ -7,7 +7,7 @@ import json
 import httpx
 import pytest
 
-from outcomeci.decision_transport import install_decision_response_guard
+from outcomeci.reasoning.decision_transport import install_decision_response_guard
 
 litellm = pytest.importorskip("litellm")
 from litellm.caching.llm_caching_handler import LLMClientCache  # noqa: E402

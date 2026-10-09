@@ -133,6 +133,6 @@ def completion_max_tokens(model: str, limit: int = 32768) -> int:
     """Bound output using the same offline metadata as capability validation."""
     if type(limit) is not int or limit <= 0:
         raise ValueError("completion token limit must be a positive integer")
-    from .model_capabilities import get_capabilities
+    from outcomeci.reasoning.capabilities import get_capabilities
 
     return min(limit, get_capabilities(model).max_output_tokens or 4096)

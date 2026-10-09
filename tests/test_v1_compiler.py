@@ -5,11 +5,11 @@ from pathlib import Path
 import pytest
 import yaml
 
-from outcomeci.config import ConfigError, compile_workflow
-from outcomeci.policy import _within
-from outcomeci.v1 import duration_seconds, shape_schema
+from outcomeci.broker.policy import _within
+from outcomeci.workflow.compiler import ConfigError, compile_workflow
+from outcomeci.workflow.language import duration_seconds, shape_schema
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "v1"
+EXAMPLES = Path(__file__).resolve().parent / "examples"
 
 
 def _write(tmp_path: Path, steps: list, **top) -> Path:
@@ -67,7 +67,7 @@ def test_a_connector_that_needs_a_credential_requires_auth(tmp_path):
 
 
 def test_a_changed_connector_changes_the_revision(monkeypatch):
-    from outcomeci import v1
+    from outcomeci.workflow import language as v1
 
     path = EXAMPLES / "sentry-to-github-pr.outcome.yaml"
     before = compile_workflow(path)["workflow_revision"]
@@ -236,7 +236,7 @@ QUERY = {"param": "q", "term": "repo:{owner}/{name}", "exclusive": ["repo"], "op
     ],
 )
 def test_a_malformed_query_qualifier_is_refused(rule):
-    from outcomeci.config import _grantable
+    from outcomeci.workflow.compiler import _grantable
 
     _grantable(
         {"grantable": {"repo": {"query_qualifier": QUERY, "value_fields": ["owner", "name"]}}}, "op"
@@ -246,7 +246,7 @@ def test_a_malformed_query_qualifier_is_refused(rule):
 
 
 def test_only_an_operation_that_chooses_its_request_scopes_a_query():
-    from outcomeci.config import _operation
+    from outcomeci.workflow.compiler import _operation
 
     with pytest.raises(ConfigError, match="scopes a query"):
         _operation(

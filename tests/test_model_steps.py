@@ -13,11 +13,15 @@ import test_v1_sentry as sentry
 import test_v1_slack as slack_example
 import yaml
 
-from outcomeci import integrations, local, models, run_container, v1_runtime
-from outcomeci.config import ConfigError, compile_workflow
-from outcomeci.integrations import IntegrationExecutor
-from outcomeci.policy import PolicyExecutor
-from outcomeci.process import ExecutionError
+from outcomeci.broker import executor as integrations
+from outcomeci.broker.executor import IntegrationExecutor
+from outcomeci.broker.policy import PolicyExecutor
+from outcomeci.reasoning import models
+from outcomeci.runtime import container as run_container
+from outcomeci.runtime import engine as local
+from outcomeci.runtime import steps as v1_runtime
+from outcomeci.runtime.process import ExecutionError
+from outcomeci.workflow.compiler import ConfigError, compile_workflow
 
 TRIAGE = {
     "decision": "fix",
@@ -251,7 +255,7 @@ def test_a_tool_result_over_the_limit_stays_valid_json():
 
 
 def test_a_local_turn_allows_a_long_reply_and_reports_its_usage(monkeypatch):
-    from outcomeci import model_capabilities
+    from outcomeci.reasoning import capabilities as model_capabilities
 
     monkeypatch.setattr(
         model_capabilities,
@@ -709,7 +713,7 @@ def test_the_review_profile_decides_a_local_review(tmp_path, monkeypatch):
     )
 
     assert decision == {"decision": "deny", "reason": "too broad", "proposal_sha256": "a" * 64}
-    from outcomeci.policy import INCREMENTAL_REVIEW_INSTRUCTIONS
+    from outcomeci.broker.policy import INCREMENTAL_REVIEW_INSTRUCTIONS
 
     assert INCREMENTAL_REVIEW_INSTRUCTIONS in sent[0]["messages"][0]["content"]
     assert sent[0]["model"] == "anthropic/claude-sonnet-5"

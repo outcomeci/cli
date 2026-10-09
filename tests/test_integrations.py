@@ -8,13 +8,9 @@ import pytest
 import yaml
 from lowered import compile_file
 
-from outcomeci.config import ConfigError
-from outcomeci.integrations import (
-    IntegrationError,
-    IntegrationExecutor,
-    doctor,
-)
-from outcomeci.process import ExecutionError
+from outcomeci.broker.executor import IntegrationError, IntegrationExecutor, doctor
+from outcomeci.runtime.process import ExecutionError
+from outcomeci.workflow.compiler import ConfigError
 
 
 def workflow(tmp_path: Path) -> Path:

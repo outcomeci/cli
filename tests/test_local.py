@@ -6,9 +6,9 @@ from pathlib import Path
 
 import pytest
 
-from outcomeci import local
-from outcomeci.process import ExecutionError
-from outcomeci.repository import initialize
+from outcomeci.runtime import engine as local
+from outcomeci.runtime.process import ExecutionError
+from outcomeci.workflow.scaffold import initialize
 
 
 @pytest.fixture(autouse=True)

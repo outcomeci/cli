@@ -19,7 +19,7 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from lowered import compile_file
 
-from outcomeci.integrations import IntegrationError, IntegrationExecutor, doctor
+from outcomeci.broker.executor import IntegrationError, IntegrationExecutor, doctor
 
 TOKEN_URL = "https://auth.example.test/token"
 
@@ -517,7 +517,7 @@ def test_github_refresh_requests_json_and_persists_rotation(tmp_path: Path) -> N
 def test_slack_refresh_uses_bot_token_and_saves_rotation(ok):
     from outcomeci_connectors.providers.slack import PROVIDER
 
-    from outcomeci.auth import Authenticator, AuthError
+    from outcomeci.broker.auth import Authenticator, AuthError
 
     writes = []
     auth = Authenticator(rotate=lambda reference, secrets: writes.append((reference, secrets)))

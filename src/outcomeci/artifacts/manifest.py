@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .security import private_path
+from outcomeci.security import private_path
 
 SCHEMA_VERSION = "outcomeci.run-manifest/v1"
 

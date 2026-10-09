@@ -3,7 +3,8 @@
 import json
 from pathlib import Path
 
-from outcomeci import cloud, dataset
+from outcomeci import cloud
+from outcomeci.artifacts import dataset
 
 RUN_STATE = {
     "run_id": "run-1",
@@ -71,7 +72,7 @@ def test_a_run_from_before_the_records_is_reported_incomplete() -> None:
 
 def test_run_row_groups_steps_transcripts_turns_and_attachments() -> None:
     row = dataset.run_row("run-1", _files(), workflow={"workflow_id": "wf", "name": "x"})
-    assert row["schema_version"] == "outcomeci.dataset.run/v1"
+    assert row["schema_version"] == "outcomeci.artifacts.dataset.run/v1"
     assert row["trigger"]["type"] == "cron"
     assert row["steps"]["scan"]["outputs"] == {"posts": []}
     assert row["steps"]["share"]["items"][0]["value"]["priority"] == 1

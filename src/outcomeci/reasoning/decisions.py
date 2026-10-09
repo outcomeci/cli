@@ -8,8 +8,8 @@ from typing import Any
 
 import jsonschema
 
-from .config import IDENTIFIER, ConfigError
-from .process import ExecutionError
+from outcomeci.runtime.process import ExecutionError
+from outcomeci.workflow.compiler import IDENTIFIER, ConfigError
 
 PROBABILITY = {"type": "number", "minimum": 0, "maximum": 1}
 
@@ -135,7 +135,7 @@ def validate_answers(questions: dict, response: dict) -> dict:
 
 def local_client(compiled: dict, resolver=None):
     def call(*, step: str, input: dict) -> dict:
-        from .models import _key
+        from outcomeci.reasoning.models import _key
 
         try:
             import litellm
@@ -144,7 +144,7 @@ def local_client(compiled: dict, resolver=None):
         block = compiled["instructions"]["steps"][step]["v1"]
         profile = block["reasoning"]
         try:
-            from .decision_transport import install_decision_response_guard
+            from outcomeci.reasoning.decision_transport import install_decision_response_guard
 
             install_decision_response_guard(profile["model"].split("/")[0], asynchronous=False)
             response = litellm.decisions(

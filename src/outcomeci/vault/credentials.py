@@ -12,7 +12,7 @@ from __future__ import annotations
 import argparse
 from typing import Any
 
-from .process import ExecutionError
+from outcomeci.runtime.process import ExecutionError
 
 CREDENTIAL_TYPES = (
     "api_key",

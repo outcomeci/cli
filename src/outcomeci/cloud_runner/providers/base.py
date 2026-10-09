@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
-from ..models import AgentLogin
+from outcomeci.cloud_runner.models import AgentLogin
 
 
 class ProviderAdapter(Protocol):

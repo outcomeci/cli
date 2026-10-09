@@ -9,9 +9,9 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from .config import API_VERSION, ConfigError, compile_workflow
-from .process import ExecutionError, invoke
-from .security import private_path
+from outcomeci.runtime.process import ExecutionError, invoke
+from outcomeci.security import private_path
+from outcomeci.workflow.compiler import API_VERSION, ConfigError, compile_workflow
 
 REQUIREMENTS = Path(".outcomeci/publication-requirements.json")
 REPORT = Path(".outcomeci/publication-report.json")

@@ -12,8 +12,12 @@ import httpx
 import pytest
 import test_v1_slack as slack_example
 
-from outcomeci import checkouts, integrations, local, run_container, v1_runtime
-from outcomeci.config import compile_workflow
+from outcomeci.broker import executor as integrations
+from outcomeci.runtime import checkouts
+from outcomeci.runtime import container as run_container
+from outcomeci.runtime import engine as local
+from outcomeci.runtime import steps as v1_runtime
+from outcomeci.workflow.compiler import compile_workflow
 
 pytestmark = pytest.mark.repository_checkouts
 TOKEN = "ghp_checkoutTestToken0123456789"

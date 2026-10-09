@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from outcomeci import checkouts
+from outcomeci.runtime import checkouts
 
 
 def pytest_configure(config):

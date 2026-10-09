@@ -13,8 +13,8 @@ from typing import Any
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
-from .process import ExecutionError
-from .security import atomic_write_json
+from outcomeci.runtime.process import ExecutionError
+from outcomeci.security import atomic_write_json
 
 VAULT_FILE = Path(".outcomeci/vault.enc")
 KEY_ENV = "OUTCOMECI_VAULT_KEY_FILE"

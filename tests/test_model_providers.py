@@ -8,15 +8,15 @@ import httpx
 import pytest
 import yaml
 
-from outcomeci import models
-from outcomeci.config import ConfigError, compile_workflow
-from outcomeci.model_providers import (
+from outcomeci.reasoning import models
+from outcomeci.reasoning.providers import (
     CHAT_PROVIDERS,
     completion_options,
     parse_model,
     provider_for_model,
 )
-from outcomeci.process import ExecutionError
+from outcomeci.runtime.process import ExecutionError
+from outcomeci.workflow.compiler import ConfigError, compile_workflow
 
 TOOL = {
     "type": "function",
@@ -307,8 +307,8 @@ def test_provider_errors_do_not_expose_keys_or_prompts(monkeypatch, error_name):
 )
 def test_unknown_or_invalid_model_limits_use_conservative_bound(monkeypatch, metadata):
     monkeypatch.setenv("LITELLM_LOCAL_MODEL_COST_MAP", "true")
-    from outcomeci import model_capabilities
-    from outcomeci.model_providers import completion_max_tokens
+    from outcomeci.reasoning import capabilities as model_capabilities
+    from outcomeci.reasoning.providers import completion_max_tokens
 
     monkeypatch.setattr(
         model_capabilities,
@@ -324,8 +324,8 @@ def test_unknown_or_invalid_model_limits_use_conservative_bound(monkeypatch, met
 
 
 def test_known_and_unavailable_model_limits(monkeypatch):
-    from outcomeci import model_capabilities
-    from outcomeci.model_providers import completion_max_tokens
+    from outcomeci.reasoning import capabilities as model_capabilities
+    from outcomeci.reasoning.providers import completion_max_tokens
 
     assert completion_max_tokens("deepseek/deepseek-chat") <= 8192
     monkeypatch.setattr(

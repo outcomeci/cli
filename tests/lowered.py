@@ -11,7 +11,7 @@ from typing import Any
 
 import yaml
 
-from outcomeci.config import compile_lowered
+from outcomeci.workflow.compiler import compile_lowered
 
 
 def compile_file(path: Path) -> dict[str, Any]:
@@ -22,7 +22,7 @@ def compile_file(path: Path) -> dict[str, Any]:
 def email_payload() -> dict[str, Any]:
     from copy import deepcopy
 
-    from outcomeci.contracts import contract_schema
+    from outcomeci.workflow.contracts import contract_schema
 
     return deepcopy(contract_schema("email.received")["examples"][0])
 

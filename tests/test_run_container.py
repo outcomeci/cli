@@ -9,8 +9,8 @@ from unittest import mock
 
 import pytest
 
-from outcomeci import run_container
-from outcomeci.process import ExecutionError
+from outcomeci.runtime import container as run_container
+from outcomeci.runtime.process import ExecutionError
 
 
 def _bundle(**overrides):

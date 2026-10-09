@@ -12,7 +12,7 @@ from functools import lru_cache
 from importlib import metadata
 from typing import Any
 
-from .model_providers import CHAT_PROVIDERS, parse_model
+from outcomeci.reasoning.providers import CHAT_PROVIDERS, parse_model
 
 
 @dataclass(frozen=True)

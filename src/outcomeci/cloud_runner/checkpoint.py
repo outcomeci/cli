@@ -6,8 +6,8 @@ import json
 import re
 from pathlib import Path
 
-from ..security import private_path
-from .models import ContractError
+from outcomeci.cloud_runner.models import ContractError
+from outcomeci.security import private_path
 
 MAX_FILES = 500
 MAX_FILE_BYTES = 4 * 1024 * 1024

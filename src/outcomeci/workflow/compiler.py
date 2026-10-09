@@ -13,8 +13,8 @@ from zoneinfo import available_timezones
 import jsonschema
 import yaml
 
-from . import __version__
-from .security import private_path
+from outcomeci import __version__
+from outcomeci.security import private_path
 
 RUNNERS = {"codex", "claude", "opencode"}
 AUTH_KINDS = {
@@ -781,7 +781,7 @@ def load(path: Path) -> dict[str, Any]:
     api_version = document.get("apiVersion")
     if api_version != API_VERSION:
         raise ConfigError(f"unsupported apiVersion {api_version!r}; use {API_VERSION}")
-    from .v1 import load as load_v1
+    from outcomeci.workflow.language import load as load_v1
 
     return load_v1(path)
 
@@ -892,7 +892,7 @@ def _compile(document: dict[str, Any], root: Path) -> dict[str, Any]:
         "workflow_revision": revision,
         **revision_input,
     }
-    from .model_capabilities import CapabilityError, flatten_warnings, workflow_report
+    from outcomeci.reasoning.capabilities import CapabilityError, flatten_warnings, workflow_report
 
     try:
         reports = workflow_report(compiled)

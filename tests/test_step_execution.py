@@ -10,9 +10,9 @@ import pytest
 import yaml
 from lowered import email_payload
 
-from outcomeci import local
-from outcomeci.config import compile_workflow
-from outcomeci.process import ExecutionError
+from outcomeci.runtime import engine as local
+from outcomeci.runtime.process import ExecutionError
+from outcomeci.workflow.compiler import compile_workflow
 
 WORKFLOW = {
     "apiVersion": "outcomeci.workflow/v1",

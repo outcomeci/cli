@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from outcomeci.config import compile_workflow
-from outcomeci.diagram import SCHEMA_VERSION, workflow_diagram
+from outcomeci.workflow.compiler import compile_workflow
+from outcomeci.workflow.diagram import SCHEMA_VERSION, workflow_diagram
 
 FIXTURES = Path(__file__).parent / "fixtures" / "diagram"
 EXAMPLES = ["sentry-triage-fix", "x-engagement"]

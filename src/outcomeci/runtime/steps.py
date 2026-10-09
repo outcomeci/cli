@@ -19,14 +19,14 @@ from typing import Any
 
 import jsonschema
 
-from .integrations import (
+from outcomeci.broker.executor import (
     CredentialResolver,
     IntegrationError,
     IntegrationExecutor,
     attachments_path,
 )
-from .process import ExecutionError
-from .security import atomic_write_json
+from outcomeci.runtime.process import ExecutionError
+from outcomeci.security import atomic_write_json
 
 MISSING = object()
 
@@ -109,7 +109,7 @@ def _journal(root: Path, run_id: str) -> dict[str, Any]:
 
 def _call_output(root: Path, run_id: str, step: str, parts: list[str]) -> Any:
     """The output of the last successful call a step made, by `as` name or capability."""
-    from .local import _call_succeeded
+    from outcomeci.runtime.engine import _call_succeeded
 
     calls = [
         call
@@ -393,8 +393,8 @@ def run_await(
     response: dict | None = None,
 ) -> bool:
     """Block until the watched signal arrives (True) or the window expires (False)."""
-    from .local import _finish_interaction
-    from .v1 import provider
+    from outcomeci.runtime.engine import _finish_interaction
+    from outcomeci.workflow.language import provider
 
     if resolver is None:
         raise ExecutionError("an await step requires a credential resolver")
@@ -549,7 +549,7 @@ def _opening(root: Path, state: dict[str, Any], spec: dict[str, Any], plan: Any,
     The runtime's own copy of version 1 is queued as the first reply, so the
     thread shows the plan the steps after it will actually receive.
     """
-    from .local import _call_succeeded
+    from outcomeci.runtime.engine import _call_succeeded
 
     step = spec["message"].split(".", 1)[0]
     posted = None
@@ -592,8 +592,8 @@ def run_converse(
     every post and read back on resume: queued posts are sent, and a reply
     that never got an answer is answered, instead of either being lost.
     """
-    from . import local
-    from .v1 import provider
+    from outcomeci.runtime import engine as local
+    from outcomeci.workflow.language import provider
 
     if options.credential_resolver is None:
         raise ExecutionError("a converse step requires a credential resolver")
@@ -800,7 +800,7 @@ def _turn(root, compiled, state, step, spec, consultation, runner, model, option
     An invalid answer gets one repair attempt with the reason, so a single
     malformed file does not end a discussion that may have run for days.
     """
-    from . import local
+    from outcomeci.runtime import engine as local
 
     turn_path = (
         root
@@ -871,7 +871,7 @@ def _turn(root, compiled, state, step, spec, consultation, runner, model, option
 def _model_turn(compiled, step, spec, consultation, prompt, reasoning, options) -> dict:
     """A discussion turn taken by a model profile: one call whose result is the
     turn, checked against the same contract as an agent's answer file."""
-    from . import models
+    from outcomeci.reasoning import models
 
     schema = {
         "type": "object",
@@ -903,7 +903,7 @@ def _model_turn(compiled, step, spec, consultation, prompt, reasoning, options) 
 
 def run_dispatcher_step(root, compiled, state, step, options) -> None:
     """Run a tool-free decision or durable dispatch and retain its evidence."""
-    from . import decisions, models
+    from outcomeci.reasoning import decisions, models
 
     step_block = block(compiled, step)
     resolved = inputs(root, state, step_block)

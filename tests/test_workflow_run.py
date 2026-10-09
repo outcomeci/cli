@@ -10,9 +10,10 @@ from unittest import mock
 
 import pytest
 
-from outcomeci import run_container, workflow_run
 from outcomeci.cloud import CloudRequestError
-from outcomeci.process import ExecutionError
+from outcomeci.runtime import container as run_container
+from outcomeci.runtime import launcher as workflow_run
+from outcomeci.runtime.process import ExecutionError
 
 COMPILED = {"triggers": {"daily": {"type": "cron"}, "go": {"type": "manual"}}}
 
@@ -89,7 +90,7 @@ def _two_steps(monkeypatch):
         "completed_steps": ["resolve_analytics"],
         "ready_steps": ["notify"],
     }
-    monkeypatch.setattr("outcomeci.local.trigger", lambda *args, **kwargs: first)
+    monkeypatch.setattr("outcomeci.runtime.engine.trigger", lambda *args, **kwargs: first)
     return compiled
 
 
@@ -101,7 +102,7 @@ def test_auto_continue_drives_through_ready_steps(monkeypatch, tmp_path):
         calls.append((run_id, approve, options))
         return {"run_id": run_id, "status": "completed", "completed_steps": ["a", "b"]}
 
-    monkeypatch.setattr("outcomeci.local.continue_run", continue_run)
+    monkeypatch.setattr("outcomeci.runtime.engine.continue_run", continue_run)
     options = object()
     result = run_container.execute(
         tmp_path, tmp_path / "outcome.yml", compiled, "daily", {}, options, auto_continue=True
@@ -114,7 +115,7 @@ def test_auto_continue_drives_through_ready_steps(monkeypatch, tmp_path):
 def test_without_auto_continue_the_run_stops_after_the_first_step(monkeypatch, tmp_path):
     compiled = _two_steps(monkeypatch)
     monkeypatch.setattr(
-        "outcomeci.local.continue_run", mock.Mock(side_effect=AssertionError("continued"))
+        "outcomeci.runtime.engine.continue_run", mock.Mock(side_effect=AssertionError("continued"))
     )
     result = run_container.execute(
         tmp_path, tmp_path / "outcome.yml", compiled, "daily", {}, object(), auto_continue=False
@@ -234,7 +235,7 @@ def test_image_run_pipes_every_secret_on_stdin_and_writes_back_a_rotation(monkey
     argv = " ".join(command)
     for secret in ("xoxb-secret", "rt-1", "agent-token"):
         assert secret not in argv
-    assert command[-3:] == ["outcomeci-runner:dev", "-m", "outcomeci.run_container"]
+    assert command[-3:] == ["outcomeci-runner:dev", "-m", "outcomeci.runtime.container"]
     assert f"type=bind,src={root.resolve()},dst=/src,readonly" in command
     assert "HOME=/oci-run/home" in command
     assert "--init" in command
@@ -538,7 +539,7 @@ def test_check_image_explains_an_image_without_the_run_entrypoint(monkeypatch):
     probe = mock.Mock(
         return_value=mock.Mock(
             returncode=1,
-            stderr="ModuleNotFoundError: No module named 'outcomeci.run_container'\n",
+            stderr="ModuleNotFoundError: No module named 'outcomeci.runtime.container'\n",
         )
     )
     monkeypatch.setattr(workflow_run.subprocess, "run", probe)
@@ -719,7 +720,7 @@ def test_retry_refuses_a_run_that_did_not_fail(monkeypatch, image_env):
 
 
 def test_resume_records_an_interrupted_run_before_retrying(monkeypatch, tmp_path):
-    from outcomeci import local
+    from outcomeci.runtime import engine as local
 
     local._write(tmp_path, {"run_id": "run-1", "status": "running", "step": "implement"})
     retried = mock.Mock(return_value={"run_id": "run-1", "status": "completed"})
@@ -751,7 +752,7 @@ LOCAL_COMPILED = {
 
 @pytest.fixture
 def local_env(monkeypatch, image_env, tmp_path):
-    from outcomeci import local_vault
+    from outcomeci.vault import local as local_vault
 
     root, docker = image_env
     monkeypatch.setattr(workflow_run, "compile_workflow", lambda config: LOCAL_COMPILED)
@@ -867,7 +868,7 @@ def test_local_run_needs_a_codex_login(monkeypatch, local_env, tmp_path):
 
 
 def test_local_run_reads_a_claude_token_from_the_environment_or_the_vault(monkeypatch, local_env):
-    from outcomeci import local_vault
+    from outcomeci.vault import local as local_vault
 
     root, _ = local_env
     container = _container(monkeypatch, result={"run_id": "run-1"})
@@ -919,7 +920,7 @@ def test_local_run_accepts_opencode_with_an_openrouter_model(monkeypatch, local_
 
 
 def test_local_run_reads_an_opencode_key_from_the_local_vault(monkeypatch, local_env):
-    from outcomeci import local_vault
+    from outcomeci.vault import local as local_vault
 
     root, _ = local_env
     container = _container(monkeypatch, result={"run_id": "run-1"})

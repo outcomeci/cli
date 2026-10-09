@@ -10,10 +10,12 @@ from pathlib import Path
 import httpx
 import pytest
 
-from outcomeci import local_vault, run_container, workflow_run
 from outcomeci.cloud import CloudRequestError
 from outcomeci.cloud_runner.client import CoreClient
-from outcomeci.leases import LeaseResolver
+from outcomeci.runtime import container as run_container
+from outcomeci.runtime import launcher as workflow_run
+from outcomeci.vault import local as local_vault
+from outcomeci.vault.leases import LeaseResolver
 
 LATER = (datetime.now(UTC) + timedelta(minutes=10)).isoformat()
 

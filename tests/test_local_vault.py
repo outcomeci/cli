@@ -9,8 +9,8 @@ import yaml
 from lowered import compile_file
 from test_integrations import workflow
 
-from outcomeci.integrations import IntegrationExecutor, local_credential_resolver
-from outcomeci.local_vault import initialize, list_entries, put, resolve
+from outcomeci.broker.executor import IntegrationExecutor, local_credential_resolver
+from outcomeci.vault.local import initialize, list_entries, put, resolve
 
 
 def test_local_vault_encrypts_values_and_lists_only_metadata(tmp_path: Path, monkeypatch) -> None:

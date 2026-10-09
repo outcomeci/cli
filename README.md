@@ -155,8 +155,9 @@ fail. Reports never contain the original values.
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the supported Python versions and
-the formatting, lint, test and package checks CI runs.
+Start with the [source map and execution walkthrough](CONTRIBUTING.md#source-map).
+[CONTRIBUTING.md](CONTRIBUTING.md) also covers setup and the formatting, lint,
+test and package checks CI runs.
 
 ### Human approval without changing the plan
 

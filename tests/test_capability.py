@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import pytest
 
-from outcomeci import capability
-from outcomeci.process import ExecutionError
+from outcomeci.broker import server as capability
+from outcomeci.runtime.process import ExecutionError
 
 
 def _broker():

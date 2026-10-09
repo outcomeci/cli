@@ -8,10 +8,11 @@ import httpx
 import pytest
 import yaml
 
-from outcomeci import cli, models
-from outcomeci import model_capabilities as caps
-from outcomeci.config import ConfigError, compile_workflow
-from outcomeci.process import ExecutionError
+from outcomeci import cli
+from outcomeci.reasoning import capabilities as caps
+from outcomeci.reasoning import models
+from outcomeci.runtime.process import ExecutionError
+from outcomeci.workflow.compiler import ConfigError, compile_workflow
 
 
 @pytest.fixture(autouse=True)

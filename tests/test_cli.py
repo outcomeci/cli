@@ -9,8 +9,8 @@ import yaml
 
 from outcomeci import cli
 from outcomeci.cli import main
-from outcomeci.config import compile_workflow
-from outcomeci.repository import initialize
+from outcomeci.workflow.compiler import compile_workflow
+from outcomeci.workflow.scaffold import initialize
 
 
 def test_init_writes_a_v1_workflow_that_validates(tmp_path: Path, capsys) -> None:
@@ -183,7 +183,7 @@ def test_slack_setup_passes_the_request_url_and_events(tmp_path: Path, monkeypat
 def test_local_vault_put_drops_the_newline_a_pipe_adds(tmp_path: Path, monkeypatch) -> None:
     import io
 
-    from outcomeci import local_vault
+    from outcomeci.vault import local as local_vault
 
     monkeypatch.setenv("OUTCOMECI_CONFIG_HOME", str(tmp_path / "config"))
     assert main(["vault", "local", "init", "--dir", str(tmp_path)]) == 0

@@ -17,9 +17,9 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from .execution_events import event, safe_text
-from .integrations import IntegrationError, IntegrationExecutor, same
-from .process import invoke
+from outcomeci.broker.executor import IntegrationError, IntegrationExecutor, same
+from outcomeci.runtime.events import event, safe_text
+from outcomeci.runtime.process import invoke
 
 
 def _refused_status(error: BaseException) -> int | None:
@@ -280,7 +280,7 @@ class PolicyExecutor:
     def _model_review(self, proposal: dict[str, Any]) -> dict[str, Any]:
         """The workflow's `reasoning.review` model decides; the digest is the
         broker's own, so the model never copies it."""
-        from . import models
+        from outcomeci.reasoning import models
 
         decision, _text = models.run(
             models.local_client(self.executor.compiled, self.executor.resolver),

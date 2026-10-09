@@ -315,7 +315,7 @@ def invoke(
             )
         }
         runtime_paths.update(
-            {Path(sys.prefix), Path(sys.base_prefix), Path(__file__).resolve().parents[2]}
+            {Path(sys.prefix), Path(sys.base_prefix), Path(__file__).resolve().parents[3]}
         )
         runtime_paths.update(
             {
