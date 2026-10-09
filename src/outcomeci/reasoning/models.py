@@ -284,6 +284,9 @@ def write_transcript(root: Path, step: str, provider: str, turns: list[dict[str,
     records = [
         {
             "provider": provider,
+            "model": turn.get("model") or (turn.get("response") or {}).get("model")
+            if isinstance(turn.get("response") or {}, dict)
+            else turn.get("model"),
             "source_line": line,
             "occurred_at": turn.get("occurred_at"),
             "transcript_path": relative,
