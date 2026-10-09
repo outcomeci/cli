@@ -1,5 +1,7 @@
 import io
 
+import pytest
+
 from outcomeci import cli, cloud
 
 
@@ -137,6 +139,32 @@ def _put(monkeypatch, stdin: str, *arguments: str) -> dict:
     )
     assert cli.main(["vault", "put", *arguments, "--workspace-id", "workspace_1"]) == 0
     return seen["credential"]
+
+
+@pytest.mark.parametrize("kind", ["oauth2", "oidc", "jwt_bearer"])
+def test_typed_credential_scopes_use_the_vault_field_for_the_kind(monkeypatch, kind) -> None:
+    credential = _put(
+        monkeypatch,
+        "private-secret\n",
+        "service/auth",
+        "--provider",
+        "service",
+        "--credential-type",
+        kind,
+        *(["--issuer", "service@example.test"] if kind == "jwt_bearer" else ["--client-id", "cid"]),
+        "--scope",
+        "read",
+        "--scope",
+        "write",
+        "--value-stdin",
+    )
+    if kind == "jwt_bearer":
+        assert credential["configuration"] == {
+            "issuer": "service@example.test",
+            "scope": "read write",
+        }
+    else:
+        assert credential["configuration"] == {"client_id": "cid", "scopes": ["read", "write"]}
 
 
 def test_basic_and_app_installation_credentials(monkeypatch) -> None:
