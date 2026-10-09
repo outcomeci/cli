@@ -1,4 +1,4 @@
-"""examples/v1/slack-to-github-pr.outcome.yaml, run end to end.
+"""tests/examples/slack-to-github-pr.outcome.yaml, run end to end.
 
 A scripted agent plays every step and discussion turn through the real
 broker; a mock Slack thread releases each human message only after the bot
@@ -23,7 +23,7 @@ from outcomeci.capability import invoke_integration
 from outcomeci.config import compile_workflow
 from outcomeci.process import ExecutionError
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples" / "v1"
+EXAMPLES = Path(__file__).resolve().parent / "examples"
 WORKFLOW = "slack-to-github-pr.outcome.yaml"
 REQUEST = {
     "channel": "C0BUILD",
