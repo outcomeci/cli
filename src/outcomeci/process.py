@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import json
 import os
 import shutil
 import subprocess
@@ -93,6 +94,50 @@ class GitHub:
         )
         if result.code:
             raise ExecutionError(f"git clone failed: {result.stderr[-1000:]}", True)
+
+
+# Where OpenCode's event stream is kept as a session file. OpenCode keeps its
+# own sessions in a database, so transcripts.py reads this copy instead.
+OPENCODE_SESSIONS = Path(".local") / "share" / "opencode" / "outcomeci"
+
+
+def opencode_output(stdout: str, workspace: Path) -> str:
+    """The final message from `opencode run --format json`, with the stream saved.
+
+    The stream is one JSON event per line. The agent's message is the text of
+    its last `text` event; token usage is in its `step-finish` parts. The
+    stream is written to a session file under $HOME, headed by the session id
+    and working directory, so the step's transcript and usage are collected
+    the same way as Codex's and Claude's.
+    """
+    events = []
+    for line in stdout.splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(event, dict):
+            events.append(event)
+    texts = [
+        part["text"]
+        for event in events
+        if isinstance(part := event.get("part"), dict)
+        and part.get("type") == "text"
+        and isinstance(part.get("text"), str)
+        and part["text"].strip()
+    ]
+    session_id = next((str(event["sessionID"]) for event in events if event.get("sessionID")), None)
+    if events and session_id:
+        home = Path(os.environ.get("HOME") or Path.home())
+        directory = home / OPENCODE_SESSIONS
+        directory.mkdir(parents=True, exist_ok=True)
+        header = {"type": "outcomeci_session", "sessionId": session_id, "cwd": str(workspace)}
+        (directory / f"{session_id}.jsonl").write_text(
+            json.dumps(header) + "\n" + stdout.rstrip("\n") + "\n", encoding="utf-8"
+        )
+    if texts:
+        return texts[-1].strip()
+    return stdout.strip()
 
 
 def _authorize_agent(
@@ -315,6 +360,8 @@ def invoke(
             f"{agent} failed with exit {result.code}: {(result.stderr or result.stdout)[-1000:]}",
             True,
         )
+    if agent == "opencode":
+        return opencode_output(result.stdout, workspace)[-4000:]
     return result.stdout.strip()[-4000:]
 
 
@@ -380,4 +427,6 @@ def invoke_conversation(
             f"{agent} conversation failed with exit {result.code}: {(result.stderr or result.stdout)[-1000:]}",
             True,
         )
+    if agent == "opencode":
+        return opencode_output(result.stdout, workspace)[-12000:]
     return result.stdout.strip()[-12000:]

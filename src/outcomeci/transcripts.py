@@ -48,6 +48,18 @@ def _usage(path: Path, provider: str) -> list[dict[str, Any]]:
                 info = item.get("info")
                 if item.get("type") == "token_count" and isinstance(info, dict):
                     usage = info.get("last_token_usage")
+                tokens = item.get("tokens")
+                if item.get("type") == "step-finish" and isinstance(tokens, dict):
+                    # OpenCode reports each model turn's tokens on its
+                    # step-finish part, with cache reads and writes nested.
+                    cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
+                    usage = {
+                        "input_tokens": tokens.get("input") or 0,
+                        "output_tokens": (tokens.get("output") or 0)
+                        + (tokens.get("reasoning") or 0),
+                        "cache_read_input_tokens": cache.get("read") or 0,
+                        "cache_creation_input_tokens": cache.get("write") or 0,
+                    }
                 if isinstance(usage, dict) and any(
                     key in usage
                     for key in ("input_tokens", "output_tokens", "inputTokens", "outputTokens")
