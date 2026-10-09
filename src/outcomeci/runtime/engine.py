@@ -838,7 +838,14 @@ def _run_step(
                 # there is no agent session to collect.
                 {"usage_records": model_usage_records}
                 if models.is_model_step(step_block)
-                else _transcripts(runner, outcome_root, step, workspace=root, since=step_started_at)
+                else _transcripts(
+                    runner,
+                    outcome_root,
+                    step,
+                    workspace=root,
+                    since=step_started_at,
+                    model=chosen_model,
+                )
             )
     except (ExecutionError, OSError, json.JSONDecodeError) as exc:
         state.update({"status": "error", "error": str(exc)})
