@@ -45,6 +45,7 @@ class ExecutionOptions:
     policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None
     # Runs a model step's turns; without one, local runs call the provider.
     model_client: Callable[..., dict[str, Any]] | None = None
+    connector_client: Callable[..., dict[str, Any]] | None = None
     decision_client: Callable[..., dict[str, Any]] | None = None
     dispatch_client: Callable[..., dict[str, Any]] | None = None
     durable_waits: bool = False
@@ -728,6 +729,7 @@ def _run_step(
                     resolver=credential_resolver,
                     event_sink=event_sink,
                     policy_reviewer=policy_reviewer,
+                    connector_client=options.connector_client,
                     grants=(scope or {}).get("grants"),
                     container_isolated=_container_isolated,
                     inputs=(scope or {}).get("inputs"),

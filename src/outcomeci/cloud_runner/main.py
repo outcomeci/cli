@@ -409,6 +409,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 event_sink=policy_event,
                 policy_reviewer=policy_review,
                 model_client=model_turn,
+                connector_client=lambda **kwargs: client.workflow_connector_call(lease, **kwargs),
                 decision_client=lambda **kwargs: client.workflow_decision(lease, **kwargs),
                 dispatch_client=lambda **kwargs: client.workflow_dispatch(lease, **kwargs),
                 durable_waits=True,

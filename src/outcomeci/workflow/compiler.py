@@ -302,6 +302,12 @@ def _http_auth(value: Any, field: str) -> dict[str, Any]:
     if len(set(kinds)) != len(kinds) or ("none" in kinds and len(kinds) > 1):
         raise ConfigError(f"{field}.accepts lists a kind twice or mixes none with others")
     result: dict[str, Any] = {"connector": connector, "accepts": accepts}
+    if auth.get("managed"):
+        if connector != "tavily" or auth.get("credential") is not None:
+            raise ConfigError(
+                f"{field}: managed auth is only supported for keyless Tavily bindings"
+            )
+        return {**result, "managed": True}
     if kinds == ["none"]:
         if auth.get("credential") is not None:
             raise ConfigError(f"{field}.credential is not used: {connector} takes no credential")

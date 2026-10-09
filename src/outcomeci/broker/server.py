@@ -55,6 +55,7 @@ class Broker:
         grants=None,
         container_isolated=False,
         inputs=None,
+        connector_client=None,
     ):
         compiled = compiled if compiled is not None else compile_workflow(config)
         self.root, self.config, self.run_id, self.step = root, config, run_id, step
@@ -87,6 +88,7 @@ class Broker:
                 compiled,
                 resolver=resolver or local_credential_resolver(root),
                 reviewed=True,
+                connector_client=connector_client,
                 downloads=attachments_path(root, run_id),
             ),
             root / ".outcomeci" / ".broker" / run_id,
@@ -141,6 +143,7 @@ def serve(
     grants=None,
     container_isolated=False,
     inputs=None,
+    connector_client=None,
 ) -> Iterator[dict[str, str]]:
     temporary = tempfile.TemporaryDirectory(prefix="oci-cap-")
     directory = Path(temporary.name)
@@ -159,6 +162,7 @@ def serve(
         grants,
         container_isolated,
         inputs,
+        connector_client,
     )
     thread = threading.Thread(target=broker.server.serve_forever, daemon=True)
     thread.start()

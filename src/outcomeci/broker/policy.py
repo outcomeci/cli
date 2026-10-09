@@ -634,6 +634,7 @@ class PolicyExecutor:
                     request,
                     step=step,
                     response_grants=[checks for _, checks in alternatives],
+                    request_id=fingerprint,
                 )
                 granted_by = result.get("audit", {}).get("grant")
                 if granted_by is not None:
