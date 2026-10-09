@@ -30,7 +30,8 @@ Commit messages follow Conventional Commits because releases are generated from 
 ## Source map
 
 `src/outcomeci/cli.py` defines the `oci` commands and dispatches to the packages below.
-Package `__init__.py` files only describe their purpose; import the module you need directly.
+Import implementations directly from their modules. The `workflow`, `runtime`,
+`broker`, `vault`, `reasoning` and `artifacts` initializers contain only package descriptions.
 
 | Package | Responsibility | Start reading here |
 | --- | --- | --- |
