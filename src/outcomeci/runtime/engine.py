@@ -24,7 +24,7 @@ from outcomeci.broker.executor import CredentialResolver, IntegrationExecutor
 from outcomeci.broker.server import invoke_integration
 from outcomeci.broker.server import serve as serve_capability
 from outcomeci.reasoning import models
-from outcomeci.runtime import checkouts
+from outcomeci.runtime import checkouts, labeler
 from outcomeci.runtime.events import event, safe_text
 from outcomeci.runtime.process import ExecutionError, invoke
 from outcomeci.security import atomic_write_json
@@ -896,7 +896,18 @@ def _run_step(
     state["ready_steps"] = _ready(compiled, state["completed_steps"])
     state["steps"] = _step_states(compiled, state)
     _write(root, state)
+    _label(root, compiled, state, options)
     return state
+
+
+def _label(root: Path, compiled: dict[str, Any], state: dict[str, Any], options) -> None:
+    """Once a run is completed, its training labeler, when declared, annotates it."""
+    if state.get("status") != "completed" or labeler.declared(compiled) is None:
+        return
+    if "labeler" in (state.get("training") or {}):
+        return  # already annotated; a settled run is not labeled again
+    labeler.label_run(root, compiled, state, options)
+    _write(root, state)
 
 
 def _new_run(
@@ -943,6 +954,7 @@ def _settle(
             state.update({"status": "completed", "ready_steps": []})
             state["steps"] = _step_states(compiled, state)
             _write(root, state)
+            _label(root, compiled, state, options)
             return False
         step = ready[0]
         step_block = v1_runtime.block(compiled, step)
