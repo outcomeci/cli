@@ -319,6 +319,40 @@ def test_runtime_channel_reference_is_not_a_private_literal(tmp_path):
     assert "C123456789" in publication._consumer_values(source)
 
 
+@pytest.mark.parametrize("type_name", ["string", "int", "bool", "enum[reader, writer]"])
+def test_output_shape_fields_are_not_consumer_literals(tmp_path, type_name):
+    source = slack_publication_source(tmp_path / "source")
+    source.write_text(
+        source.read_text()
+        + f"      returns:\n        plan:\n          users: [{type_name!r}]\n"
+        + "          repository: string\n          channel: string\n"
+    )
+    assert publication._consumer_values(source) == ["vault:private/slack"]
+
+
+def test_schema_type_word_used_as_a_real_channel_is_still_a_literal(tmp_path):
+    source = slack_publication_source(tmp_path / "source")
+    source.write_text(
+        source.read_text().replace("channel: trigger.channel", "channel: string")
+        + "      returns:\n        users: [string]\n"
+    )
+    assert publication._consumer_values(source) == ["string", "vault:private/slack"]
+
+
+def test_conversation_return_names_are_not_consumer_literals(tmp_path):
+    source = slack_publication_source(tmp_path / "source")
+    source.write_text(
+        source.read_text()
+        + "      returns: {plan: {users: [string]}}\n"
+        + "  - clarify:\n"
+        + "      converse: slack.thread(announce.calls.slack.post)\n"
+        + "      with: announce.plan\n"
+        + "      by: trigger.user\n"
+        + "      returns: [plan, status, decision]\n"
+    )
+    assert publication._consumer_values(source) == ["vault:private/slack"]
+
+
 def test_publication_preserves_runtime_behavior_and_platform_syntax(tmp_path, monkeypatch):
     source = slack_publication_source(tmp_path / "source")
     destination = tmp_path / "public"

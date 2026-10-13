@@ -206,13 +206,24 @@ def _consumer_values(source: Path) -> list[str]:
     values: set[str] = set()
     references = _runtime_references(source)
 
-    def walk(value: Any, parent: str | None = None) -> None:
+    def walk(value: Any, parent: str | None = None, path: tuple[str | int, ...] = ()) -> None:
+        # v1 step returns describe an output shape, not configured identities.
+        # In particular, `users: [string]` must not make "string" a private
+        # literal everywhere else in the workflow. Restrict this exception to
+        # the schema location; a connector argument named returns is still data.
+        if (
+            len(path) == 4
+            and path[0] == "steps"
+            and isinstance(path[1], int)
+            and path[3] == "returns"
+        ):
+            return
         if isinstance(value, dict):
             for key, child in value.items():
-                walk(child, str(key).casefold())
+                walk(child, str(key).casefold(), (*path, key))
         elif isinstance(value, list):
-            for child in value:
-                walk(child, parent)
+            for index, child in enumerate(value):
+                walk(child, parent, (*path, index))
         elif isinstance(value, str):
             candidate = value.strip()
             if (
