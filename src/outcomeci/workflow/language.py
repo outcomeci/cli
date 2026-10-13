@@ -25,6 +25,8 @@ from outcomeci.reasoning.providers import CHAT_PROVIDERS, REVIEW_PROVIDERS, pars
 from outcomeci.workflow.compiler import IDENTIFIER, RUNNERS, ConfigError, validate_lowered
 
 API_VERSION = "outcomeci.workflow/v1"
+TRAINING_API_VERSION = "outcomeci.workflow/v2"
+SUPPORTED_API_VERSIONS = {API_VERSION, TRAINING_API_VERSION}
 ENTRY_POINT_GROUP = "outcomeci.connectors"
 CONNECTOR_CONTRACT = "outcomeci.connector/v1"
 INSTRUCTIONS_DIR = Path(".outcomeci/instructions")
@@ -822,12 +824,27 @@ def _converse_step(name, step, node, block, reads, *, scope: _Scope, apis, base:
 
 def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
     """Lower a parsed v1 document to the validated shape plus per-step v1 blocks."""
-    unknown = set(document) - TOP_LEVEL
+    allowed = TOP_LEVEL | (
+        {"training"} if document.get("apiVersion") == TRAINING_API_VERSION else set()
+    )
+    unknown = set(document) - allowed
     if unknown:
         raise ConfigError(f"unknown top-level fields: {', '.join(sorted(unknown))}")
     default, fallback, profiles = _reasoning(
         document.get("reasoning"), _mapping(document.get("secrets") or {}, "secrets")
     )
+    training = None
+    if "training" in document:
+        training = _mapping(document["training"], "training")
+        if set(training) != {"labeler"}:
+            raise ConfigError("training requires labeler and supports no other fields")
+        training = {
+            "labeler": _model(
+                _mapping(training["labeler"], "training.labeler"),
+                _mapping(document.get("secrets") or {}, "secrets"),
+                "training.labeler",
+            )
+        }
     apis, connections, integrations = _apis(document)
     trigger_name, trigger = _trigger(document.get("trigger"), document.get("secrets") or {})
     if "type" in document and document["type"] != "dispatcher":
@@ -907,6 +924,7 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
             "order": order,
             "trigger": trigger_name,
             "reasoning": profiles,
+            **({"training": training} if training is not None else {}),
             "connectors": {
                 name: {"provider": value["uses"], "digest": value["digest"]}
                 for name, value in apis.items()
@@ -920,7 +938,7 @@ def load(path: Path) -> dict[str, Any]:
         document = _mapping(yaml.safe_load(path.read_text(encoding="utf-8")), "document")
     except (OSError, yaml.YAMLError) as exc:
         raise ConfigError(f"could not read {path}: {exc}") from exc
-    if document.get("apiVersion") != API_VERSION:
+    if document.get("apiVersion") not in SUPPORTED_API_VERSIONS:
         raise ConfigError(f"apiVersion must be {API_VERSION}")
     stem = path.name.split(".", 1)[0]
     lowered = lower(document, path.parent, stem)
@@ -932,4 +950,6 @@ def load(path: Path) -> dict[str, Any]:
     graph["source"] = document
     graph["connectors"] = extension["connectors"]
     graph["reasoning"] = extension["reasoning"]
+    if "training" in extension:
+        graph["training"] = extension["training"]
     return root

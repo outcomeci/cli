@@ -785,9 +785,11 @@ def load(path: Path) -> dict[str, Any]:
     except (OSError, yaml.YAMLError) as exc:
         raise ConfigError(f"could not read {path}: {exc}") from exc
     api_version = document.get("apiVersion")
-    if api_version != API_VERSION:
-        raise ConfigError(f"unsupported apiVersion {api_version!r}; use {API_VERSION}")
+    from outcomeci.workflow.language import SUPPORTED_API_VERSIONS
     from outcomeci.workflow.language import load as load_v1
+
+    if api_version not in SUPPORTED_API_VERSIONS:
+        raise ConfigError(f"unsupported apiVersion {api_version!r}; use {API_VERSION}")
 
     return load_v1(path)
 
@@ -881,6 +883,7 @@ def _compile(document: dict[str, Any], root: Path) -> dict[str, Any]:
         **({"source": graph["source"]} if "source" in graph else {}),
         **({"connectors": graph["connectors"]} if "connectors" in graph else {}),
         **({"reasoning": graph["reasoning"]} if "reasoning" in graph else {}),
+        **({"training": graph["training"]} if "training" in graph else {}),
         "workflow": normalized,
         "graph": {"levels": graph["levels"]},
         "instructions": resolved,
@@ -892,7 +895,7 @@ def _compile(document: dict[str, Any], root: Path) -> dict[str, Any]:
     ).hexdigest()
     compiled = {
         "schema_version": "outcomeci.workflow/v1",
-        "api_version": document["apiVersion"],
+        "api_version": graph.get("source", document)["apiVersion"],
         "engine_version": "2",
         "engine_package_version": __version__,
         "workflow_revision": revision,
