@@ -814,7 +814,8 @@ def _default_trigger(compiled: dict[str, Any]) -> str:
 
 
 def _vault_references(compiled: dict[str, Any]) -> list[str]:
-    """The vault: references a run's API calls resolve."""
+    """The vault: references a run resolves: its API calls' credentials, and
+    the keys its model profiles and training labeler name."""
     spec = compiled["workflow"]["spec"]
     found: set[str] = set()
 
@@ -830,6 +831,8 @@ def _vault_references(compiled: dict[str, Any]) -> list[str]:
 
     walk(spec.get("connections") or [])
     walk(spec.get("integrations") or {})
+    walk(compiled.get("reasoning") or {})
+    walk(compiled.get("training") or {})
     return sorted(found)
 
 

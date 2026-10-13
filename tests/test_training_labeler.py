@@ -128,3 +128,30 @@ def test_the_local_client_resolves_the_labeler_profile(tmp_path):
 @pytest.fixture
 def model_steps_sentry_workflow(tmp_path, monkeypatch):
     return model_steps.sentry_workflow.__wrapped__(tmp_path, monkeypatch)
+
+
+def test_a_local_run_leases_the_keys_its_model_profiles_and_labeler_name(tmp_path):
+    from outcomeci.runtime import launcher
+    from outcomeci.workflow.compiler import compile_workflow
+
+    (tmp_path / "outcome.yml").write_text(
+        yaml.safe_dump(
+            {
+                "apiVersion": "outcomeci.workflow/v2",
+                "name": "smoke",
+                "trigger": "manual",
+                "secrets": {"anthropic": "vault:models/anthropic", "openai": "vault:models/openai"},
+                "reasoning": {
+                    "light": {"model": "anthropic/claude-haiku-4-5", "key": "secrets.anthropic"}
+                },
+                "training": {"labeler": {"model": "openai/gpt-4.1-mini", "key": "secrets.openai"}},
+                "steps": [{"work": {"reason": "Do it.", "using": "light"}}],
+            },
+            sort_keys=False,
+        )
+    )
+    compiled = compile_workflow(tmp_path / "outcome.yml")
+    assert launcher._vault_references(compiled) == [
+        "vault:models/anthropic",
+        "vault:models/openai",
+    ]
