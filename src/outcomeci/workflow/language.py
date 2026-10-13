@@ -838,13 +838,22 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
         training = _mapping(document["training"], "training")
         if set(training) != {"labeler"}:
             raise ConfigError("training requires labeler and supports no other fields")
+        labeler = dict(_mapping(training["labeler"], "training.labeler"))
+        routed = "review_below" in labeler
+        review_below = labeler.pop("review_below", None)
         training = {
             "labeler": _model(
-                _mapping(training["labeler"], "training.labeler"),
-                _mapping(document.get("secrets") or {}, "secrets"),
-                "training.labeler",
+                labeler, _mapping(document.get("secrets") or {}, "secrets"), "training.labeler"
             )
         }
+        if routed:
+            if (
+                isinstance(review_below, bool)
+                or not isinstance(review_below, int | float)
+                or not 0 <= review_below <= 1
+            ):
+                raise ConfigError("training.labeler.review_below must be a number from 0 to 1")
+            training["labeler"]["review_below"] = float(review_below)
     apis, connections, integrations = _apis(document)
     trigger_name, trigger = _trigger(document.get("trigger"), document.get("secrets") or {})
     if "type" in document and document["type"] != "dispatcher":
