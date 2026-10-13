@@ -39,6 +39,15 @@ LABELS_SCHEMA: dict[str, Any] = {
             "items": {"type": "string"},
             "description": "Short typed labels describing the run.",
         },
+        "confidence": {
+            "type": "number",
+            "minimum": 0,
+            "maximum": 1,
+            "description": (
+                "How sure you are of the outcome and labels, from 0 to 1. Low when the "
+                "record is thin, ambiguous, or shows results you cannot verify."
+            ),
+        },
         "explanation": {"type": "string"},
         "evidence": {
             "type": "array",
@@ -53,7 +62,7 @@ LABELS_SCHEMA: dict[str, Any] = {
             },
         },
     },
-    "required": ["outcome", "labels", "explanation", "evidence"],
+    "required": ["outcome", "confidence", "labels", "explanation", "evidence"],
     "additionalProperties": False,
 }
 
@@ -161,6 +170,7 @@ def label_run(root: Path, compiled: dict[str, Any], state: dict[str, Any], optio
                 "status": "completed",
                 "path": ANNOTATION,
                 "outcome": annotation["outcome"],
+                "confidence": annotation["confidence"],
                 "usage_records": transcript["usage_records"],
             }
         )

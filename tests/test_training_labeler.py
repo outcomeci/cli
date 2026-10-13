@@ -14,6 +14,7 @@ from outcomeci.reasoning import models
 
 LABELS = {
     "outcome": "success",
+    "confidence": 0.85,
     "labels": ["fix_opened", "announced"],
     "explanation": "The fix step opened a PR and announce posted it.",
     "evidence": [{"step": "fix", "description": "PR opened"}],
@@ -67,6 +68,7 @@ def test_a_declared_labeler_annotates_the_completed_run(model_steps_sentry_workf
     assert result["status"] == "completed"
     assert result["training"]["labeler"]["status"] == "completed"
     assert result["training"]["labeler"]["outcome"] == "success"
+    assert result["training"]["labeler"]["confidence"] == 0.85
     # The labeler ran last, with its reserved profile, and saw every step's result.
     assert model.calls[-1]["profile"] == models.LABELER_PROFILE
     assert [call["step"] for call in model.calls][-1] == models.LABELER_PROFILE
@@ -79,6 +81,7 @@ def test_a_declared_labeler_annotates_the_completed_run(model_steps_sentry_workf
     run_dir = workflow / ".outcomeci/outcomes" / result["run_id"]
     annotation = json.loads((run_dir / "training/annotation.json").read_text())
     assert annotation["outcome"] == "success" and annotation["labels"] == LABELS["labels"]
+    assert annotation["confidence"] == 0.85
     assert annotation["labeler"] == {
         "model": "openai/gpt-4.1-mini",
         "profile": models.LABELER_PROFILE,
@@ -155,3 +158,26 @@ def test_a_local_run_leases_the_keys_its_model_profiles_and_labeler_name(tmp_pat
         "vault:models/anthropic",
         "vault:models/openai",
     ]
+
+
+def test_a_result_without_a_confidence_goes_back_to_the_labeler(
+    model_steps_sentry_workflow, monkeypatch
+):
+    workflow = model_steps_sentry_workflow
+    _declare_labeler(workflow / sentry.WORKFLOW)
+    without = {key: value for key, value in LABELS.items() if key != "confidence"}
+    result, model = _run(
+        workflow,
+        {
+            models.LABELER_PROFILE: [
+                {"calls": [model_steps._call("return_result", without, 1)]},
+                {"calls": [model_steps._call("return_result", {**LABELS, "confidence": 0.3}, 2)]},
+            ]
+        },
+        monkeypatch,
+    )
+    assert result["training"]["labeler"]["status"] == "completed"
+    assert result["training"]["labeler"]["confidence"] == 0.3
+    # The first result was refused for its missing confidence, not accepted.
+    refused = json.loads(model.calls[-1]["messages"][-1]["content"])
+    assert "confidence" in refused["error"]
