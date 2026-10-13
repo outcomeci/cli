@@ -93,6 +93,7 @@ def record(compiled: dict[str, Any], state: dict[str, Any], outcome_root: Path) 
     skip_reasons = state.get("skip_reasons") or {}
     return {
         "workflow": compiled.get("workflow", {}).get("metadata", {}).get("name"),
+        **({"objective": compiled["objective"]} if compiled.get("objective") else {}),
         "run_id": state.get("run_id"),
         "status": state.get("status"),
         "summary": state.get("summary"),

@@ -81,3 +81,21 @@ def test_review_below_must_be_a_number_from_zero_to_one(tmp_path, value):
         compile_document(
             tmp_path, training={"labeler": {"model": "openai/test", "review_below": value}}
         )
+
+
+def test_a_workflow_objective_compiles_and_affects_revision(tmp_path):
+    result = compile_document(tmp_path, objective="  Reduce recurring production errors. ")
+    assert result["objective"] == "Reduce recurring production errors."
+    assert "objective" not in compile_document(tmp_path)
+    assert result["workflow_revision"] != compile_document(tmp_path)["workflow_revision"]
+
+
+@pytest.mark.parametrize("value", ["", "   ", None, 3, ["x"]])
+def test_an_objective_must_be_a_non_empty_string(tmp_path, value):
+    with pytest.raises(ConfigError, match="objective"):
+        compile_document(tmp_path, objective=value)
+
+
+def test_a_v1_workflow_has_no_objective(tmp_path):
+    with pytest.raises(ConfigError, match="objective"):
+        compile_document(tmp_path, apiVersion="outcomeci.workflow/v1", objective="Fix it.")

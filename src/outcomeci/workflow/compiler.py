@@ -884,6 +884,7 @@ def _compile(document: dict[str, Any], root: Path) -> dict[str, Any]:
         **({"connectors": graph["connectors"]} if "connectors" in graph else {}),
         **({"reasoning": graph["reasoning"]} if "reasoning" in graph else {}),
         **({"training": graph["training"]} if "training" in graph else {}),
+        **({"objective": graph["objective"]} if "objective" in graph else {}),
         "workflow": normalized,
         "graph": {"levels": graph["levels"]},
         "instructions": resolved,

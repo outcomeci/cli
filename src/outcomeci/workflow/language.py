@@ -825,7 +825,7 @@ def _converse_step(name, step, node, block, reads, *, scope: _Scope, apis, base:
 def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
     """Lower a parsed v1 document to the validated shape plus per-step v1 blocks."""
     allowed = TOP_LEVEL | (
-        {"training"} if document.get("apiVersion") == TRAINING_API_VERSION else set()
+        {"training", "objective"} if document.get("apiVersion") == TRAINING_API_VERSION else set()
     )
     unknown = set(document) - allowed
     if unknown:
@@ -833,6 +833,12 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
     default, fallback, profiles = _reasoning(
         document.get("reasoning"), _mapping(document.get("secrets") or {}, "secrets")
     )
+    objective = None
+    if "objective" in document:
+        objective = document["objective"]
+        if not isinstance(objective, str) or not objective.strip():
+            raise ConfigError("objective must be a non-empty string")
+        objective = objective.strip()
     training = None
     if "training" in document:
         training = _mapping(document["training"], "training")
@@ -934,6 +940,7 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
             "trigger": trigger_name,
             "reasoning": profiles,
             **({"training": training} if training is not None else {}),
+            **({"objective": objective} if objective is not None else {}),
             "connectors": {
                 name: {"provider": value["uses"], "digest": value["digest"]}
                 for name, value in apis.items()
@@ -961,4 +968,6 @@ def load(path: Path) -> dict[str, Any]:
     graph["reasoning"] = extension["reasoning"]
     if "training" in extension:
         graph["training"] = extension["training"]
+    if "objective" in extension:
+        graph["objective"] = extension["objective"]
     return root
