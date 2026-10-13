@@ -31,8 +31,61 @@ def _sessions(agent: str) -> list[Path]:
     )
 
 
-def _usage(path: Path, provider: str) -> list[dict[str, Any]]:
-    records = []
+# Version 2 records name their model and count input the same way for every
+# agent: input_tokens excludes cached tokens, which are cache_read_tokens and
+# cache_write_tokens.
+USAGE_SCHEMA_VERSION = 2
+
+
+def _int(value: Any) -> int:
+    try:
+        return max(int(value or 0), 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _record(
+    provider: str,
+    model: str | None,
+    line_number: int,
+    occurred_at: Any,
+    *,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int,
+    cache_write_tokens: int,
+) -> dict[str, Any]:
+    return {
+        "provider": provider,
+        "model": model,
+        "source_line": line_number,
+        "occurred_at": occurred_at,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_write_tokens": cache_write_tokens,
+    }
+
+
+def _usage(path: Path, provider: str, model: str | None = None) -> list[dict[str, Any]]:
+    """One usage record per model turn in an agent's session file.
+
+    Claude Code writes a line per content block of a response, each carrying
+    the response's usage, so a response counts once, by its message id. Codex
+    reports each turn's usage in a token_count event that it sometimes repeats;
+    a repeat leaves its running total unchanged and is skipped. Codex counts
+    cached tokens inside input_tokens, so they are taken out. OpenCode reports
+    each turn on a step-finish part. `model` is the step's configured model,
+    used when the session does not name one.
+    """
+    records: list[dict[str, Any]] = []
+    # Newer Codex writes one token_usage_record per model response; when a
+    # session has them they replace its token_count events.
+    responses: dict[str, dict[str, Any]] = {}
+    turn_models: dict[str, str] = {}
+    claude: dict[str, int] = {}
+    codex_model: str | None = None
+    codex_total: Any = None
     for line_number, line in enumerate(
         path.read_text(encoding="utf-8", errors="replace").splitlines(), 1
     ):
@@ -40,57 +93,101 @@ def _usage(path: Path, provider: str) -> list[dict[str, Any]]:
             value = json.loads(line)
         except json.JSONDecodeError:
             continue
-        stack = [value]
-        while stack:
-            item = stack.pop()
-            if isinstance(item, dict):
-                usage = item.get("usage")
-                info = item.get("info")
-                if item.get("type") == "token_count" and isinstance(info, dict):
-                    usage = info.get("last_token_usage")
-                tokens = item.get("tokens")
-                if item.get("type") == "step-finish" and isinstance(tokens, dict):
-                    # OpenCode reports each model turn's tokens on its
-                    # step-finish part, with cache reads and writes nested.
-                    cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
-                    usage = {
-                        "input_tokens": tokens.get("input") or 0,
-                        "output_tokens": (tokens.get("output") or 0)
-                        + (tokens.get("reasoning") or 0),
-                        "cache_read_input_tokens": cache.get("read") or 0,
-                        "cache_creation_input_tokens": cache.get("write") or 0,
-                    }
-                if isinstance(usage, dict) and any(
-                    key in usage
-                    for key in ("input_tokens", "output_tokens", "inputTokens", "outputTokens")
-                ):
-                    records.append(
-                        {
-                            "provider": provider,
-                            "source_line": line_number,
-                            "occurred_at": item.get("timestamp") or value.get("timestamp"),
-                            "input_tokens": int(
-                                usage.get("input_tokens") or usage.get("inputTokens") or 0
-                            ),
-                            "output_tokens": int(
-                                usage.get("output_tokens") or usage.get("outputTokens") or 0
-                            ),
-                            "cache_read_tokens": int(
-                                usage.get("cache_read_input_tokens")
-                                or usage.get("cached_input_tokens")
-                                or 0
-                            ),
-                            "cache_write_tokens": int(
-                                usage.get("cache_creation_input_tokens")
-                                or usage.get("cache_write_input_tokens")
-                                or 0
-                            ),
-                        }
-                    )
-                stack.extend(item.values())
-            elif isinstance(item, list):
-                stack.extend(item)
-    return list({json.dumps(item, sort_keys=True): item for item in records}.values())
+        if not isinstance(value, dict):
+            continue
+        payload = value.get("payload") if isinstance(value.get("payload"), dict) else {}
+        if value.get("type") == "turn_context" and payload.get("model"):
+            codex_model = str(payload["model"])
+            if payload.get("turn_id"):
+                turn_models[str(payload["turn_id"])] = codex_model
+            continue
+        if value.get("type") == "token_usage_record":
+            usage = payload.get("usage")
+            key = payload.get("response_id") or f"line-{line_number}"
+            if isinstance(usage, dict) and key not in responses:
+                cached = _int(usage.get("cached_input_tokens"))
+                responses[key] = _record(
+                    provider,
+                    turn_models.get(str(payload.get("turn_id"))) or codex_model or model,
+                    line_number,
+                    value.get("timestamp"),
+                    input_tokens=max(_int(usage.get("input_tokens")) - cached, 0),
+                    output_tokens=_int(usage.get("output_tokens")),
+                    cache_read_tokens=cached,
+                    cache_write_tokens=_int(usage.get("cache_write_input_tokens")),
+                )
+            continue
+        if payload.get("type") == "token_count":
+            info = payload.get("info") if isinstance(payload.get("info"), dict) else {}
+            usage = info.get("last_token_usage")
+            total = info.get("total_token_usage")
+            if not isinstance(usage, dict) or (total is not None and total == codex_total):
+                continue
+            codex_total = total
+            cached = _int(usage.get("cached_input_tokens"))
+            records.append(
+                {
+                    **_record(
+                        provider,
+                        codex_model or model,
+                        line_number,
+                        value.get("timestamp"),
+                        input_tokens=max(_int(usage.get("input_tokens")) - cached, 0),
+                        output_tokens=_int(usage.get("output_tokens")),
+                        cache_read_tokens=cached,
+                        cache_write_tokens=_int(usage.get("cache_write_input_tokens")),
+                    ),
+                    "_codex_token_count": True,
+                }
+            )
+            continue
+        message = value.get("message") if isinstance(value.get("message"), dict) else {}
+        usage = message.get("usage")
+        if isinstance(usage, dict) and ("input_tokens" in usage or "output_tokens" in usage):
+            record = _record(
+                provider,
+                message.get("model") or model,
+                line_number,
+                value.get("timestamp"),
+                input_tokens=_int(usage.get("input_tokens")),
+                output_tokens=_int(usage.get("output_tokens")),
+                cache_read_tokens=_int(usage.get("cache_read_input_tokens")),
+                cache_write_tokens=_int(usage.get("cache_creation_input_tokens")),
+            )
+            key = message.get("id")
+            if key and key in claude:
+                # A later line of the same response: its usage is the latest.
+                records[claude[key]] = {
+                    **record,
+                    "source_line": records[claude[key]]["source_line"],
+                }
+            else:
+                if key:
+                    claude[key] = len(records)
+                records.append(record)
+            continue
+        part = value.get("part") if isinstance(value.get("part"), dict) else {}
+        tokens = part.get("tokens")
+        if part.get("type") == "step-finish" and isinstance(tokens, dict):
+            cache = tokens.get("cache") if isinstance(tokens.get("cache"), dict) else {}
+            records.append(
+                _record(
+                    provider,
+                    model,
+                    line_number,
+                    value.get("timestamp"),
+                    input_tokens=_int(tokens.get("input")),
+                    output_tokens=_int(tokens.get("output")) + _int(tokens.get("reasoning")),
+                    cache_read_tokens=_int(cache.get("read")),
+                    cache_write_tokens=_int(cache.get("write")),
+                )
+            )
+    if responses:
+        records = [record for record in records if not record.get("_codex_token_count")]
+        records.extend(responses.values())
+    for record in records:
+        record.pop("_codex_token_count", None)
+    return records
 
 
 def _session_details(path: Path, agent: str) -> tuple[str | None, str | None]:
@@ -152,6 +249,7 @@ def _transcripts(
     byte_offset: int = 0,
     workspace: Path | None = None,
     since: str | None = None,
+    model: str | None = None,
 ) -> dict[str, Any]:
     target = root / "transcripts" / step / agent
     target.mkdir(parents=True, exist_ok=True)
@@ -173,7 +271,9 @@ def _transcripts(
             shutil.copyfileobj(input_file, output_file)
         total += size
         relative = str(destination.relative_to(root))
-        records = [{**item, "transcript_path": relative} for item in _usage(destination, agent)]
+        records = [
+            {**item, "transcript_path": relative} for item in _usage(destination, agent, model)
+        ]
         usage.extend(records)
         files.append(
             {
@@ -187,7 +287,12 @@ def _transcripts(
     usage_path = root / "transcripts" / step / "usage.json"
     usage_path.write_text(
         json.dumps(
-            {"schema_version": 1, "provider": agent, "step": step, "records": usage},
+            {
+                "schema_version": USAGE_SCHEMA_VERSION,
+                "provider": agent,
+                "step": step,
+                "records": usage,
+            },
             indent=2,
             sort_keys=True,
         )
