@@ -50,6 +50,10 @@ TRANSIENT_ERRORS = (
     "APIConnectionError",
 )
 RESULT = "return_result"
+# The reserved profile name the run labeler calls with: `training.labeler`
+# in the workflow, resolved from the compiled `training` block rather than
+# `reasoning`, so no step can name it.
+LABELER_PROFILE = "training.labeler"
 # The longest tool result a turn carries back to the model, in characters. One
 # page of a search, such as 30 X posts with their authors, is about 32,000.
 TOOL_RESULT_LIMIT = 120_000
@@ -67,6 +71,14 @@ def is_model_step(block: Mapping[str, Any]) -> bool:
     return bool(block.get("reasoning"))
 
 
+def profile_spec(compiled: Mapping[str, Any], profile: str) -> Mapping[str, Any] | None:
+    """The model spec a profile name resolves to: a reasoning profile, or the
+    training labeler for its reserved name."""
+    if profile == LABELER_PROFILE:
+        return (compiled.get("training") or {}).get("labeler")
+    return compiled.get("reasoning", {}).get(profile)
+
+
 def local_client(
     compiled: Mapping[str, Any], resolver: CredentialResolver | None = None
 ) -> ModelClient:
@@ -74,7 +86,7 @@ def local_client(
     provider's environment variable."""
 
     def call(*, step: str, profile: str, messages: list[dict], tools: list[dict]) -> dict[str, Any]:
-        spec = compiled.get("reasoning", {}).get(profile)
+        spec = profile_spec(compiled, profile)
         if not spec or "model" not in spec:
             raise ExecutionError(f"step {step}: reasoning profile {profile} is not a model")
         # The profile's model first; on a provider that is rate limited, down,
