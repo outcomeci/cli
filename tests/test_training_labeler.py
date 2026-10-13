@@ -248,3 +248,15 @@ def test_without_review_below_nothing_is_routed(model_steps_sentry_workflow, mon
     result, _model = _run(workflow, _labeled(0.1), monkeypatch, events)
     assert "review" not in result["training"]["labeler"]
     assert not [item for item in events if item["event_type"].startswith("training.")]
+
+
+def test_the_labeler_sees_the_workflow_objective(model_steps_sentry_workflow, monkeypatch):
+    workflow = model_steps_sentry_workflow
+    _declare_labeler(workflow / sentry.WORKFLOW)
+    document = yaml.safe_load((workflow / sentry.WORKFLOW).read_text())
+    document["objective"] = "Fix the reported error for good."
+    (workflow / sentry.WORKFLOW).write_text(yaml.safe_dump(document, sort_keys=False))
+    _result, model = _run(workflow, _labeled(0.8), monkeypatch)
+    record = json.loads(model.calls[-1]["messages"][1]["content"].split("\n")[-1])
+    assert record["objective"] == "Fix the reported error for good."
+    assert "objective" in model.calls[-1]["messages"][1]["content"]
