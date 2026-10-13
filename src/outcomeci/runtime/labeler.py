@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from outcomeci.reasoning import models
-from outcomeci.runtime.events import safe_text
+from outcomeci.runtime.events import event, safe_text
 from outcomeci.security import atomic_write_json
 from outcomeci.workflow import templates
 
@@ -112,6 +112,17 @@ def record(compiled: dict[str, Any], state: dict[str, Any], outcome_root: Path) 
     }
 
 
+def _review(labeler: dict[str, Any], result: dict[str, Any]) -> dict[str, Any] | None:
+    """Whether the annotation needs a person: a declared `review_below` the
+    labeler's confidence falls under. None when the workflow declares none."""
+    threshold = labeler.get("review_below")
+    if not isinstance(threshold, int | float):
+        return None
+    confidence = result.get("confidence")
+    required = not isinstance(confidence, int | float) or confidence < threshold
+    return {"required": required, "threshold": threshold, "confidence": confidence}
+
+
 def label_run(root: Path, compiled: dict[str, Any], state: dict[str, Any], options) -> None:
     """Annotate a completed run when its workflow declares a labeler.
 
@@ -151,6 +162,7 @@ def label_run(root: Path, compiled: dict[str, Any], state: dict[str, Any], optio
             transcript = models.write_transcript(
                 outcome_root, models.LABELER_PROFILE, provider, turns
             )
+        review = _review(labeler, result or {})
         annotation = {
             "schema_version": 1,
             "run_id": state["run_id"],
@@ -163,6 +175,7 @@ def label_run(root: Path, compiled: dict[str, Any], state: dict[str, Any], optio
             "created_at": datetime.now(UTC).isoformat(),
             "transcript": transcript["files"][0]["path"] if transcript["files"] else None,
             **(result or {}),
+            **({"review": review} if review else {}),
         }
         atomic_write_json(outcome_root / ANNOTATION, annotation)
         entry.update(
@@ -172,8 +185,23 @@ def label_run(root: Path, compiled: dict[str, Any], state: dict[str, Any], optio
                 "outcome": annotation["outcome"],
                 "confidence": annotation["confidence"],
                 "usage_records": transcript["usage_records"],
+                **({"review": review} if review else {}),
             }
         )
+        if review and review["required"] and options.event_sink:
+            options.event_sink(
+                event(
+                    "training.review_required",
+                    models.LABELER_PROFILE,
+                    "training.labeler",
+                    "The labeler's confidence is below the review threshold",
+                    reason=(
+                        f"confidence {review['confidence']} is below "
+                        f"review_below {review['threshold']}"
+                    ),
+                    level="warning",
+                )
+            )
     except Exception as exc:  # noqa: BLE001 - labeling never fails the run
         entry.update({"status": "failed", "error": safe_text(str(exc), 500)})
     entry.update({"started_at": started, "finished_at": datetime.now(UTC).isoformat()})

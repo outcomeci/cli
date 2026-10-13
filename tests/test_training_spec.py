@@ -63,3 +63,21 @@ def test_training_is_opt_in(tmp_path):
             apiVersion="outcomeci.workflow/v1",
             training={"labeler": {"model": "openai/test"}},
         )
+
+
+def test_review_below_compiles_as_a_routing_threshold(tmp_path):
+    result = compile_document(
+        tmp_path, training={"labeler": {"model": "openai/test", "review_below": 0.6}}
+    )
+    assert result["training"]["labeler"] == {"model": "openai/test", "review_below": 0.6}
+    plain = compile_document(tmp_path, training={"labeler": {"model": "openai/test"}})
+    assert "review_below" not in plain["training"]["labeler"]
+    assert plain["workflow_revision"] != result["workflow_revision"]
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.5, "0.5", True, None, [0.5]])
+def test_review_below_must_be_a_number_from_zero_to_one(tmp_path, value):
+    with pytest.raises(ConfigError, match="review_below"):
+        compile_document(
+            tmp_path, training={"labeler": {"model": "openai/test", "review_below": value}}
+        )

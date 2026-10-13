@@ -21,17 +21,21 @@ LABELS = {
 }
 
 
-def _declare_labeler(path: Path, key: bool = True) -> None:
+def _declare_labeler(path: Path, key: bool = True, **extra) -> None:
     document = yaml.safe_load(path.read_text())
     document["apiVersion"] = "outcomeci.workflow/v2"
     document["secrets"]["openai"] = "vault:openai/api-key"
     document["training"] = {
-        "labeler": {"model": "openai/gpt-4.1-mini", **({"key": "secrets.openai"} if key else {})}
+        "labeler": {
+            "model": "openai/gpt-4.1-mini",
+            **({"key": "secrets.openai"} if key else {}),
+            **extra,
+        }
     }
     path.write_text(yaml.safe_dump(document, sort_keys=False))
 
 
-def _run(workflow: Path, script: dict, monkeypatch):
+def _run(workflow: Path, script: dict, monkeypatch, events: list | None = None):
     model_steps._profiles(workflow / sentry.WORKFLOW, {"triage": "light", "announce": "light"})
     services = sentry.Services()
     sentry._serve(monkeypatch, services)
@@ -45,7 +49,34 @@ def _run(workflow: Path, script: dict, monkeypatch):
             **script,
         }
     )
-    result = model_steps._sentry_run(workflow, model, sentry.Agent(), monkeypatch)
+    if events is None:
+        result = model_steps._sentry_run(workflow, model, sentry.Agent(), monkeypatch)
+        return result, model
+    from outcomeci.runtime import container as run_container
+    from outcomeci.runtime import engine as local
+    from outcomeci.workflow.compiler import compile_workflow
+
+    monkeypatch.setattr(local, "invoke", sentry.Agent())
+    config = workflow / sentry.WORKFLOW
+    options = local.ExecutionOptions(
+        credential_resolver=lambda reference: "xoxb-or-ghp-token",
+        policy_reviewer=lambda proposal: {
+            "decision": "allow",
+            "proposal_sha256": proposal["proposal_sha256"],
+            "reason": "ok",
+        },
+        model_client=model,
+        event_sink=events.append,
+    )
+    result = run_container.execute(
+        workflow,
+        config,
+        compile_workflow(config),
+        "webhook",
+        sentry._payload(),
+        options,
+        auto_continue=True,
+    )
     return result, model
 
 
@@ -181,3 +212,39 @@ def test_a_result_without_a_confidence_goes_back_to_the_labeler(
     # The first result was refused for its missing confidence, not accepted.
     refused = json.loads(model.calls[-1]["messages"][-1]["content"])
     assert "confidence" in refused["error"]
+
+
+def _labeled(confidence: float) -> dict:
+    return {models.LABELER_PROFILE: [{"calls": [_result({**LABELS, "confidence": confidence})]}]}
+
+
+def _result(labels: dict) -> dict:
+    return model_steps._call("return_result", labels)
+
+
+@pytest.mark.parametrize(("confidence", "required"), [(0.3, True), (0.6, False), (0.9, False)])
+def test_review_below_routes_a_low_confidence_annotation_to_a_person(
+    model_steps_sentry_workflow, monkeypatch, confidence, required
+):
+    workflow = model_steps_sentry_workflow
+    _declare_labeler(workflow / sentry.WORKFLOW, review_below=0.6)
+    events: list = []
+    result, _model = _run(workflow, _labeled(confidence), monkeypatch, events)
+
+    review = {"required": required, "threshold": 0.6, "confidence": confidence}
+    assert result["training"]["labeler"]["review"] == review
+    run_dir = workflow / ".outcomeci/outcomes" / result["run_id"]
+    assert json.loads((run_dir / "training/annotation.json").read_text())["review"] == review
+    routed = [item for item in events if item["event_type"] == "training.review_required"]
+    assert len(routed) == (1 if required else 0)
+    if required:
+        assert routed[0]["level"] == "warning" and "0.6" in routed[0]["reason"]
+
+
+def test_without_review_below_nothing_is_routed(model_steps_sentry_workflow, monkeypatch):
+    workflow = model_steps_sentry_workflow
+    _declare_labeler(workflow / sentry.WORKFLOW)
+    events: list = []
+    result, _model = _run(workflow, _labeled(0.1), monkeypatch, events)
+    assert "review" not in result["training"]["labeler"]
+    assert not [item for item in events if item["event_type"].startswith("training.")]
