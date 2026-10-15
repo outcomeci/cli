@@ -209,7 +209,11 @@ def parser() -> argparse.ArgumentParser:
         "--api-url", default=os.environ.get("OUTCOMECI_API_URL", "https://api.outcomeci.com")
     )
     auth_login.add_argument("--no-open", action="store_true")
-    auth_login.add_argument(
+    auth_login_mode = auth_login.add_mutually_exclusive_group()
+    auth_login_mode.add_argument(
+        "--workspace", help="Workspace ID to authorize with its SSO policy"
+    )
+    auth_login_mode.add_argument(
         "--key-stdin",
         action="store_true",
         help="Read a workspace API key from stdin instead of using device login",
@@ -472,7 +476,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                     _print_json(cloud_login_with_key(args.api_url, key))
                 else:
-                    _print_json(cloud_login(args.api_url, open_browser=not args.no_open))
+                    _print_json(
+                        cloud_login(
+                            args.api_url,
+                            open_browser=not args.no_open,
+                            workspace_id=args.workspace,
+                        )
+                    )
             elif args.auth_command == "status":
                 _print_json(cloud_auth_status())
             else:

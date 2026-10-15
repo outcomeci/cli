@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
+import shlex
 import stat
 import time
 import webbrowser
@@ -97,8 +99,15 @@ def load_credentials() -> dict[str, Any]:
     return value
 
 
-def login(api_url: str, *, open_browser: bool = True) -> dict[str, Any]:
-    status, attempt = _request(api_url, "/auth/device", method="POST", body={})
+def login(
+    api_url: str, *, open_browser: bool = True, workspace_id: str | None = None
+) -> dict[str, Any]:
+    body: dict[str, str] = {}
+    if workspace_id is not None:
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", workspace_id):
+            raise ExecutionError("Invalid workspace ID")
+        body["workspace_id"] = workspace_id
+    status, attempt = _request(api_url, "/auth/device", method="POST", body=body)
     if status != 201:
         raise ExecutionError(str(attempt.get("detail") or "could not start OutcomeCI login"))
     print(f"Open {attempt['verification_uri_complete']}")
@@ -119,6 +128,7 @@ def login(api_url: str, *, open_browser: bool = True) -> dict[str, Any]:
             _write_credentials(credentials)
             return {"authenticated": True, "api_url": credentials["api_url"]}
         if status != 428:
+            _check_workspace_sso(status, tokens, api_url)
             raise ExecutionError(str(tokens.get("detail") or "OutcomeCI login failed"))
         time.sleep(interval)
     raise ExecutionError("OutcomeCI login expired")
@@ -207,7 +217,34 @@ def _authorized_request(
             body=body,
             token=credentials["access_token"],
         )
+    _check_workspace_sso(status, value, credentials["api_url"])
     return status, value
+
+
+def _check_workspace_sso(status: int, value: Any, api_url: str) -> None:
+    if status != 403 or not isinstance(value, dict):
+        return
+    detail = value.get("detail")
+    if not isinstance(detail, dict):
+        return
+    if detail.get("code") == "workspace_sso_automation_required":
+        raise CloudRequestError(
+            "This workspace requires explicit authorization for automation credentials. "
+            "Ask its owner to authorize or replace this workspace key in Workspace security.",
+            status,
+        )
+    if detail.get("code") != "workspace_sso_required":
+        return
+    workspace_id = detail.get("workspace_id")
+    if not isinstance(workspace_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", workspace_id):
+        raise CloudRequestError("This workspace requires Microsoft SSO. Sign in again.", status)
+    command = f"oci auth login --workspace {shlex.quote(workspace_id)}"
+    if api_url.rstrip("/") != "https://api.outcomeci.com":
+        command += f" --api-url {shlex.quote(api_url)}"
+    raise CloudRequestError(
+        f"This workspace requires Microsoft SSO. Run `{command}`, then retry your command.",
+        status,
+    )
 
 
 def get_workflow(workspace_id: str, workflow_id: str) -> dict[str, Any]:

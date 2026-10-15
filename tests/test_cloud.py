@@ -310,3 +310,121 @@ def test_cloud_errors_say_whether_they_are_worth_retrying(monkeypatch) -> None:
         raise AssertionError("expected CloudRequestError")
     except cloud.CloudRequestError as exc:
         assert exc.status is None and exc.transient
+
+
+def test_workspace_device_login_binds_target_and_preserves_opaque_tokens(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUTCOMECI_CONFIG_HOME", str(tmp_path))
+    calls = []
+
+    def request(api_url, path, **kwargs):
+        calls.append((path, kwargs))
+        if path == "/auth/device":
+            return 201, {
+                "device_code": "device-secret",
+                "user_code": "ABCD-EFGH",
+                "verification_uri_complete": "https://staging.outcomeci.com/auth/cli?code=ABCD-EFGH",
+                "expires_in": 60,
+                "interval": 1,
+            }
+        return 200, {"access_token": "sso-access", "refresh_token": "sso-refresh"}
+
+    monkeypatch.setattr(cloud, "_request", request)
+    monkeypatch.setattr(cloud.webbrowser, "open", lambda _: (_ for _ in ()).throw(AssertionError()))
+    cloud.login(
+        "https://staging-api.outcomeci.com", open_browser=False, workspace_id="workspace_abc"
+    )
+    assert calls[0][1]["body"] == {"workspace_id": "workspace_abc"}
+    assert calls[1][1]["body"] == {"device_code": "device-secret"}
+    assert cloud.load_credentials()["refresh_token"] == "sso-refresh"
+
+
+def test_sso_denial_does_not_refresh_retry_write_or_destroy_credentials(tmp_path, monkeypatch):
+    import pytest
+
+    monkeypatch.setenv("OUTCOMECI_CONFIG_HOME", str(tmp_path))
+    credentials = {
+        "access_token": "access",
+        "refresh_token": "refresh",
+        "api_url": "https://staging-api.outcomeci.com",
+    }
+    cloud._write_credentials(credentials)
+    calls = []
+
+    def request(*args, **kwargs):
+        calls.append((args, kwargs))
+        return 403, {"detail": {"code": "workspace_sso_required", "workspace_id": "workspace_abc"}}
+
+    monkeypatch.setattr(cloud, "_request", request)
+    with pytest.raises(cloud.CloudRequestError) as error:
+        cloud._authorized_request("/workspaces/workspace_abc/runs", method="POST", body={})
+    assert error.value.status == 403
+    assert not error.value.transient
+    assert (
+        "oci auth login --workspace workspace_abc --api-url https://staging-api.outcomeci.com"
+        in str(error.value)
+    )
+    assert len(calls) == 1
+    assert cloud.load_credentials() == credentials
+
+
+def test_automation_sso_denial_requests_owner_authorization():
+    import pytest
+
+    with pytest.raises(cloud.CloudRequestError, match="owner") as error:
+        cloud._check_workspace_sso(
+            403,
+            {"detail": {"code": "workspace_sso_automation_required"}},
+            "https://api.outcomeci.com",
+        )
+    assert "oci auth login" not in str(error.value)
+
+
+def test_sso_error_does_not_reflect_unsafe_workspace_into_command():
+    import pytest
+
+    with pytest.raises(cloud.CloudRequestError) as error:
+        cloud._check_workspace_sso(
+            403,
+            {"detail": {"code": "workspace_sso_required", "workspace_id": "$(echo bad)"}},
+            "https://api.outcomeci.com",
+        )
+    assert "$(" not in str(error.value)
+
+
+def test_workspace_login_and_automation_key_are_mutually_exclusive():
+    import pytest
+
+    from outcomeci.cli import parser
+
+    args = parser().parse_args(["auth", "login", "--workspace", "workspace_abc", "--no-open"])
+    assert args.workspace == "workspace_abc"
+    assert args.no_open
+    with pytest.raises(SystemExit):
+        parser().parse_args(["auth", "login", "--workspace", "workspace_abc", "--key-stdin"])
+
+
+def test_device_poll_policy_change_explains_workspace_reauthentication(tmp_path, monkeypatch):
+    import pytest
+
+    monkeypatch.setenv("OUTCOMECI_CONFIG_HOME", str(tmp_path))
+    replies = iter(
+        [
+            (
+                201,
+                {
+                    "device_code": "secret",
+                    "user_code": "ABCD-EFGH",
+                    "verification_uri_complete": "https://staging.outcomeci.com/auth/cli",
+                    "expires_in": 60,
+                    "interval": 1,
+                },
+            ),
+            (403, {"detail": {"code": "workspace_sso_required", "workspace_id": "workspace_a"}}),
+        ]
+    )
+    monkeypatch.setattr(cloud, "_request", lambda *args, **kwargs: next(replies))
+    with pytest.raises(cloud.CloudRequestError, match="oci auth login --workspace workspace_a"):
+        cloud.login(
+            "https://staging-api.outcomeci.com", open_browser=False, workspace_id="workspace_a"
+        )
+    assert not cloud.credentials_path().exists()
