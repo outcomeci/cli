@@ -17,7 +17,6 @@ import shutil
 import signal
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 import uuid
@@ -222,7 +221,9 @@ def run_cloud(
 
     with ExitStack() as held:
         held.enter_context(_termination_interrupts())
-        hold = held.enter_context(_hold_agent_lease(workspace_id, workflow_id, leases))
+        hold = held.enter_context(
+            _hold_agent_lease(workspace_id, workflow_id, leases, engine=engine)
+        )
         what = f"run {retry_run}" if retry_run else f"trigger {name!r}"
         print(
             f"Running {what} inside {image} with workspace {workspace_id}'s Vault "
@@ -335,7 +336,9 @@ def _check_image(image: str, *, engine: ContainerEngine = DEFAULT_ENGINE) -> Non
     except FileNotFoundError as exc:
         raise ExecutionError(f"{engine.command} is not installed or not on PATH") from exc
     if probe.returncode != 0:
-        detail = (probe.stderr.strip().splitlines() or ["no output"])[-1]
+        # Docker often ends an error with "Run 'docker run --help'...".
+        # Keep the actual cause rather than displaying only that footer.
+        detail = probe.stderr.strip() or probe.stdout.strip() or "no output"
         if "No module named 'outcomeci.runtime.container'" not in probe.stderr:
             raise ExecutionError(f"{engine.command} could not start runner image {image}: {detail}")
         raise ExecutionError(
@@ -413,7 +416,11 @@ class _AgentHold:
 
 @contextmanager
 def _hold_agent_lease(
-    workspace_id: str, workflow_id: str, leases: list[dict[str, Any]]
+    workspace_id: str,
+    workflow_id: str,
+    leases: list[dict[str, Any]],
+    *,
+    engine: ContainerEngine = DEFAULT_ENGINE,
 ) -> Iterator[_AgentHold]:
     """Hold every agent lease from issue to release, whatever happens in between.
 
@@ -423,7 +430,7 @@ def _hold_agent_lease(
     """
     # A run with no agent steps holds a Vault lease and nothing else.
     agent_leases = [lease["agent"] for lease in leases if isinstance(lease.get("agent"), dict)]
-    with tempfile.TemporaryDirectory(prefix="oci-run-") as output:
+    with engine.temporary_directory(prefix="oci-run-") as output:
         os.chmod(output, 0o700)
         hold = _AgentHold(agent_leases, Path(output))
         try:
@@ -942,7 +949,7 @@ def run_local(
     expires_at = (datetime.now(UTC) + timedelta(seconds=LOCAL_RUN_TTL_SECONDS)).isoformat()
     with ExitStack() as held:
         held.enter_context(_termination_interrupts())
-        output = Path(held.enter_context(tempfile.TemporaryDirectory(prefix="oci-run-")))
+        output = Path(held.enter_context(engine.temporary_directory(prefix="oci-run-")))
         os.chmod(output, 0o700)
         hold = _AgentHold(logins, output)
         what = f"run {retry_run}" if retry_run else f"trigger {name!r}"

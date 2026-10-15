@@ -991,3 +991,44 @@ def test_network_probe_startup_errors_are_not_misdiagnosed_as_dns(monkeypatch):
     probe.return_value.stderr = "permission denied"
     with pytest.raises(ExecutionError, match="network probe could not run: permission denied"):
         workflow_run._check_network("img", None, ["api.openai.com"])
+
+
+def test_image_startup_error_keeps_the_cause_before_docker_help_footer(monkeypatch):
+    monkeypatch.setattr(
+        workflow_run.subprocess,
+        "run",
+        mock.Mock(
+            return_value=mock.Mock(
+                returncode=125,
+                stderr="docker: error getting credentials\n\nRun 'docker run --help' for more information\n",
+                stdout="",
+            )
+        ),
+    )
+    with pytest.raises(ExecutionError) as failure:
+        workflow_run._check_image("img")
+    assert "error getting credentials" in str(failure.value)
+
+
+def test_cloud_run_uses_the_engines_shared_scratch_directory(monkeypatch, image_env):
+    root, _ = image_env
+    shared = root.parent / "rancher-share"
+    shared.mkdir()
+    engine = workflow_run.ContainerEngine(shared_temp=shared)
+    monkeypatch.setattr(workflow_run, "discover_engine", lambda requested: engine)
+    container = _container(monkeypatch, result={"run_id": "run-1"})
+    assert _image_run(root) == {"run_id": "run-1"}
+    assert container.seen["output"].parent == shared
+    assert not list(shared.iterdir())
+
+
+def test_local_run_uses_the_engines_shared_scratch_directory(monkeypatch, local_env):
+    root, _ = local_env
+    shared = root.parent / "rancher-share"
+    shared.mkdir()
+    engine = workflow_run.ContainerEngine(shared_temp=shared)
+    monkeypatch.setattr(workflow_run, "discover_engine", lambda requested: engine)
+    container = _container(monkeypatch, result={"run_id": "run-1"})
+    assert _local_run(root) == {"run_id": "run-1"}
+    assert container.seen["output"].parent == shared
+    assert not list(shared.iterdir())

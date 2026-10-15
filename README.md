@@ -123,6 +123,11 @@ disposable workflow copies and output directories, preserving the checkout's lab
 Rootless Podman runs preserve the host user's file ownership. See the
 [Red Hat compatibility lab](scripts/redhat/README.md) for repeatable host checks.
 
+Rancher Desktop needs its dockerd (moby) engine. Select its Docker context with
+`DOCKER_CONTEXT=rancher-desktop oci workflow run ...`. The CLI uses Rancher's shared
+scratch directory for its private source copy and output. Run the
+[Rancher Desktop checks](scripts/rancher/README.md) to verify the setup.
+
 - With no cloud options, secrets come from the local Vault and the agent login
   from this machine: Codex from `$CODEX_HOME/auth.json` or `~/.codex/auth.json`, Claude from
   `CLAUDE_CODE_OAUTH_TOKEN` or the local Vault entry `agents/claude`, and

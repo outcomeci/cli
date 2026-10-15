@@ -107,3 +107,39 @@ def test_without_selinux_the_source_is_mounted_read_only(tmp_path):
             "--mount",
             f"type=bind,src={tmp_path}/output,dst=/oci-run",
         ]
+
+
+def test_rancher_uses_its_shared_scratch_directory(monkeypatch):
+    _info(monkeypatch, ["docker"], {"Name": "lima-rancher-desktop", "SecurityOptions": []})
+    engine = engines.discover_engine()
+    assert engine.shared_temp == Path("/tmp/rancher-desktop")
+    assert not engine.selinux
+
+
+def test_rancher_stages_an_unshared_checkout_and_uses_private_shared_output(tmp_path):
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    source = tmp_path / "unshared-checkout"
+    source.mkdir()
+    (source / "outcome.yml").write_text("workflow")
+    engine = engines.ContainerEngine(shared_temp=shared)
+    with engine.temporary_directory(prefix="oci-run-") as output:
+        assert Path(output).parent == shared
+        assert Path(output).stat().st_mode & 0o777 == 0o700
+        with engine.mounts(source, Path(output)) as mounts:
+            staging = Path(mounts[1].split("src=")[1].split(",dst=")[0])
+            assert staging.parent == shared
+            assert (staging / "outcome.yml").read_text() == "workflow"
+            assert mounts[1].endswith("dst=/src,readonly")
+            assert mounts[3] == f"type=bind,src={output},dst=/oci-run"
+        assert not staging.exists()
+    assert not Path(output).exists()
+    assert (source / "outcome.yml").read_text() == "workflow"
+
+
+def test_missing_desktop_share_has_an_actionable_error(tmp_path):
+    engine = engines.ContainerEngine(shared_temp=tmp_path / "missing-share")
+    with pytest.raises(
+        ExecutionError, match="cannot create container scratch directory.*missing-share"
+    ):
+        engine.temporary_directory(prefix="oci-run-")
