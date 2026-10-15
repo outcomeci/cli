@@ -21,6 +21,17 @@ class ContainerEngine:
     podman: bool = False
     rootless: bool = False
     selinux: bool = False
+    shared_temp: Path | None = None
+
+    def temporary_directory(self, *, prefix: str) -> tempfile.TemporaryDirectory[str]:
+        """Keep scratch mounts visible to Desktop engines' separate VM."""
+        try:
+            return tempfile.TemporaryDirectory(prefix=prefix, dir=self.shared_temp)
+        except OSError as exc:
+            raise ExecutionError(
+                f"cannot create container scratch directory in "
+                f"{self.shared_temp or tempfile.gettempdir()}: {exc}"
+            ) from exc
 
     def user_args(self) -> list[str]:
         args = ["--user", f"{os.getuid()}:{os.getgid()}"]
@@ -32,7 +43,7 @@ class ContainerEngine:
 
     @contextmanager
     def mounts(self, source: Path, output: Path) -> Iterator[list[str]]:
-        if not self.selinux:
+        if not self.selinux and self.shared_temp is None:
             yield [
                 "--mount",
                 f"type=bind,src={source},dst=/src,readonly",
@@ -40,9 +51,9 @@ class ContainerEngine:
                 f"type=bind,src={output},dst=/oci-run",
             ]
             return
-        # Relabel only disposable directories. Relabeling the checkout itself
-        # can break other containers and services that use those files.
-        with tempfile.TemporaryDirectory(prefix="oci-source-") as staging:
+        # Stage outside the checkout: SELinux can safely relabel this copy,
+        # and Desktop engines can see it even if the checkout is not shared.
+        with self.temporary_directory(prefix="oci-source-") as staging:
             shutil.copytree(
                 source,
                 staging,
@@ -50,7 +61,15 @@ class ContainerEngine:
                 symlinks=True,
                 ignore=shutil.ignore_patterns(".git"),
             )
-            yield ["--volume", f"{staging}:/src:ro,Z", "--volume", f"{output}:/oci-run:Z"]
+            if self.selinux:
+                yield ["--volume", f"{staging}:/src:ro,Z", "--volume", f"{output}:/oci-run:Z"]
+            else:
+                yield [
+                    "--mount",
+                    f"type=bind,src={staging},dst=/src,readonly",
+                    "--mount",
+                    f"type=bind,src={output},dst=/oci-run",
+                ]
 
 
 def discover_engine(requested: str | None = None) -> ContainerEngine:
@@ -87,6 +106,11 @@ def discover_engine(requested: str | None = None) -> ContainerEngine:
             rootless=bool(security.get("rootless")),
             selinux=bool(security.get("selinuxEnabled"))
             or any(option == "name=selinux" for option in options),
+            # On macOS/Linux Rancher's Lima VM shares home and this directory,
+            # not the host's general /tmp (nor macOS's per-user temp directory).
+            shared_temp=Path("/tmp/rancher-desktop")
+            if info.get("Name") == "lima-rancher-desktop"
+            else None,
         )
     except (ValueError, AttributeError, TypeError) as exc:
         raise ExecutionError(f"cannot read {command} info; check `{command} info`") from exc

@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -27,14 +28,17 @@ def _label(path):
         return None
 
 
-def test_private_mounts_are_readable_output_is_host_owned_and_source_stays_readonly(tmp_path):
-    source, output = tmp_path / "checkout", tmp_path / "output"
+def test_private_mounts_are_readable_output_is_host_owned_and_source_stays_readonly(
+    tmp_path, request
+):
+    engine = discover_engine(RUNTIME)
+    scratch = engine.temporary_directory(prefix="oci-test-")
+    request.addfinalizer(scratch.cleanup)
+    source, output = tmp_path / "checkout", Path(scratch.name)
     source.mkdir(mode=0o700)
-    output.mkdir(mode=0o700)
     marker = source / "marker"
     marker.write_text("original")
     original_label = _label(marker)
-    engine = discover_engine(RUNTIME)
     probe = """
 from pathlib import Path
 assert Path('/src/marker').read_text() == 'original'
