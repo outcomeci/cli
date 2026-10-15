@@ -113,9 +113,15 @@ operations are not yet available. The CLI does not initiate browser consent.
 ## Run a workflow
 
 `oci workflow run` runs the workflow in `--dir` (the current directory by default)
-inside a local Docker container. This remains local execution with `--cloud`.
+inside a local Docker or Podman container. This remains local execution with `--cloud`.
 Released CLIs select the matching runner image; development builds need
 `--image IMAGE`.
+
+Docker is selected when installed; otherwise the CLI uses Podman. Select explicitly
+with `--runtime docker` or `--runtime podman`. On SELinux hosts, the CLI labels
+disposable workflow copies and output directories, preserving the checkout's labels.
+Rootless Podman runs preserve the host user's file ownership. See the
+[Red Hat compatibility lab](scripts/redhat/README.md) for repeatable host checks.
 
 - With no cloud options, secrets come from the local Vault and the agent login
   from this machine: Codex from `$CODEX_HOME/auth.json` or `~/.codex/auth.json`, Claude from

@@ -280,3 +280,19 @@ def test_every_visible_command_and_option_has_help() -> None:
 
     walk(parser(), "oci")
     assert missing == []
+
+
+@pytest.mark.parametrize("cloud", [False, True])
+def test_workflow_run_passes_the_selected_container_runtime(tmp_path, monkeypatch, cloud):
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append(kwargs)
+        return {"status": "completed"}
+
+    monkeypatch.setattr(cli.workflow_run, "run_cloud" if cloud else "run_local", run)
+    args = ["workflow", "run", "--dir", str(tmp_path), "--runtime", "podman"]
+    if cloud:
+        args += ["--cloud", "--workspace-id", "ws", "--workflow-id", "wf"]
+    assert main(args) == 0
+    assert calls[0]["runtime"] == "podman"

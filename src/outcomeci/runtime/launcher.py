@@ -38,15 +38,16 @@ from outcomeci.cloud import (
 )
 from outcomeci.runtime.container import (
     CONTAINER_OUTPUT,
-    CONTAINER_SOURCE,
     OUTPUT_HOME,
     OUTPUT_WORK,
     ROTATIONS,
 )
+from outcomeci.runtime.container_engine import ContainerEngine, discover_engine
 from outcomeci.runtime.process import ExecutionError
 from outcomeci.security import atomic_write_json
 from outcomeci.workflow.compiler import compile_workflow
 
+DEFAULT_ENGINE = ContainerEngine()
 IMAGE_LEASE_TTL_SECONDS = 3600
 AGENT_RENEW_INTERVAL_SECONDS = 300
 AGENT_RENEW_TTL_SECONDS = 900
@@ -192,6 +193,7 @@ def run_cloud(
     image: str | None = None,
     network: str | None = None,
     retry_run: str | None = None,
+    runtime: str | None = None,
 ) -> dict[str, Any]:
     """Run in the runner image with the workspace's Vault and connected agent."""
     root, config = root.resolve(), config.resolve()
@@ -202,9 +204,10 @@ def run_cloud(
     # Everything that can fail on the user's input fails here, before a lease
     # takes the workspace's agent connection away from its cloud runs.
     image = image or default_image()
-    _check_image(image)
+    engine = discover_engine(runtime)
+    _check_image(image, engine=engine)
     runners = _runners(compiled, agent)
-    _check_network(image, network, _run_hosts(compiled, runners))
+    _check_network(image, network, _run_hosts(compiled, runners), engine=engine)
     _flush_pending_releases()
     _flush_pending_rotations()
     if retry_run is not None:
@@ -240,6 +243,7 @@ def run_cloud(
                 auto_continue=auto_continue,
                 network=network,
                 retry_run=retry_run,
+                engine=engine,
             )
         finally:
             _save_cloud_rotations(workspace_id, workflow_id, lease, hold.output)
@@ -311,12 +315,12 @@ def _termination_interrupts() -> Iterator[None]:
             signal.signal(sig, handler)
 
 
-def _check_image(image: str) -> None:
+def _check_image(image: str, *, engine: ContainerEngine = DEFAULT_ENGINE) -> None:
     """Fail before any lease when the image cannot run a workflow at all."""
     try:
         probe = subprocess.run(
             [
-                "docker",
+                engine.command,
                 "run",
                 "--rm",
                 "--entrypoint",
@@ -329,9 +333,11 @@ def _check_image(image: str) -> None:
             text=True,
         )
     except FileNotFoundError as exc:
-        raise ExecutionError("docker is not installed or not on PATH") from exc
+        raise ExecutionError(f"{engine.command} is not installed or not on PATH") from exc
     if probe.returncode != 0:
         detail = (probe.stderr.strip().splitlines() or ["no output"])[-1]
+        if "No module named 'outcomeci.runtime.container'" not in probe.stderr:
+            raise ExecutionError(f"{engine.command} could not start runner image {image}: {detail}")
         raise ExecutionError(
             f"{image} cannot run workflows; it needs an OutcomeCI runner build "
             f"that includes outcomeci.runtime.container ({detail})"
@@ -342,7 +348,13 @@ def _agent_hosts(runners: list[str]) -> list[str]:
     return [AGENT_HOSTS[runner] for runner in runners if runner in AGENT_HOSTS]
 
 
-def _check_network(image: str, network: str | None, hosts: list[str]) -> None:
+def _check_network(
+    image: str,
+    network: str | None,
+    hosts: list[str],
+    *,
+    engine: ContainerEngine = DEFAULT_ENGINE,
+) -> None:
     """Fail before the run when the container cannot resolve the hosts its agents need.
 
     An agent that cannot reach its API retries quietly for a long time, so a
@@ -352,7 +364,7 @@ def _check_network(image: str, network: str | None, hosts: list[str]) -> None:
     if not hosts:
         return
     command = [
-        "docker",
+        engine.command,
         "run",
         "--rm",
         *(["--network", network] if network else []),
@@ -368,14 +380,17 @@ def _check_network(image: str, network: str | None, hosts: list[str]) -> None:
             command, capture_output=True, text=True, timeout=NETWORK_PROBE_TIMEOUT_SECONDS
         )
     except FileNotFoundError as exc:
-        raise ExecutionError("docker is not installed or not on PATH") from exc
+        raise ExecutionError(f"{engine.command} is not installed or not on PATH") from exc
     except subprocess.TimeoutExpired:
         unresolved = hosts
     else:
         if probe.returncode == 0:
             return
         unresolved = [line for line in probe.stdout.splitlines() if line.strip()] or hosts
-    where = f"the {network!r} network" if network else "Docker's default bridge network"
+        if probe.returncode != 1 or any(host not in hosts for host in unresolved):
+            detail = probe.stderr.strip() or "no output"
+            raise ExecutionError(f"{engine.command} network probe could not run: {detail}")
+    where = f"the {network!r} network" if network else f"{engine.command}'s default network"
     advice = (
         "pass --network host so the container uses this machine's DNS"
         if network != "host"
@@ -671,6 +686,7 @@ def _run_in_image(
     auto_continue: bool,
     network: str | None = None,
     retry_run: str | None = None,
+    engine: ContainerEngine = DEFAULT_ENGINE,
 ) -> dict[str, Any]:
     """Run inside the runner image and bring the run's state back to --dir.
 
@@ -694,15 +710,14 @@ def _run_in_image(
     }
     container = f"oci-run-{uuid.uuid4().hex[:12]}"
     command = [
-        "docker",
+        engine.command,
         "run",
         "--rm",
         "-i",
         "--init",
         "--name",
         container,
-        "--user",
-        f"{os.getuid()}:{os.getgid()}",
+        *engine.user_args(),
         "-e",
         f"HOME={CONTAINER_OUTPUT}/{OUTPUT_HOME}",
         # Arbitrary host uids have no passwd entry in the image.
@@ -710,10 +725,6 @@ def _run_in_image(
         "USER=oci",
         "-e",
         "LOGNAME=oci",
-        "--mount",
-        f"type=bind,src={root},dst={CONTAINER_SOURCE},readonly",
-        "--mount",
-        f"type=bind,src={hold.output},dst={CONTAINER_OUTPUT}",
         "-w",
         CONTAINER_OUTPUT,
         *(["--network", network] if network else []),
@@ -724,7 +735,9 @@ def _run_in_image(
         "outcomeci.runtime.container",
     ]
     try:
-        returncode = _run_container(command, container, json.dumps(bundle))
+        with engine.mounts(root, hold.output) as mounts:
+            command[2:2] = mounts
+            returncode = _run_container(command, container, json.dumps(bundle))
     finally:
         _import_run_state(hold.output / OUTPUT_WORK, root)
     result_file = hold.output / "result.json"
@@ -745,25 +758,27 @@ def _run_container(command: list[str], container: str, stdin: str) -> int:
     try:
         process = subprocess.Popen(command, stdin=subprocess.PIPE, text=True)
     except FileNotFoundError as exc:
-        raise ExecutionError("docker is not installed or not on PATH") from exc
+        raise ExecutionError(f"{command[0]} is not installed or not on PATH") from exc
     try:
         process.communicate(stdin)
     except BaseException:
-        _stop_container(container, process)
+        _stop_container(container, process, command[0])
         raise
     return process.returncode
 
 
-def _stop_container(container: str, process: subprocess.Popen[str]) -> None:
+def _stop_container(
+    container: str, process: subprocess.Popen[str], runtime: str = "docker"
+) -> None:
     try:
         subprocess.run(
-            ["docker", "kill", "--signal", "INT", container], capture_output=True, check=False
+            [runtime, "kill", "--signal", "INT", container], capture_output=True, check=False
         )
         process.wait(timeout=CONTAINER_STOP_GRACE_SECONDS)
     except BaseException:
         pass
     finally:
-        subprocess.run(["docker", "rm", "--force", container], capture_output=True, check=False)
+        subprocess.run([runtime, "rm", "--force", container], capture_output=True, check=False)
         with suppress(BaseException):
             process.wait(timeout=CONTAINER_STOP_GRACE_SECONDS)
 
@@ -902,6 +917,7 @@ def run_local(
     image: str | None = None,
     network: str | None = None,
     retry_run: str | None = None,
+    runtime: str | None = None,
 ) -> dict[str, Any]:
     """Run the workflow in the runner image with local Vault values and local logins."""
     root, config = root.resolve(), config.resolve()
@@ -920,8 +936,9 @@ def run_local(
     values = _local_values(root, compiled)
     runners = _runners(compiled, agent)
     logins = [_local_login(root, provider) for provider in runners]
-    _check_image(image)
-    _check_network(image, network, _run_hosts(compiled, runners))
+    engine = discover_engine(runtime)
+    _check_image(image, engine=engine)
+    _check_network(image, network, _run_hosts(compiled, runners), engine=engine)
     expires_at = (datetime.now(UTC) + timedelta(seconds=LOCAL_RUN_TTL_SECONDS)).isoformat()
     with ExitStack() as held:
         held.enter_context(_termination_interrupts())
@@ -944,6 +961,7 @@ def run_local(
                 auto_continue=auto_continue,
                 network=network,
                 retry_run=retry_run,
+                engine=engine,
             )
         finally:
             _write_back_codex(hold)
