@@ -260,8 +260,6 @@ the same Vault entry when it has the necessary permissions. Downloads are saved 
 run artifacts after grant checks; Drive downloads are limited to 20 MiB and exports
 to 10 MiB. This does not provide arbitrary file content editing or sharing.
 
-This revision pins the matching connector commit while its release is prepared.
-Release the connector first and replace the Git dependency with its published
-version before promoting the CLI to PyPI. Existing workflows with locked Google
+This release pins `outcomeci-connectors==0.12.0`. Existing workflows with locked Google
 Analytics connector digests must refresh their connector lock to accept bearer
 authentication; existing OAuth and service-account methods remain available.
