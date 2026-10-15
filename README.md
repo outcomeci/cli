@@ -6,7 +6,7 @@ the APIs its steps may call, and its agent, model and runtime-driven steps. You 
 on it locally, running it in the same runner container OutcomeCI Cloud uses,
 then sync it to OutcomeCI Cloud where triggers run it on managed runners.
 
-The starter needs Python 3.11 or newer, `pipx`, a running Docker daemon, and a
+The starter needs Python 3.11 or newer, `pipx`, Docker or Podman, and a
 local Codex login (`codex login`).
 
 ```console
