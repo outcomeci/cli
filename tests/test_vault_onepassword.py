@@ -170,6 +170,20 @@ def test_vault_connect_sends_the_token_from_stdin(monkeypatch, capsys) -> None:
     assert "ops_token" not in capsys.readouterr().out
 
 
+def test_vault_disconnect_revokes_the_connection(monkeypatch, capsys) -> None:
+    seen = {}
+    monkeypatch.setattr(
+        cli,
+        "vault_request",
+        lambda workspace, operation, **values: seen.update(
+            workspace=workspace, operation=operation, **values
+        ),
+    )
+    assert cli.main(["vault", "disconnect", "1password", "--workspace-id", "w"]) == 0
+    assert seen == {"workspace": "w", "operation": "disconnect_1password"}
+    assert '"ok": true' in capsys.readouterr().out
+
+
 def test_local_rotation_of_a_linked_entry_writes_to_1password(tmp_path: Path, monkeypatch) -> None:
     from outcomeci.vault.local import rotate
 

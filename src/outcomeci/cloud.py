@@ -401,6 +401,8 @@ def vault_request(workspace_id: str, operation: str, **values: Any) -> dict[str,
     elif operation == "connect_1password":
         method, path = "PUT", f"{base}/backends/1password"
         body = {"token": values["token"]}
+    elif operation == "disconnect_1password":
+        method, path, expected = "DELETE", f"{base}/backends/1password", {204}
     elif operation == "rotate":
         method, path, body = (
             "POST",

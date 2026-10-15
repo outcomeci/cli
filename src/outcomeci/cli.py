@@ -154,6 +154,9 @@ ARGUMENT_HELP: dict[str, dict[str, str]] = {
         "backend": "Secret manager to connect; 1password takes a service account token",
         "--token-stdin": "Read the service account token from stdin",
     },
+    "vault disconnect": {
+        "backend": "Secret manager to disconnect; its token is revoked",
+    },
     "vault local put": {
         "path": "Vault path the workflow references as vault:<path>",
         "--ref": (
@@ -192,6 +195,7 @@ COMMAND_HELP = {
     "vault list": "List a workspace's Vault entries, without values",
     "vault put": "Store a credential in a workspace's Vault",
     "vault connect": "Connect a workspace's Vault to a secret manager such as 1Password",
+    "vault disconnect": "Revoke a workspace's secret manager connection",
     "vault rotate": "Replace a Vault entry's value",
     "vault grant": "Set which workflows may use a Vault entry",
     "vault revoke": "Revoke a Vault entry",
@@ -371,6 +375,11 @@ def parser() -> argparse.ArgumentParser:
     vault_connect.add_argument("backend", choices=("1password",))
     vault_connect.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
     vault_connect.add_argument("--token-stdin", action="store_true")
+    vault_disconnect = vault_commands.add_parser("disconnect")
+    vault_disconnect.add_argument("backend", choices=("1password",))
+    vault_disconnect.add_argument(
+        "--workspace-id", required=True, help="Cloud workspace identifier"
+    )
     vault_rotate = vault_commands.add_parser("rotate")
     vault_rotate.add_argument("entry_id")
     vault_rotate.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
@@ -675,6 +684,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                     raise ExecutionError("the service account token is required; use --token-stdin")
                 result = vault_request(args.workspace_id, "connect_1password", token=token)
                 _print_json(result or {"ok": True})
+                return 0
+            if args.vault_command == "disconnect":
+                vault_request(args.workspace_id, "disconnect_1password")
+                _print_json({"ok": True, "backend": args.backend})
                 return 0
             if args.vault_command == "list":
                 result = vault_request(args.workspace_id, "list")
