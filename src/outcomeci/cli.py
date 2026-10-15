@@ -10,6 +10,7 @@ import os
 import sys
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from outcomeci_connectors.providers.slack.setup import SlackError
 from outcomeci_connectors.providers.slack.setup import manifest as slack_manifest
@@ -42,6 +43,28 @@ from outcomeci.workflow.publication import prepare_publication
 from outcomeci.workflow.scaffold import initialize
 
 AGENT_CHOICES = ("codex", "claude", "opencode")
+
+
+def _linked_credential(args: argparse.Namespace) -> dict[str, Any]:
+    """A credential whose secret fields are 1Password references, from --ref
+    options: the stored shape of a typed credential with `link` in place of
+    `secrets`, or `{link}` alone for a plain secret."""
+    from outcomeci.vault import onepassword
+
+    credential_type = args.credential_type
+    default_field = credentials.DEFAULT_SECRET.get(credential_type) if credential_type else "value"
+    references = onepassword.parse_refs(args.ref, default_field=default_field)
+    link = {"link": {"backend": "1password", "references": references}}
+    if not credential_type:
+        if set(references) != {"value"}:
+            raise ExecutionError("a plain secret takes one --ref; add --credential-type for fields")
+        return link
+    placeholders = dict.fromkeys(references, "linked")
+    built = credentials.build(credential_type, args, value=None, secrets=placeholders)
+    return {
+        "credential_type": built["credential_type"],
+        "configuration": built["configuration"],
+    } | link
 
 
 def _secret_input(args: argparse.Namespace, *, prompt: bool) -> tuple[str | None, dict | None]:
@@ -122,8 +145,22 @@ ARGUMENT_HELP: dict[str, dict[str, str]] = {
     "vault put": {
         "path": "Vault path the workflow references as vault:<path>",
         "--name": "Display name (default: the path)",
+        "--ref": (
+            "Link a secret field to 1Password instead of storing a value: "
+            "op://vault/item/field, or field=op://vault/item/field (repeatable)"
+        ),
     },
-    "vault local put": {"path": "Vault path the workflow references as vault:<path>"},
+    "vault connect": {
+        "backend": "Secret manager to connect; 1password takes a service account token",
+        "--token-stdin": "Read the service account token from stdin",
+    },
+    "vault local put": {
+        "path": "Vault path the workflow references as vault:<path>",
+        "--ref": (
+            "Link a secret field to 1Password, resolved at run time with "
+            "OP_SERVICE_ACCOUNT_TOKEN: op://vault/item/field, or field=op://... (repeatable)"
+        ),
+    },
     "integration execute": {
         "--input": "Call input as a JSON object",
         "--input-stdin": "Read the call input as JSON from stdin",
@@ -154,6 +191,7 @@ COMMAND_HELP = {
     "workflow sync": "Upload a workflow to OutcomeCI Cloud as a new workflow or version",
     "vault list": "List a workspace's Vault entries, without values",
     "vault put": "Store a credential in a workspace's Vault",
+    "vault connect": "Connect a workspace's Vault to a secret manager such as 1Password",
     "vault rotate": "Replace a Vault entry's value",
     "vault grant": "Set which workflows may use a Vault entry",
     "vault revoke": "Revoke a Vault entry",
@@ -322,7 +360,12 @@ def parser() -> argparse.ArgumentParser:
     vault_put.add_argument("--value-stdin", action="store_true")
     vault_put.add_argument("--workflow-id", action="append", default=[])
     vault_put.add_argument("--provider", help="Credential provider, for example slack")
+    vault_put.add_argument("--ref", action="append", default=[])
     credentials.add_arguments(vault_put)
+    vault_connect = vault_commands.add_parser("connect")
+    vault_connect.add_argument("backend", choices=("1password",))
+    vault_connect.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
+    vault_connect.add_argument("--token-stdin", action="store_true")
     vault_rotate = vault_commands.add_parser("rotate")
     vault_rotate.add_argument("entry_id")
     vault_rotate.add_argument("--workspace-id", required=True, help="Cloud workspace identifier")
@@ -345,6 +388,7 @@ def parser() -> argparse.ArgumentParser:
     local_vault_put.add_argument("path")
     local_vault_put.add_argument("--value")
     local_vault_put.add_argument("--value-stdin", action="store_true")
+    local_vault_put.add_argument("--ref", action="append", default=[])
     credentials.add_arguments(local_vault_put)
     _add_dir_argument(local_vault_put)
     mcp = commands.add_parser("mcp", help="Connect your coding agents to OutcomeCI over MCP")
@@ -606,14 +650,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else:
                     if args.secrets_json_stdin and not args.credential_type:
                         raise ExecutionError("--secrets-json-stdin needs --credential-type")
-                    value, secrets = _secret_input(args, prompt=True)
-                    if args.credential_type:
-                        value = json.dumps(
-                            credentials.build(
-                                args.credential_type, args, value=value, secrets=secrets
+                    if args.ref:
+                        value = json.dumps(_linked_credential(args))
+                    else:
+                        value, secrets = _secret_input(args, prompt=True)
+                        if args.credential_type:
+                            value = json.dumps(
+                                credentials.build(
+                                    args.credential_type, args, value=value, secrets=secrets
+                                )
                             )
-                        )
                     _print_json(put_local_vault_entry(workspace, args.path, value))
+                return 0
+            if args.vault_command == "connect":
+                token = sys.stdin.read().strip() if args.token_stdin else ""
+                if not token:
+                    raise ExecutionError("the service account token is required; use --token-stdin")
+                result = vault_request(args.workspace_id, "connect_1password", token=token)
+                _print_json(result or {"ok": True})
                 return 0
             if args.vault_command == "list":
                 result = vault_request(args.workspace_id, "list")
@@ -625,6 +679,23 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                 if args.secrets_json_stdin and not typed:
                     raise ExecutionError("--secrets-json-stdin needs --credential-type")
+                if args.ref:
+                    if args.value is not None or args.value_stdin or args.secrets_json_stdin:
+                        raise ExecutionError(
+                            "--ref replaces the secret value; give one or the other"
+                        )
+                    linked = _linked_credential(args)
+                    result = vault_request(
+                        args.workspace_id,
+                        "put_linked",
+                        path=args.path,
+                        display_name=args.name or args.path,
+                        provider=args.provider,
+                        credential=linked,
+                        workflow_ids=args.workflow_id,
+                    )
+                    _print_json(result or {"ok": True})
+                    return 0
                 value, secrets = _secret_input(args, prompt=False)
                 if typed and args.value is not None:
                     raise ExecutionError("typed credentials must be supplied through stdin")

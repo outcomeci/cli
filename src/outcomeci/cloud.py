@@ -383,6 +383,24 @@ def vault_request(workspace_id: str, operation: str, **values: Any) -> dict[str,
             "secrets": credential["secrets"],
             "workflow_ids": values.get("workflow_ids", []),
         }
+    elif operation == "put_linked":
+        method, path, expected = "POST", f"{base}/linked", {201}
+        credential = values["credential"]
+        body = {
+            "path": values["path"],
+            "display_name": values["display_name"],
+            "references": credential["link"]["references"],
+            "workflow_ids": values.get("workflow_ids", []),
+        }
+        if credential.get("credential_type"):
+            body.update(
+                service=values["provider"],
+                credential_type=credential["credential_type"],
+                configuration=credential["configuration"],
+            )
+    elif operation == "connect_1password":
+        method, path = "PUT", f"{base}/backends/1password"
+        body = {"token": values["token"]}
     elif operation == "rotate":
         method, path, body = (
             "POST",

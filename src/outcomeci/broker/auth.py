@@ -209,8 +209,15 @@ def _b64url(raw: bytes) -> str:
 
 
 def sign_rs256(claims: Mapping[str, Any], private_key_pem: str) -> str:
+    # PEM (PKCS#1 or PKCS#8) as providers issue keys, or OpenSSH as 1Password's
+    # SSH Key items and the `op` tool hand them out.
+    load = (
+        serialization.load_ssh_private_key
+        if private_key_pem.lstrip().startswith("-----BEGIN OPENSSH")
+        else serialization.load_pem_private_key
+    )
     try:
-        key = serialization.load_pem_private_key(private_key_pem.encode(), password=None)
+        key = load(private_key_pem.encode(), password=None)
     except ValueError as exc:
         raise AuthError(
             "integration.credential_invalid",
