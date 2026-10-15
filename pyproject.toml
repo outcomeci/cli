@@ -26,6 +26,9 @@ oci = "outcomeci.cli:main"
 # Local runs of model steps call the provider through LiteLLM; cloud runs send
 # model calls to OutcomeCI Cloud and never need it.
 models = ["litellm>=1.104.2,<2"]
+# Local Vault entries linked to 1Password resolve through the SDK; without it
+# the `op` command-line tool is used instead.
+1password = ["onepassword-sdk>=0.4,<1"]
 test = ["pytest>=8.3", "build>=1.2", "ruff>=0.13"]
 
 [tool.hatch.build.targets.wheel]

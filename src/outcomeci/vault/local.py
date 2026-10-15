@@ -15,6 +15,7 @@ from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 from outcomeci.runtime.process import ExecutionError
 from outcomeci.security import atomic_write_json
+from outcomeci.vault import onepassword
 
 VAULT_FILE = Path(".outcomeci/vault.enc")
 KEY_ENV = "OUTCOMECI_VAULT_KEY_FILE"
@@ -155,6 +156,8 @@ def resolve(root: Path, reference: str) -> str | dict[str, Any]:
         structured = json.loads(value)
     except json.JSONDecodeError:
         return value
+    if onepassword.linked_references(structured) is not None:
+        return onepassword.resolve_entry(structured)
     if (
         isinstance(structured, dict)
         and isinstance(structured.get("credential_type"), str)
@@ -171,6 +174,15 @@ def resolve(root: Path, reference: str) -> str | dict[str, Any]:
 def rotate(root: Path, reference: str, secrets: dict[str, str]) -> None:
     """Replace secret fields of a typed credential, such as a rotated refresh token."""
     path = reference.removeprefix("vault:")
+    _envelope_value, _key_value, payload = _load(root)
+    try:
+        stored = json.loads(str(payload["entries"][path]["value"]))
+    except (KeyError, json.JSONDecodeError):
+        stored = None
+    if onepassword.linked_references(stored) is not None:
+        # A linked entry's values live in 1Password; the rotation goes there.
+        onepassword.rotate_entry(stored, secrets)
+        return
     current = resolve(root, reference)
     if not isinstance(current, dict) or not isinstance(current.get("secrets"), dict):
         raise ExecutionError(f"local Vault entry {path} is not a typed credential")
