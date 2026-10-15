@@ -6,7 +6,7 @@ the APIs its steps may call, and its agent, model and runtime-driven steps. You 
 on it locally, running it in the same runner container OutcomeCI Cloud uses,
 then sync it to OutcomeCI Cloud where triggers run it on managed runners.
 
-The starter needs Python 3.11 or newer, `pipx`, a running Docker daemon, and a
+The starter needs Python 3.11 or newer, `pipx`, Docker or Podman, and a
 local Codex login (`codex login`).
 
 ```console
@@ -113,9 +113,20 @@ operations are not yet available. The CLI does not initiate browser consent.
 ## Run a workflow
 
 `oci workflow run` runs the workflow in `--dir` (the current directory by default)
-inside a local Docker container. This remains local execution with `--cloud`.
+inside a local Docker or Podman container. This remains local execution with `--cloud`.
 Released CLIs select the matching runner image; development builds need
 `--image IMAGE`.
+
+Docker is selected when installed; otherwise the CLI uses Podman. Select explicitly
+with `--runtime docker` or `--runtime podman`. On SELinux hosts, the CLI labels
+disposable workflow copies and output directories, preserving the checkout's labels.
+Rootless Podman runs preserve the host user's file ownership. See the
+[Red Hat compatibility lab](scripts/redhat/README.md) for repeatable host checks.
+
+Rancher Desktop needs its dockerd (moby) engine. Select its Docker context with
+`DOCKER_CONTEXT=rancher-desktop oci workflow run ...`. The CLI uses Rancher's shared
+scratch directory for its private source copy and output. Run the
+[Rancher Desktop checks](scripts/rancher/README.md) to verify the setup.
 
 - With no cloud options, secrets come from the local Vault and the agent login
   from this machine: Codex from `$CODEX_HOME/auth.json` or `~/.codex/auth.json`, Claude from

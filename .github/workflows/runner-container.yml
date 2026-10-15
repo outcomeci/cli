@@ -44,6 +44,16 @@ jobs:
             RUNNER_DEPENDENCY_REFRESH=${{ github.run_id }}-${{ github.run_attempt }}
           cache-from: type=gha,scope=outcome-runner
           cache-to: type=gha,mode=max,scope=outcome-runner
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Exercise the launcher against the built runner
+        env:
+          OUTCOMECI_TEST_IMAGE: outcome-runner:scan
+          OUTCOMECI_TEST_RUNTIME: docker
+        run: |
+          pip install -e '.[test]'
+          pytest -q tests/integration/test_container_host.py
       - name: Scan image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
