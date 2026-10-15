@@ -360,7 +360,7 @@ def test_sso_denial_does_not_refresh_retry_write_or_destroy_credentials(tmp_path
     assert error.value.status == 403
     assert not error.value.transient
     assert (
-        "oci auth login --workspace workspace_abc --api-url https://staging-api.outcomeci.com"
+        "oci auth login --workspace-id workspace_abc --api-url https://staging-api.outcomeci.com"
         in str(error.value)
     )
     assert len(calls) == 1
@@ -396,11 +396,11 @@ def test_workspace_login_and_automation_key_are_mutually_exclusive():
 
     from outcomeci.cli import parser
 
-    args = parser().parse_args(["auth", "login", "--workspace", "workspace_abc", "--no-open"])
-    assert args.workspace == "workspace_abc"
+    args = parser().parse_args(["auth", "login", "--workspace-id", "workspace_abc", "--no-open"])
+    assert args.workspace_id == "workspace_abc"
     assert args.no_open
     with pytest.raises(SystemExit):
-        parser().parse_args(["auth", "login", "--workspace", "workspace_abc", "--key-stdin"])
+        parser().parse_args(["auth", "login", "--workspace-id", "workspace_abc", "--key-stdin"])
 
 
 def test_device_poll_policy_change_explains_workspace_reauthentication(tmp_path, monkeypatch):
@@ -423,7 +423,7 @@ def test_device_poll_policy_change_explains_workspace_reauthentication(tmp_path,
         ]
     )
     monkeypatch.setattr(cloud, "_request", lambda *args, **kwargs: next(replies))
-    with pytest.raises(cloud.CloudRequestError, match="oci auth login --workspace workspace_a"):
+    with pytest.raises(cloud.CloudRequestError, match="oci auth login --workspace-id workspace_a"):
         cloud.login(
             "https://staging-api.outcomeci.com", open_browser=False, workspace_id="workspace_a"
         )

@@ -211,7 +211,7 @@ def parser() -> argparse.ArgumentParser:
     auth_login.add_argument("--no-open", action="store_true")
     auth_login_mode = auth_login.add_mutually_exclusive_group()
     auth_login_mode.add_argument(
-        "--workspace", help="Workspace ID to authorize with its SSO policy"
+        "--workspace-id", help="Workspace ID to authorize with its SSO policy"
     )
     auth_login_mode.add_argument(
         "--key-stdin",
@@ -480,7 +480,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         cloud_login(
                             args.api_url,
                             open_browser=not args.no_open,
-                            workspace_id=args.workspace,
+                            workspace_id=args.workspace_id,
                         )
                     )
             elif args.auth_command == "status":

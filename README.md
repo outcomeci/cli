@@ -192,7 +192,7 @@ Subsequent authenticated commands use the API URL saved with that login.
 For a workspace that requires Microsoft SSO, authenticate for that workspace:
 
 ```sh
-oci auth login --workspace workspace_example
+oci auth login --workspace-id workspace_example
 ```
 
 The browser completes the workspace's Microsoft verification before approving the
@@ -200,7 +200,7 @@ CLI. Workspace SSO expires independently of token refresh. If a command requests
 SSO again, repeat the workspace login, then rerun the command. Use `--no-open` to
 copy the browser link manually and `--api-url URL` for staging. Workspace API keys
 are automation credentials and require explicit owner authorization when SSO is
-enforced; they cannot be combined with `--workspace` during login.
+enforced; they cannot be combined with `--workspace-id` during login.
 
 ## Connect your coding agent
 

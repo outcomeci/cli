@@ -238,7 +238,7 @@ def _check_workspace_sso(status: int, value: Any, api_url: str) -> None:
     workspace_id = detail.get("workspace_id")
     if not isinstance(workspace_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", workspace_id):
         raise CloudRequestError("This workspace requires Microsoft SSO. Sign in again.", status)
-    command = f"oci auth login --workspace {shlex.quote(workspace_id)}"
+    command = f"oci auth login --workspace-id {shlex.quote(workspace_id)}"
     if api_url.rstrip("/") != "https://api.outcomeci.com":
         command += f" --api-url {shlex.quote(api_url)}"
     raise CloudRequestError(
