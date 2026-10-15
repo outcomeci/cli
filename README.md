@@ -243,3 +243,25 @@ then rejects the package if privacy checks or the compiler fail.
 Start with the [source map and execution walkthrough](CONTRIBUTING.md#source-map).
 [CONTRIBUTING.md](CONTRIBUTING.md) also covers setup and the formatting, lint,
 test and package checks CI runs.
+
+### Google workflow credentials
+
+Create Google credentials in the workspace Vault and select the Drive or Analytics
+permissions that each workflow needs. You can create multiple entries for different
+accounts or grants. Managed credentials use OutcomeCI's OAuth app: the API retains
+refresh credentials and leases short-lived access tokens to the runner. Account
+sign-in does not grant workflow API access. Existing user-owned OAuth apps and
+service accounts remain supported.
+
+Use `google.drive` for folder-scoped listing, file metadata, binary downloads and
+Google Workspace document exports, folder creation and file metadata updates. Use
+`google.analytics` for GA4 reports. Both use the same Google module and can refer to
+the same Vault entry when it has the necessary permissions. Downloads are saved as
+run artifacts after grant checks; Drive downloads are limited to 20 MiB and exports
+to 10 MiB. This does not provide arbitrary file content editing or sharing.
+
+This revision pins the matching connector commit while its release is prepared.
+Release the connector first and replace the Git dependency with its published
+version before promoting the CLI to PyPI. Existing workflows with locked Google
+Analytics connector digests must refresh their connector lock to accept bearer
+authentication; existing OAuth and service-account methods remain available.

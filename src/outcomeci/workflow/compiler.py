@@ -474,21 +474,48 @@ def _download(response: dict[str, Any], field: str) -> dict[str, Any]:
         return {}
     download = _mapping(response["download"], f"{field}.response.download")
     hosts = download.get("hosts")
-    if (
-        set(download) != {"url", "hosts", "name", "content_type", "max_bytes"}
-        or not all(
-            isinstance(download[key], str) and download[key].startswith("body")
-            for key in ("url", "name", "content_type")
+    common = {"hosts", "name", "content_type", "max_bytes"}
+    path_mode = "path" in download
+    expected = common | ({"path", "query"} if path_mode else {"url"})
+
+    def valid_source(value: Any) -> bool:
+        return isinstance(value, str) and (value == "body" or value.startswith("body."))
+
+    content_type = download.get("content_type")
+    valid_content_type = valid_source(content_type) or (
+        path_mode and isinstance(content_type, str) and content_type.startswith("input.")
+    )
+    path = download.get("path")
+    valid_target = (
+        isinstance(path, str)
+        and path.startswith("/")
+        and not path.startswith("//")
+        and "?" not in path
+        and "#" not in path
+        and "\\" not in path
+        and ".." not in path.split("/")
+        and isinstance(download.get("query"), dict)
+        and all(
+            isinstance(key, str) and isinstance(value, (str, int, bool))
+            for key, value in download["query"].items()
         )
+        if path_mode
+        else valid_source(download.get("url"))
+    )
+    if (
+        set(download) != expected
+        or not valid_target
+        or not valid_source(download.get("name"))
+        or not valid_content_type
         or not isinstance(hosts, list)
         or not hosts
         or not all(isinstance(host, str) and host for host in hosts)
-        or not isinstance(download["max_bytes"], int)
+        or type(download.get("max_bytes")) is not int
         or not 0 < download["max_bytes"] <= 100 * 1024 * 1024
     ):
         raise ConfigError(
-            f"{field}.response.download needs url, name and content_type paths, hosts "
-            "and max_bytes up to 100 MiB"
+            f"{field}.response.download needs a response URL or same-origin path/query, "
+            "name and content_type paths, hosts and max_bytes up to 100 MiB"
         )
     return {"download": dict(download)}
 
