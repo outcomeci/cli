@@ -15,6 +15,14 @@ from outcomeci.runtime import container as run_container
 from outcomeci.runtime import launcher as workflow_run
 from outcomeci.runtime.process import ExecutionError
 
+
+@pytest.fixture(autouse=True)
+def docker_engine(monkeypatch):
+    monkeypatch.setattr(
+        workflow_run, "discover_engine", lambda requested=None: workflow_run.ContainerEngine()
+    )
+
+
 COMPILED = {"triggers": {"daily": {"type": "cron"}, "go": {"type": "manual"}}}
 
 
@@ -190,8 +198,10 @@ class _FakeContainer:
 def image_env(monkeypatch, tmp_path):
     monkeypatch.setenv("OUTCOMECI_CONFIG_HOME", str(tmp_path / "config"))
     monkeypatch.setattr(workflow_run, "compile_workflow", lambda config: IMAGE_COMPILED)
-    monkeypatch.setattr(workflow_run, "_check_image", lambda image: None)
-    monkeypatch.setattr(workflow_run, "_check_network", lambda image, network, hosts: None)
+    monkeypatch.setattr(workflow_run, "_check_image", lambda image, **kwargs: None)
+    monkeypatch.setattr(
+        workflow_run, "_check_network", lambda image, network, hosts, **kwargs: None
+    )
     monkeypatch.setattr(workflow_run, "issue_debug_lease", mock.Mock(return_value=_agent_lease()))
     monkeypatch.setattr(workflow_run, "complete_debug_agent_lease", mock.Mock())
     monkeypatch.setattr(workflow_run, "renew_debug_agent_lease", mock.Mock())
@@ -370,7 +380,7 @@ def test_an_unresolvable_agent_host_fails_before_the_run_and_suggests_host_netwo
         workflow_run._check_network("img", None, ["api.openai.com", "api.anthropic.com"])
 
     message = str(failure.value)
-    assert "cannot resolve api.openai.com on Docker's default bridge network" in message
+    assert "cannot resolve api.openai.com on docker's default network" in message
     assert "api.anthropic.com" not in message
     assert "pass --network host" in message
 
@@ -471,7 +481,7 @@ def test_a_cloud_run_probes_the_network_after_the_image_and_before_any_lease(
     root, _ = image_env
     probed = []
 
-    def failing_probe(image, network, hosts):
+    def failing_probe(image, network, hosts, **kwargs):
         probed.append((image, network, hosts))
         raise ExecutionError("the container cannot resolve api.openai.com")
 
@@ -774,7 +784,7 @@ def test_a_local_run_probes_the_network_for_the_agents_it_runs(monkeypatch, loca
     root, _ = local_env
     probed = []
 
-    def failing_probe(image, network, hosts):
+    def failing_probe(image, network, hosts, **kwargs):
         probed.append((image, network, hosts))
         raise ExecutionError("the container cannot resolve api.anthropic.com")
 
@@ -944,3 +954,40 @@ def test_the_cli_offers_opencode_for_agent():
     from outcomeci.cli import AGENT_CHOICES
 
     assert "opencode" in AGENT_CHOICES
+
+
+def test_podman_is_used_for_execution_and_interrupt_cleanup(monkeypatch, image_env):
+    root, processes = image_env
+    engine = workflow_run.ContainerEngine(command="podman", podman=True, rootless=True)
+    monkeypatch.setattr(workflow_run, "discover_engine", lambda requested: engine)
+    container = _container(monkeypatch, interrupt=True)
+    with pytest.raises(KeyboardInterrupt):
+        _image_run(root, runtime="podman")
+    assert container.seen["command"][0] == "podman"
+    assert "--userns=keep-id" in container.seen["command"]
+    assert [call.args[0][:2] for call in processes.call_args_list] == [
+        ["podman", "kill"],
+        ["podman", "rm"],
+    ]
+
+
+def test_image_pull_errors_are_not_misdiagnosed_as_an_old_runner(monkeypatch):
+    monkeypatch.setattr(
+        workflow_run.subprocess,
+        "run",
+        mock.Mock(
+            return_value=mock.Mock(
+                returncode=125,
+                stderr="no matching manifest for linux/arm64\n",
+            )
+        ),
+    )
+    with pytest.raises(ExecutionError, match="could not start runner image.*no matching manifest"):
+        workflow_run._check_image("img")
+
+
+def test_network_probe_startup_errors_are_not_misdiagnosed_as_dns(monkeypatch):
+    probe = _probe(monkeypatch, returncode=125, stdout="")
+    probe.return_value.stderr = "permission denied"
+    with pytest.raises(ExecutionError, match="network probe could not run: permission denied"):
+        workflow_run._check_network("img", None, ["api.openai.com"])

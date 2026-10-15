@@ -272,8 +272,13 @@ def parser() -> argparse.ArgumentParser:
         help="Resume a run in --dir that stopped on an error, from its recorded state",
     )
     run_command.add_argument(
+        "--runtime",
+        choices=("docker", "podman"),
+        help="Container engine; defaults to Docker when installed, otherwise Podman",
+    )
+    run_command.add_argument(
         "--network",
-        help="Docker network for the container, such as host when the default bridge "
+        help="Container network for the runner, such as host when the default bridge "
         "network cannot resolve DNS",
     )
     run_command.add_argument(
@@ -544,6 +549,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                             image=args.image,
                             network=args.network,
                             retry_run=args.retry,
+                            runtime=args.runtime,
                         )
                     )
                     return 0
@@ -561,6 +567,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         image=args.image,
                         network=args.network,
                         retry_run=args.retry,
+                        runtime=args.runtime,
                     )
                 )
                 return 0
