@@ -365,9 +365,24 @@ class IntegrationExecutor:
         body: Any,
         headers: Mapping[str, str],
         capability: str,
+        *,
+        inputs: Mapping[str, Any],
+        base_url: str,
     ) -> dict[str, Any]:
-        """Fetch the file a response points to, from an allowed host only."""
-        url = _found(body, spec["url"])
+        """Fetch after metadata grant checks, from an allowed host without redirects."""
+        query = None
+        if "path" in spec:
+            path = str(_render(spec["path"], inputs, path_value=True))
+            url = urljoin(base_url + "/", path.lstrip("/"))
+            if urlsplit(url).netloc != urlsplit(base_url).netloc:
+                raise IntegrationError(
+                    "integration.download_denied",
+                    "download escaped its configured origin",
+                    category="policy",
+                )
+            query = _render(spec["query"], inputs)
+        else:
+            url = _found(body, spec["url"])
         parsed = urlsplit(url) if isinstance(url, str) else None
         if parsed is None or parsed.scheme != "https" or parsed.hostname not in spec["hosts"]:
             raise IntegrationError(
@@ -385,7 +400,7 @@ class IntegrationExecutor:
         authorization = {k: v for k, v in headers.items() if k.lower() == "authorization"}
         limit = int(spec["max_bytes"])
         received = bytearray()
-        with client.stream("GET", url, headers=authorization) as response:
+        with client.stream("GET", url, headers=authorization, params=query) as response:
             if response.status_code != 200:
                 raise IntegrationError(
                     "integration.download_failed",
@@ -404,7 +419,8 @@ class IntegrationExecutor:
                         category="validation",
                     )
         name = _found(body, spec["name"])
-        digest = hashlib.sha256(url.encode()).hexdigest()[:12]
+        identity = str(httpx.URL(url, params=query)) if query is not None else url
+        digest = hashlib.sha256(identity.encode()).hexdigest()[:12]
         target = self.downloads / f"{digest}-{_safe_name(name)}"
         self.downloads.mkdir(parents=True, exist_ok=True)
         # Written beside the target and renamed over it, so a link planted at
@@ -416,7 +432,11 @@ class IntegrationExecutor:
         return {
             "path": str(target),
             "name": str(name or target.name),
-            "content_type": str(_found(body, spec["content_type"]) or ""),
+            "content_type": str(
+                _found(inputs, "body." + spec["content_type"].removeprefix("input."))
+                if "path" in spec and spec["content_type"].startswith("input.")
+                else _found(body, spec["content_type"]) or ""
+            ),
             "bytes": len(received),
         }
 
@@ -872,7 +892,15 @@ class IntegrationExecutor:
                         )
                 download = operation["response"].get("download")
                 file = (
-                    self._download(client, download, body, headers, capability)
+                    self._download(
+                        client,
+                        download,
+                        body,
+                        headers,
+                        capability,
+                        inputs=inputs,
+                        base_url=connection["base_url"],
+                    )
                     if download
                     else None
                 )
