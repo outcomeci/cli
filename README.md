@@ -189,13 +189,13 @@ or under `OUTCOMECI_CONFIG_HOME` when it is set. To choose another API, use
 `oci auth login --api-url URL` or set `OUTCOMECI_API_URL` before signing in.
 Subsequent authenticated commands use the API URL saved with that login.
 
-For a workspace that requires Microsoft SSO, authenticate for that workspace:
+For a workspace that requires SSO, authenticate for that workspace:
 
 ```sh
 oci auth login --workspace-id workspace_example
 ```
 
-The browser completes the workspace's Microsoft verification before approving the
+The browser completes the workspace's identity-provider verification before approving the
 CLI. Workspace SSO expires independently of token refresh. If a command requests
 SSO again, repeat the workspace login, then rerun the command. Use `--no-open` to
 copy the browser link manually and `--api-url URL` for staging. Workspace API keys
