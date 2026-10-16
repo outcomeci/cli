@@ -263,3 +263,80 @@ to 10 MiB. This does not provide arbitrary file content editing or sharing.
 This release pins `outcomeci-connectors==0.12.0`. Existing workflows with locked Google
 Analytics connector digests must refresh their connector lock to accept bearer
 authentication; existing OAuth and service-account methods remain available.
+
+## Query previous step outputs
+
+A step can opt its validated `returns:` into local or cloud output history with
+`index.fields`. Existing JSON output artifacts remain authoritative. Each workflow
+has its own SQLite projection; cloud execution publishes immutable snapshots to
+private S3 storage. History is not automatically shared between workflows or
+uploaded from a local project.
+
+Declare sources at workflow scope to limit accessible steps, returned fields and
+result counts. Put a query under `outputs.queries` for shared inputs, or under a
+step's `query` for inputs specific to that step. Reference a result explicitly with
+`history.<query_name>` in `with`; declaring a source does not inject its contents.
+
+```yaml
+apiVersion: outcomeci.workflow/v1
+trigger: manual
+outputs:
+  sources:
+    history:
+      workflow: self
+      steps: [assess]
+      fields: [customer_id, decision, summary]
+      max_results: 10
+  queries:
+    previous:
+      source: history
+      where:
+        customer_id: {eq: {ref: trigger.customer_id}}
+      order_by: [{field: completed_at, direction: desc}]
+      limit: 3
+steps:
+  - assess:
+      reason: Assess the customer using the request and prior assessments.
+      with: [trigger, history.previous]
+      returns:
+        customer_id: string
+        decision: string
+        summary: string
+      index:
+        fields: [customer_id, decision]
+```
+
+Only indexed fields and supported system metadata can be filtered or sorted.
+Source `fields` also limits which return values are disclosed; a summary may be
+returned without being indexed. Predicates support `eq`, `lt`, `lte`, `gt`, `gte`
+and explicit `is_null`, with strict scalar types. Strings are literals; use
+`{ref: trigger.field}` for a dynamic value. Step queries can also reference completed
+predecessors. Queries cannot expand source permissions.
+
+A run pins its history snapshot before work starts. New publications do not change
+its inputs, including after resume. The current run is excluded; use normal step
+references for its outputs. Sources default to `run_status: succeeded`; explicitly
+choose `step_succeeded` to include accepted outputs from runs that subsequently
+failed. Empty queries return a list; `required: true` makes no matches an input
+error. Deleted or unavailable evidence fails explicitly rather than selecting a
+newer output.
+
+Local inspection and recovery use the same source constraints:
+
+```console
+oci outputs query --source history --query '{"where":{"customer_id":{"eq":"customer_123"}},"limit":3}'
+oci outputs rebuild
+```
+
+Both commands accept `--dir` and `--config`. Rebuild replays retained output evidence
+without invoking models or repeating workflow actions; missing sources are reported.
+Query results include source references and bounded pagination. Limits are 100 rows
+and 256 KiB per query, with 20 queries and 1 MiB of historical inputs per run.
+Indexing failures leave JSON artifacts intact and report publication availability
+separately. Workflow definitions without indexing keep their existing behavior.
+
+Local workflow identities are stored privately by project-relative configuration
+path. Renaming the configuration starts separate history; it does not silently
+combine databases. Source grants restrict query results, not access to artifacts
+already present in a trusted local workflow process or the same managed run.
+Managed runners query the API and never receive the raw history database.

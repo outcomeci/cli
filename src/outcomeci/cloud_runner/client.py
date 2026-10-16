@@ -155,6 +155,9 @@ class CoreClient:
     def publication_agent_fallback(self, token: str) -> dict[str, Any]:
         return self._post("agent-fallback", {}, token)
 
+    def workflow_output_query(self, lease_token: str, payload: dict[str, Any]) -> dict[str, Any]:
+        return self._post("outputs/query", {"lease_token": lease_token, **payload})
+
     def workflow_start(self, lease_token: str) -> None:
         self._post("start", {"lease_token": lease_token})
 

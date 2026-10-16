@@ -54,6 +54,7 @@ class ExecutionOptions:
     # under this revision; compiled hashes differ across runner or connector
     # builds of the same revision, so they cannot identify it alone.
     workflow_revision_id: str | None = None
+    output_history_client: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None
     _container_isolated: bool = False
 
 
@@ -288,7 +289,7 @@ def _repair_outputs(
         root,
         600,
         allow_local_auth=True,
-        extra_env={},
+        extra_env={"OUTCOMECI_OUTPUT_HISTORY": "1"} if "output_history" in compiled else {},
         writable_paths=writable_artifacts,
         excluded_env=excluded_env,
         container_isolated=container_isolated,
@@ -414,6 +415,14 @@ def _execute(
         "Use only the supplied workflow context and scoped capabilities."
     )
     runtime_cli = shlex.join([sys.executable, "-m", "outcomeci.cli"])
+    from outcomeci.runtime import output_history
+
+    output_history.prepare(root, config, compiled, state, options)
+    output_history.resolve(root, compiled, state, options, step)
+    if "output_history" in compiled:
+        attempts = state.setdefault("output_attempts", {})
+        attempts[step] = attempts.get(step, 0) + 1
+        _write(root, state)
     try:
         invocations = _step_invocations(
             root,
@@ -428,6 +437,9 @@ def _execute(
         )
     except ExecutionError as exc:
         state.update({"status": "error", "error": str(exc)})
+        from outcomeci.runtime import output_history
+
+        output_history.publish(root, compiled, state)
         state["steps"] = _step_states(compiled, state)
         _write(root, state)
         raise
@@ -755,7 +767,14 @@ def _run_step(
                             root,
                             7200,
                             allow_local_auth=True,
-                            extra_env=capability_env,
+                            extra_env={
+                                **capability_env,
+                                **(
+                                    {"OUTCOMECI_OUTPUT_HISTORY": "1"}
+                                    if "output_history" in compiled
+                                    else {}
+                                ),
+                            },
                             writable_paths=writable_artifacts,
                             excluded_env=connection_secrets,
                             container_isolated=_container_isolated,
@@ -849,11 +868,22 @@ def _run_step(
             )
     except (ExecutionError, OSError, json.JSONDecodeError) as exc:
         state.update({"status": "error", "error": str(exc)})
+        from outcomeci.runtime import output_history
+
+        output_history.publish(root, compiled, state)
         state["steps"] = _step_states(compiled, state)
         _write(root, state)
         if isinstance(exc, ExecutionError):
             raise
         raise ExecutionError(f"invalid local outcome artifacts: {exc}") from exc
+    from outcomeci.runtime import output_history
+
+    try:
+        output_history.accept(root, compiled, state, step, count=len(invocations))
+    except (ExecutionError, OSError, ValueError) as exc:
+        state.setdefault("output_history", {}).update(
+            publication_status="failed", publication_error=str(exc)
+        )
     state["completed_steps"] = [*state.get("completed_steps", []), step]
     state["status"] = (
         "awaiting_confirmation" if _ready(compiled, state["completed_steps"]) else "completed"
@@ -893,6 +923,10 @@ def _run_step(
     (outcome_root / "manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
+    from outcomeci.runtime import output_history
+
+    _write(root, state)
+    output_history.publish(root, compiled, state, step)
     state["ready_steps"] = _ready(compiled, state["completed_steps"])
     state["steps"] = _step_states(compiled, state)
     _write(root, state)
@@ -952,6 +986,9 @@ def _settle(
         ready = _ready(compiled, state.get("completed_steps", []))
         if not ready:
             state.update({"status": "completed", "ready_steps": []})
+            from outcomeci.runtime import output_history
+
+            output_history.publish(root, compiled, state)
             state["steps"] = _step_states(compiled, state)
             _write(root, state)
             _label(root, compiled, state, options)
@@ -961,6 +998,10 @@ def _settle(
         if step_block is None:
             state["step"] = step
             return True
+        from outcomeci.runtime import output_history
+
+        state["step"] = step
+        output_history.resolve(root, compiled, state, options, step)
         reason = v1_runtime.skip_reason(root, state, step_block)
         if reason is not None:
             _skip(state, step, reason)
@@ -968,6 +1009,9 @@ def _settle(
         if step_block["kind"] == "agent":
             state["step"] = step
             return True
+        from outcomeci.runtime import output_history
+
+        output_history.resolve(root, compiled, state, options, step)
         state.update({"step": step, "status": "running"})
         _write(root, state)
         try:
@@ -1004,13 +1048,17 @@ def _settle(
             # Recorded as an error so `retry` can resume the step; retry sends
             # runtime-driven steps back through here, never to an agent.
             state.update({"status": "error", "error": str(exc)})
+            output_history.publish(root, compiled, state)
             state["steps"] = _step_states(compiled, state)
             _write(root, state)
             if isinstance(exc, ExecutionError):
                 raise
             raise ExecutionError(f"step {step} failed: {exc}") from exc
         if approved:
+            output_history.accept(root, compiled, state, step)
             state["completed_steps"] = [*state.get("completed_steps", []), step]
+            _write(root, state)
+            output_history.publish(root, compiled, state, step)
             continue
         _skip(state, step, "the await window expired without the signal")
         for name in compiled["instructions"]["steps"]:
@@ -1054,9 +1102,15 @@ def trigger(
         intent,
         trigger={"name": trigger_name, "type": definition["type"], "value": payload},
     )
+    from outcomeci.runtime import output_history
+
+    output_history.prepare(root, config, compiled, state, options)
     if on_created is not None:
         _write(root, state)
         on_created(state["run_id"])
+    from outcomeci.runtime import output_history
+
+    output_history.prepare(root, config, compiled, state, options)
     if not _settle(root, compiled, state, options):
         return state
     return _execute(root, config, state, options=options)
@@ -1076,6 +1130,9 @@ def continue_run(
     if not approve:
         raise ExecutionError("continuation requires explicit --approve")
     compiled = compile_workflow(config)
+    from outcomeci.runtime import output_history
+
+    output_history.prepare(root, config, compiled, state, options)
     if not _settle(root, compiled, state, options):
         return state
     state["status"] = "queued"
@@ -1098,6 +1155,9 @@ def retry(
     state.pop("error", None)
     _write(root, state)
     compiled = compile_workflow(config)
+    from outcomeci.runtime import output_history
+
+    output_history.prepare(root, config, compiled, state, options)
     if not _settle(root, compiled, state, options):
         return state
     return _execute(root, config, state, options=options)
@@ -1134,6 +1194,9 @@ def resume_wait(
     compiled = compile_workflow(config)
     if not _same_revision(state, compiled, options):
         raise ExecutionError("workflow changed since its durable checkpoint")
+    from outcomeci.runtime import output_history
+
+    output_history.prepare(root, config, compiled, state, options)
     if not _settle(root, compiled, state, options):
         return state
     return _execute(root, config, state, options=options)

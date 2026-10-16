@@ -262,6 +262,16 @@ def parser() -> argparse.ArgumentParser:
     )
     auth_commands.add_parser("status")
     auth_commands.add_parser("logout")
+    outputs = commands.add_parser("outputs", help="Query or rebuild local workflow output history")
+    output_commands = outputs.add_subparsers(dest="outputs_command", required=True)
+    output_query = output_commands.add_parser("query", help="Query a declared output source")
+    _add_workflow_arguments(output_query)
+    output_query.add_argument("--source", required=True, help="Declared workflow output source")
+    output_query.add_argument("--query", default="{}", help="Bounded query as a JSON object")
+    output_rebuild = output_commands.add_parser(
+        "rebuild", help="Replay retained JSON output evidence"
+    )
+    _add_workflow_arguments(output_rebuild)
     workflow = commands.add_parser("workflow", help="Compile, run and publish workflows")
     workflow_commands = workflow.add_subparsers(dest="workflow_command", required=True)
     workflow_compile = workflow_commands.add_parser(
@@ -519,6 +529,23 @@ def _mcp_init(args: argparse.Namespace) -> int:
 def main(argv: Sequence[str] | None = None) -> int:
     args = parser().parse_args(argv)
     try:
+        if args.command == "outputs":
+            from outcomeci.artifacts import output_commands
+
+            root = args.dir.resolve()
+            config = _workflow_path(args)
+            if args.outputs_command == "rebuild":
+                result = output_commands.rebuild(root, config)
+            else:
+                try:
+                    request = json.loads(args.query)
+                except ValueError as exc:
+                    raise ExecutionError("--query requires a JSON object") from exc
+                if not isinstance(request, dict):
+                    raise ExecutionError("--query requires a JSON object")
+                result = output_commands.query(root, config, args.source, request)
+            _print_json(result)
+            return 0
         if args.command == "auth":
             if args.auth_command == "login":
                 if args.key_stdin:
