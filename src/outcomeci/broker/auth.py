@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import base64
 import json
+import re
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
@@ -44,6 +45,10 @@ KIND_OF_TYPE = {
     "app_installation": "app_installation",
 }
 EXCHANGED = {"oauth2", "oidc", "jwt_bearer", "app_installation"}
+# Headers a credential may not name for its api key: they carry the session,
+# the origin or the proxy's own credential, not the API's.
+PROTECTED_HEADERS = {"cookie", "host", "proxy-authorization"}
+HEADER_NAME = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
 # Refresh a cached token this long before the provider says it expires.
 EXPIRY_MARGIN_SECONDS = 60
 DEFAULT_TOKEN_SECONDS = 300
@@ -96,6 +101,23 @@ def parse(resolved: Mapping[str, Any] | str | None) -> Credential:
             {str(key): str(value) for key, value in resolved["secrets"].items()},
         )
     return Credential(None, {}, {str(key): str(value) for key, value in resolved.items()})
+
+
+def _credential_header(
+    entry: Mapping[str, Any], credential: Credential, auth: Mapping[str, Any], reference: str
+) -> tuple[str, str]:
+    """For a connector that fixes no api key header (`custom`): the header the
+    credential's `header_name` names, else the connector's default, and the
+    credential's `prefix` before the key."""
+    header = str(credential.configuration.get("header_name") or entry.get("default_header") or "")
+    if not HEADER_NAME.fullmatch(header) or header.lower() in PROTECTED_HEADERS:
+        raise AuthError(
+            "integration.credential_header_invalid",
+            f"Vault entry {reference.removeprefix('vault:')} names header {header!r}, which "
+            f"{auth.get('connector', 'this connector')} cannot send an api key in",
+            category="configuration",
+        )
+    return header, str(credential.configuration.get("prefix") or "").strip()
 
 
 def _untyped_kind(credential: Credential, kinds: list[str]) -> str | None:
@@ -305,7 +327,10 @@ class Authenticator:
             )
         elif kind == "api_key":
             value = credential.value()
-            if entry.get("header"):
+            if entry.get("header_from") == "credential":
+                header, prefix = _credential_header(entry, credential, auth, reference)
+                headers[header] = f"{prefix} {value}" if prefix else value
+            elif entry.get("header"):
                 scheme = entry.get("scheme")
                 headers[entry["header"]] = f"{scheme} {value}" if scheme else value
             else:
