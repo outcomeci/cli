@@ -22,7 +22,11 @@ def test_explicit_decision_closes_unchanged_plan(monkeypatch, status, decision):
     monkeypatch.setattr(
         v1_runtime,
         "_turn",
-        lambda *args: {"status": status, "plan": copy.deepcopy(plan), "message": decision},
+        lambda *args, **kwargs: {
+            "status": status,
+            "plan": copy.deepcopy(plan),
+            "message": decision,
+        },
     )
     v1_runtime._answer(None, None, None, None, None, conversation, None, None, None)
     assert conversation["decision"] == decision
@@ -48,7 +52,7 @@ def test_changed_plan_never_inherits_approval_even_for_a_field_named_decision(mo
     monkeypatch.setattr(
         v1_runtime,
         "_turn",
-        lambda *args: {"status": "converged", "plan": answer, "message": "Approved."},
+        lambda *args, **kwargs: {"status": "converged", "plan": answer, "message": "Approved."},
     )
     v1_runtime._answer(None, None, None, None, None, conversation, None, None, None)
     assert conversation["decision"] == "undecided"
@@ -74,7 +78,7 @@ def test_decision_output_controls_downstream_writes(
     root = _slack_root(tmp_path, monkeypatch)
     slack = example.Slack(["approved" if status == "converged" else "rejected"])
 
-    def turn(root, compiled, state, step, spec, conversation, runner, model, options):
+    def turn(root, compiled, state, step, spec, conversation, runner, model, options, by=None):
         return {"status": status, "plan": copy.deepcopy(conversation["plan"]), "message": expected}
 
     monkeypatch.setattr(v1_runtime, "_turn", turn)

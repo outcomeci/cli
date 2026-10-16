@@ -279,7 +279,7 @@ class Stranger(slack_example.Slack):
         return super().__call__(request)
 
 
-def test_only_the_requester_can_steer_or_approve_the_plan(tmp_path, monkeypatch):
+def test_only_the_requester_can_approve_the_plan(tmp_path, monkeypatch):
     root = _slack_root(tmp_path, monkeypatch)
     slack = Stranger(["go ahead"])
     agent = slack_example.Agent()
@@ -287,13 +287,13 @@ def test_only_the_requester_can_steer_or_approve_the_plan(tmp_path, monkeypatch)
     result = slack_example._run(root, slack, agent, monkeypatch)
 
     assert result["status"] == "completed"
+    # Both replies land in one poll and get one answer; the stranger's words
+    # are part of the discussion, and the requester's own "go ahead" closes it.
     assert agent.turns == ["go ahead"]
-    humans = [
-        turn
-        for turn in slack_example._consultation(root, result["run_id"])["turns"]
-        if turn["from"] == "human"
-    ]
-    assert len(humans) == 1
+    consultation = slack_example._consultation(root, result["run_id"])
+    humans = [turn for turn in consultation["turns"] if turn["from"] == "human"]
+    assert [turn["user"] for turn in humans] == ["U2", "U1"]
+    assert consultation["status"] == "converged"
 
 
 class Verbose(slack_example.Agent):
