@@ -66,6 +66,33 @@ fields are filled in by the broker. Tavily grant constraints must be static
 values. A decision can select conditional search steps with different domain
 or topic grants; see [the Slack research example](tests/examples/slack-research/outcome.yml).
 
+An API without a first-party connector binds with `custom`. The workflow
+names the origin, and a static Vault credential (a token, an api key, or
+basic auth) signs each request:
+
+```yaml
+secrets:
+  acme: vault:acme/token
+apis:
+  acme: {uses: custom, base_url: https://api.acme.com, auth: secrets.acme}
+steps:
+  - sync:
+      reason: Reconcile open orders.
+      can:
+        - acme.read: {path: /v1/orders}
+        - acme.write: {path: /v1/orders}
+```
+
+`base_url` is an https origin: no path, query or userinfo. `acme.read` sends
+GET; `acme.write` sends POST, PUT, PATCH or DELETE and only from a step that
+grants it. A `path` grant limits requests to that prefix; without one, any
+path on the origin. An `api_key` credential names its header with
+`--header-name` (default `X-API-Key`) and an optional `--prefix`. Every
+request is pinned to the origin, follows no redirects, refuses private
+addresses and cannot set Authorization, Cookie, Host or Proxy-Authorization.
+A local run may set `allow_private_network: true` on the binding to reach a
+private or `http` origin; managed Cloud runs refuse such a workflow.
+
 ## Credentials
 
 A workflow names a credential and never an auth method. The Vault entry
