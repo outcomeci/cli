@@ -18,6 +18,7 @@ from functools import cache
 from importlib.metadata import entry_points
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -324,13 +325,23 @@ def _path_value(raw: Any, rule: dict[str, Any], field: str) -> dict[str, Any]:
     """A literal for a path-scoped argument: a mapping, or `a/b` for two fields."""
     fields = rule.get("value_fields") or []
     if isinstance(raw, str) and len(fields) == 2 and raw.count("/") == 1 and all(raw.split("/")):
-        return dict(zip(fields, raw.split("/"), strict=True))
-    if isinstance(raw, dict) and set(raw) == set(fields):
-        return raw
-    raise ConfigError(
-        f"{field} must be a reference to an earlier output, or "
-        + ("owner/name" if len(fields) == 2 else "{" + ", ".join(fields) + "}")
-    )
+        raw = dict(zip(fields, raw.split("/"), strict=True))
+    elif isinstance(raw, str) and len(fields) == 1:
+        raw = {fields[0]: raw}
+    if not (isinstance(raw, dict) and set(raw) == set(fields)):
+        raise ConfigError(
+            f"{field} must be a reference to an earlier output, or "
+            + ("owner/name" if len(fields) == 2 else "{" + ", ".join(fields) + "}")
+        )
+    if not all(isinstance(item, str) and item.strip() for item in raw.values()):
+        raise ConfigError(f"{field}: each of {', '.join(fields)} must be a non-empty string")
+    if "path_prefix" in rule:
+        prefix = rule["path_prefix"].format(**raw)
+        if not prefix.startswith("/") or any(
+            part in prefix for part in ("..", "//", "?", "#", "\\")
+        ):
+            raise ConfigError(f"{field} must be a request path under /, with no .., ? or #")
+    return raw
 
 
 def _reason(value: Any, base: Path, field: str) -> str | dict[str, Any]:
@@ -473,6 +484,30 @@ def _secret(auth: Any, secrets: dict[str, Any], field: str, hint: str) -> str:
     return name
 
 
+def _workflow_origin(value: Any, field: str, allow_private: bool) -> str:
+    """The origin a `custom` binding names: scheme and host only, https unless
+    the workflow opts into private-network access for a local run."""
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{field} is required for custom, such as https://api.example.com")
+    value = value.strip()
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme not in {"https", "http"}
+        or not parsed.hostname
+        or parsed.path not in {"", "/"}
+        or parsed.query
+        or parsed.fragment
+        or parsed.username is not None
+        or parsed.password is not None
+    ):
+        raise ConfigError(
+            f"{field} must be an origin only: scheme and host, no path, query, fragment or userinfo"
+        )
+    if parsed.scheme != "https" and not allow_private:
+        raise ConfigError(f"{field} must be https unless allow_private_network is true")
+    return value.rstrip("/")
+
+
 def _apis(document: dict[str, Any]) -> tuple[dict[str, Any], list[dict], dict[str, Any]]:
     secrets = _mapping(document.get("secrets") or {}, "secrets")
     for name, reference in secrets.items():
@@ -486,14 +521,30 @@ def _apis(document: dict[str, Any]) -> tuple[dict[str, Any], list[dict], dict[st
         field = f"apis.{name}"
         _identifier(name, field)
         binding = _mapping(raw, field)
-        if set(binding) - {"uses", "auth"}:
-            raise ConfigError(f"{field} supports uses and auth")
-        found = provider(str(binding.get("uses")))
+        if not isinstance(binding.get("uses"), str) or not binding["uses"]:
+            raise ConfigError(f"{field}.uses must name a connector")
+        found = provider(binding["uses"])
         contract = found.contract()
         if contract["schema_version"] != CONNECTOR_CONTRACT:
             raise ConfigError(
                 f"{field}: connector contract {contract['schema_version']} is unsupported"
             )
+        # A connector whose origin the workflow names (`custom`) takes base_url,
+        # and allow_private_network for local runs; every other binding is
+        # exactly {uses, auth}.
+        workflow_origin = contract.get("base_url_from") == "workflow"
+        supported = {"uses", "auth"} | (
+            {"base_url", "allow_private_network"} if workflow_origin else set()
+        )
+        if set(binding) - supported:
+            raise ConfigError(f"{field} supports {', '.join(sorted(supported))}")
+        allow_private = binding.get("allow_private_network", False)
+        if not isinstance(allow_private, bool):
+            raise ConfigError(f"{field}.allow_private_network must be true or false")
+        if workflow_origin:
+            base_url = _workflow_origin(binding.get("base_url"), f"{field}.base_url", allow_private)
+        else:
+            base_url = contract["base_url"]
         accepts = contract["auth"]["accepts"]
         keyless = [item["kind"] for item in accepts] == ["none"]
         auth = binding.get("auth")
@@ -512,8 +563,9 @@ def _apis(document: dict[str, Any]) -> tuple[dict[str, Any], list[dict], dict[st
             {
                 "ref": name,
                 "provider": "http",
-                "base_url": contract["base_url"],
+                "base_url": base_url,
                 "auth": connection_auth,
+                **({"allow_private_network": True} if allow_private else {}),
             }
         )
         integrations[name] = {

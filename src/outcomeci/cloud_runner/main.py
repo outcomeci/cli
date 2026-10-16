@@ -339,9 +339,20 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
         if rotating is not None:
             provider = str(rotating["provider"])
             credential_version = int(rotating["credential_version"])
-        fallback_spec = compile_workflow(config)["workflow"]["spec"]["agents"]["default"].get(
-            "fallback"
+        compiled_spec = compile_workflow(config)["workflow"]["spec"]
+        private = sorted(
+            str(item["ref"])
+            for item in compiled_spec.get("connections", [])
+            if item.get("allow_private_network")
         )
+        if private:
+            # Managed runners share infrastructure with the platform: a
+            # workflow may reach private addresses only from a local run.
+            raise ContractError(
+                "managed runners refuse private network access; remove "
+                f"allow_private_network from apis: {', '.join(private)}"
+            )
+        fallback_spec = compiled_spec["agents"]["default"].get("fallback")
         fallback_used = False
         active_agent: str | None = None
         active_model: str | None = None
