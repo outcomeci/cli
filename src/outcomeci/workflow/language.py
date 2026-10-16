@@ -37,7 +37,17 @@ TRIGGERS = {
     "manual": {"type": "manual"},
     "email": {"type": "email.received"},
 }
-TOP_LEVEL = {"type", "apiVersion", "name", "trigger", "secrets", "apis", "reasoning", "steps"}
+TOP_LEVEL = {
+    "type",
+    "apiVersion",
+    "name",
+    "trigger",
+    "secrets",
+    "apis",
+    "reasoning",
+    "steps",
+    "outputs",
+}
 STEP_FIELDS = {
     "decision": {"decision", "with", "using", "when"},
     "dispatch": {"dispatch", "with", "when"},
@@ -185,12 +195,17 @@ class _Scope:
         self.steps: dict[str, dict[str, Any]] = {}
         self.bound: set[str] = set()
         self.profiles: dict[str, dict[str, Any]] = {}
+        self.history: set[str] = set()
 
     def reference(self, value: Any, field: str) -> dict[str, Any] | None:
         """Parse `value` as a reference, or return None when it is a literal."""
         if not isinstance(value, str):
             return None
         head, _, rest = value.partition(".")
+        if head == "history":
+            if rest not in self.history:
+                raise ConfigError(f"{field}: unknown history query {rest}")
+            return {"ref": value, "step": None}
         if head == "trigger" or head in self.bound:
             return {"ref": value, "step": None}
         if head not in self.steps:
@@ -919,6 +934,19 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
     raw_steps = document.get("steps")
     if not isinstance(raw_steps, list) or not raw_steps:
         raise ConfigError("steps must be a non-empty list")
+    from outcomeci.workflow.output_queries import validate as validate_output_queries
+
+    history = (
+        validate_output_queries(document)
+        if "outputs" in document
+        or any(
+            isinstance(body, dict) and ("index" in body or "query" in body)
+            for entry in raw_steps
+            if isinstance(entry, dict)
+            for body in entry.values()
+        )
+        else None
+    )
     scope = _Scope()
     scope.profiles = profiles
     nodes: dict[str, Any] = {}
@@ -930,7 +958,7 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
         name, raw = next(iter(entry.items()))
         field = f"steps.{name}"
         _identifier(name, field)
-        if name in scope.steps or name in {"trigger", "calls"}:
+        if name in scope.steps or name in {"trigger", "calls", "history"}:
             raise ConfigError(f"{field} is a duplicate or reserved step name")
         step = _mapping(raw, field)
         discriminants = set(step) & {"await", "converse", "decision", "dispatch"}
@@ -939,11 +967,12 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
         kind = next(iter(discriminants), "agent")
         if kind == "dispatch" and document.get("type") != "dispatcher":
             raise ConfigError(f"{field}: {kind} requires type: dispatcher")
-        extra = set(step) - STEP_FIELDS[kind]
+        extra = set(step) - (STEP_FIELDS[kind] | {"index", "query"})
         if extra:
             raise ConfigError(
                 f"{field} has unsupported fields for {kind} steps: {', '.join(sorted(extra))}"
             )
+        scope.history = set(history["queries"] if history else {}) | set(step.get("query", {}))
         when = _when(step.get("when"), scope, f"{field}.when")
         node: dict[str, Any] = {"needs": list(order), "expects": {"inputs": [], "outputs": []}}
         block: dict[str, Any] = {"kind": kind, "when": when, "inputs": [], "grants": []}
@@ -965,6 +994,10 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
                     "schema": block["returns"]["schema"],
                 }
             )
+        if "index" in step:
+            block["index"] = step["index"]
+        if "query" in step:
+            block["query"] = step["query"]
         block["reads"] = sorted(reads)
         nodes[name] = node
         blocks[name] = block
@@ -988,6 +1021,7 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
         },
         "_v1": {
             "blocks": blocks,
+            **({"output_history": history} if history else {}),
             "order": order,
             "trigger": trigger_name,
             "reasoning": profiles,
@@ -1018,6 +1052,8 @@ def load(path: Path) -> dict[str, Any]:
     graph["source"] = document
     graph["connectors"] = extension["connectors"]
     graph["reasoning"] = extension["reasoning"]
+    if "output_history" in extension:
+        graph["output_history"] = extension["output_history"]
     if "training" in extension:
         graph["training"] = extension["training"]
     if "objective" in extension:

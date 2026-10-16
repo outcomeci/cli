@@ -168,6 +168,10 @@ def value(
     head, *parts = ref.split(".")
     if bound and head in bound:
         return _lookup(bound[head], parts)
+    if head == "history":
+        from outcomeci.runtime.output_history import inputs as history_inputs
+
+        return _lookup(history_inputs(state), parts)
     if head == "trigger":
         trigger = state.get("trigger") or {}
         payload = trigger.get("value")

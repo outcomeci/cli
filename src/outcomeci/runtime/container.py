@@ -122,7 +122,17 @@ def run_bundle(bundle: dict[str, Any], *, source: Path, output: Path) -> int:
 
     work = output / OUTPUT_WORK
     home = output / OUTPUT_HOME
-    shutil.copytree(source, work, symlinks=True, ignore=shutil.ignore_patterns(".git"))
+
+    def excluded(directory, names):
+        ignored = {".git"} & set(names)
+        if Path(directory) == source / ".outcomeci":
+            ignored.add("output-history")
+        return ignored
+
+    shutil.copytree(source, work, symlinks=True, ignore=excluded)
+    from outcomeci.runtime.output_history import copy_history
+
+    copy_history(source, work)
     home.mkdir(mode=0o700, parents=True, exist_ok=True)
     try:
         for login in bundle["credentials"]:

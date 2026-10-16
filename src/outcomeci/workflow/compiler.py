@@ -921,6 +921,8 @@ def _compile(document: dict[str, Any], root: Path) -> dict[str, Any]:
     revision = hashlib.sha256(
         json.dumps(revision_input, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+    if "output_history" in graph:
+        revision_input["output_history"] = graph["output_history"]
     compiled = {
         "schema_version": "outcomeci.workflow/v1",
         "api_version": graph.get("source", document)["apiVersion"],

@@ -410,6 +410,16 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
         heartbeat = threading.Thread(target=pulse, daemon=True)
         heartbeat.start()
 
+        def output_history_client(action: str, payload: dict[str, Any]) -> dict[str, Any]:
+            if action == "pin":
+                history = claim.get("output_history")
+                if not isinstance(history, dict) or not isinstance(history.get("snapshot"), dict):
+                    raise ExecutionError(
+                        "managed runner requires queryable-step-outputs/v1 API support"
+                    )
+                return history["snapshot"]
+            return client.workflow_output_query(lease, payload)
+
         def execution_options(
             agent_override: str | None, model_override: str | None
         ) -> local.ExecutionOptions:
@@ -423,6 +433,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 connector_client=lambda **kwargs: client.workflow_connector_call(lease, **kwargs),
                 decision_client=lambda **kwargs: client.workflow_decision(lease, **kwargs),
                 dispatch_client=lambda **kwargs: client.workflow_dispatch(lease, **kwargs),
+                output_history_client=output_history_client,
                 durable_waits=True,
                 resume_response=resume.get("response") if resume else None,
                 workflow_revision_id=(

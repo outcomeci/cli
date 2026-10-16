@@ -280,6 +280,7 @@ def invoke(
     else:  # opencode, already validated above
         argv = ["opencode", "run", "--pure", "--auto", "--format", "json", "--model", model, prompt]
         input_text = None
+    history_enabled = (extra_env or {}).get("OUTCOMECI_OUTPUT_HISTORY") == "1"
     if writable_paths is not None and not container_isolated:
         bwrap = shutil.which("bwrap")
         if not bwrap:
@@ -367,6 +368,7 @@ def invoke(
             config_home,
             workspace / ".outcomeci" / "vault.enc",
             workspace / ".outcomeci" / ".broker",
+            workspace / ".outcomeci" / "output-history",
         ):
             if private.is_dir():
                 wrapper += ["--tmpfs", str(private)]
@@ -374,8 +376,29 @@ def invoke(
                 wrapper += ["--ro-bind", "/dev/null", str(private)]
         outcomes = workspace / ".outcomeci" / "outcomes"
         if outcomes.exists():
-            for journal in outcomes.glob("*/.broker"):
-                wrapper += ["--tmpfs", str(journal)]
+            active_runs = {
+                path.parent
+                if path.parent.parent == outcomes
+                else next((parent for parent in path.parents if parent.parent == outcomes), None)
+                for path in writable_paths
+            }
+            for run_directory in outcomes.iterdir():
+                if not run_directory.is_dir():
+                    continue
+                if history_enabled and run_directory not in active_runs:
+                    wrapper += ["--tmpfs", str(run_directory)]
+                    continue
+                if history_enabled:
+                    for evidence in run_directory.iterdir():
+                        if evidence.is_dir() and not any(
+                            path.is_relative_to(evidence) for path in writable_paths
+                        ):
+                            wrapper += ["--tmpfs", str(evidence)]
+                        elif evidence.is_file() and evidence.name != "effects.json":
+                            wrapper += ["--ro-bind", "/dev/null", str(evidence)]
+                journal = run_directory / ".broker"
+                if journal.is_dir():
+                    wrapper += ["--tmpfs", str(journal)]
         for directory, subdirectories, files in os.walk(workspace):
             subdirectories[:] = [
                 name

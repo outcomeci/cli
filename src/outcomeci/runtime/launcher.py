@@ -700,6 +700,11 @@ def _run_in_image(
     Every secret crosses into the container on stdin, never argv or env, which
     `docker inspect` and process listings expose.
     """
+    compiled = compile_workflow(config)
+    if "output_history" in compiled:
+        from outcomeci.runtime.output_history import identity
+
+        identity(root, config)
     bundle = {
         "config": str(config.relative_to(root)),
         "trigger": name,
@@ -747,6 +752,10 @@ def _run_in_image(
             returncode = _run_container(command, container, json.dumps(bundle))
     finally:
         _import_run_state(hold.output / OUTPUT_WORK, root)
+        if "output_history" in compiled:
+            from outcomeci.runtime.output_history import import_history
+
+            import_history(hold.output / OUTPUT_WORK, root, config)
     result_file = hold.output / "result.json"
     if returncode != 0 or not result_file.is_file():
         raise ExecutionError(f"the run failed inside {image} (exit {returncode})")

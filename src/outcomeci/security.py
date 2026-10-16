@@ -11,7 +11,7 @@ from typing import Any
 
 def private_path(path: str | Path) -> bool:
     value = Path(path)
-    return bool({".broker", ".capability"}.intersection(value.parts)) or (
+    return bool({".broker", ".capability", "output-history"}.intersection(value.parts)) or (
         value.name == "vault.enc" or value.name == ".env" or value.name.startswith(".env.")
     )
 
