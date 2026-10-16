@@ -799,3 +799,34 @@ def test_a_local_model_step_without_litellm_says_how_to_install_it(monkeypatch):
 
     with pytest.raises(ExecutionError, match=r"outcomeci-cli\[models\]"):
         client(step="triage", profile="light", messages=[], tools=[])
+
+
+@pytest.mark.parametrize(
+    ("capability", "name"),
+    [
+        ("github.read", "github__read"),
+        ("drive.files.list", "drive__files__list"),
+        ("drive.files.export", "drive__files__export"),
+    ],
+)
+def test_dotted_capability_tools_are_valid_and_dispatch_to_original(capability, name):
+    inputs = {"folder_id": "root", "page_size": 1, "page_token": ""}
+    calls = []
+    model = Model({"s": [{"calls": [_call(name, inputs)]}, {"text": "Done"}]})
+
+    def client(**kwargs):
+        names = [tool["function"]["name"] for tool in kwargs["tools"]]
+        assert names == [name]
+        assert all(re.fullmatch(r"[A-Za-z0-9_-]{1,64}", item) for item in names)
+        return model(**kwargs)
+
+    models.run(
+        client,
+        step="s",
+        profile="light",
+        system="List one item",
+        user="Test the connection",
+        capabilities=[{"capability": capability, "input": {"type": "object"}}],
+        call=lambda operation, arguments: calls.append((operation, arguments)) or {"ok": True},
+    )
+    assert calls == [(capability, inputs)]

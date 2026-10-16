@@ -359,7 +359,7 @@ def _api_key(resolved: Mapping[str, Any] | str) -> str:
 
 
 def tool_name(capability: str) -> str:
-    return capability.replace(".", "__", 1)
+    return capability.replace(".", "__")
 
 
 def tools(capabilities: list[Mapping[str, Any]], returns: Mapping[str, Any] | None) -> list[dict]:
