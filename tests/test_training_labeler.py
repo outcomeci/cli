@@ -1,4 +1,4 @@
-"""The training labeler: a workflow/v2 run's annotation, written once it completes."""
+"""The training labeler: a workflow/v1 run's annotation, written once it completes."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ LABELS = {
 
 def _declare_labeler(path: Path, key: bool = True, **extra) -> None:
     document = yaml.safe_load(path.read_text())
-    document["apiVersion"] = "outcomeci.workflow/v2"
+    document["apiVersion"] = "outcomeci.workflow/v1"
     document["secrets"]["openai"] = "vault:openai/api-key"
     document["training"] = {
         "labeler": {
@@ -35,7 +35,9 @@ def _declare_labeler(path: Path, key: bool = True, **extra) -> None:
     path.write_text(yaml.safe_dump(document, sort_keys=False))
 
 
-def _run(workflow: Path, script: dict, monkeypatch, events: list | None = None):
+def _run(
+    workflow: Path, script: dict, monkeypatch, events: list | None = None, decision_client=None
+):
     model_steps._profiles(workflow / sentry.WORKFLOW, {"triage": "light", "announce": "light"})
     services = sentry.Services()
     sentry._serve(monkeypatch, services)
@@ -66,6 +68,7 @@ def _run(workflow: Path, script: dict, monkeypatch, events: list | None = None):
             "reason": "ok",
         },
         model_client=model,
+        decision_client=decision_client,
         event_sink=events.append,
     )
     result = run_container.execute(
@@ -171,7 +174,7 @@ def test_a_local_run_leases_the_keys_its_model_profiles_and_labeler_name(tmp_pat
     (tmp_path / "outcome.yml").write_text(
         yaml.safe_dump(
             {
-                "apiVersion": "outcomeci.workflow/v2",
+                "apiVersion": "outcomeci.workflow/v1",
                 "name": "smoke",
                 "trigger": "manual",
                 "secrets": {"anthropic": "vault:models/anthropic", "openai": "vault:models/openai"},
@@ -260,3 +263,23 @@ def test_the_labeler_sees_the_workflow_objective(model_steps_sentry_workflow, mo
     record = json.loads(model.calls[-1]["messages"][1]["content"].split("\n")[-1])
     assert record["objective"] == "Fix the reported error for good."
     assert "objective" in model.calls[-1]["messages"][1]["content"]
+
+
+def test_completed_workflow_invokes_optional_decision_labeler(
+    model_steps_sentry_workflow, monkeypatch
+):
+    from unittest.mock import Mock
+
+    from test_decision_labeler import response
+
+    workflow = model_steps_sentry_workflow
+    _declare_labeler(
+        workflow / sentry.WORKFLOW, mode="decision", model="openai/gpt-6-luna", review_below=0.6
+    )
+    decide = Mock(return_value=response(outcome="success", category="none", confidence=0.9))
+    result, _ = _run(workflow, {}, monkeypatch, events=[], decision_client=decide)
+    assert result["status"] == "completed"
+    assert result["training"]["labeler"]["status"] == "completed"
+    assert result["training"]["labeler"]["outcome"] == "success"
+    decide.assert_called_once()
+    assert decide.call_args.kwargs["step"] == models.LABELER_PROFILE

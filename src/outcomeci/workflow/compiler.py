@@ -812,10 +812,9 @@ def load(path: Path) -> dict[str, Any]:
     except (OSError, yaml.YAMLError) as exc:
         raise ConfigError(f"could not read {path}: {exc}") from exc
     api_version = document.get("apiVersion")
-    from outcomeci.workflow.language import SUPPORTED_API_VERSIONS
     from outcomeci.workflow.language import load as load_v1
 
-    if api_version not in SUPPORTED_API_VERSIONS:
+    if api_version != API_VERSION:
         raise ConfigError(f"unsupported apiVersion {api_version!r}; use {API_VERSION}")
 
     return load_v1(path)

@@ -367,3 +367,68 @@ path. Renaming the configuration starts separate history; it does not silently
 combine databases. Source grants restrict query results, not access to artifacts
 already present in a trusted local workflow process or the same managed run.
 Managed runners query the API and never receive the raw history database.
+
+### Workflow objectives and training annotations
+
+V1 workflows can optionally declare an `objective` and a `training.labeler`:
+
+```yaml
+apiVersion: outcomeci.workflow/v1
+objective: Identify the root cause and propose a concrete fix.
+trigger: manual
+training:
+  labeler:
+    model: openai/gpt-4.1-mini
+    review_below: 0.6
+steps:
+  - investigate:
+      reason: Investigate the reported issue and propose a fix.
+```
+
+The objective gives the labeler the workflow's intended outcome. After a run
+completes, the labeler writes a separate training annotation; a labeler failure
+does not fail the completed run. Optional `review_below` routes annotations with
+lower confidence to human review and must be between 0 and 1. The labeler accepts
+the same model credentials as other model profiles. Both fields are optional.
+Use `apiVersion: outcomeci.workflow/v1`; v2 is no longer supported.
+
+To use a decision model for labeling, opt in with `mode: decision`:
+
+```yaml
+apiVersion: outcomeci.workflow/v1
+objective: Identify the root cause and propose a concrete fix.
+trigger: manual
+secrets:
+  judge: vault:models/typesafe
+training:
+  labeler:
+    mode: decision
+    model: typesafe/jev-latest
+    key: secrets.judge
+    review_below: 0.6
+steps:
+  - investigate:
+      reason: Investigate the reported issue and propose a fix.
+```
+
+Decision mode supports `typesafe/<model>` with your Vault key, or
+`openai/gpt-6-luna` with an optional Vault key. It uses the existing Decisions
+transport locally and in managed runs; local runs need `outcomeci-cli[models]`.
+Decision mode does not support model fallback. Omit `mode` (or use `mode: llm`)
+to keep the existing LLM labeler and its generated explanations and labels.
+
+Decision labelers use a fixed rubric: outcome (`success`, `partial`, `failure`)
+and primary failure category (`none`, `missing_output`, `incorrect_output`,
+`incomplete_execution`, `insufficient_evidence`, `other`). The annotation keeps
+both answers and their probability distributions under `decisions`. Its
+`confidence` is the lower of the two answer confidences, and `review_below`
+uses that value. This aggregation is a review rule, not a measured probability
+that the whole annotation is correct. Choose the model and threshold using your
+own evaluation data.
+
+Decision annotations have empty `explanation` and `evidence` fields because
+these models do not generate prose. `labels` contains the selected failure
+category, or is empty for success. The transcript retains the supplied run
+record, rubric, provider response, and token usage. Refusals, malformed answers,
+and contradictory outcome/category pairs fail only the annotation, leaving the
+completed run unchanged. No additional LLM is called to explain a decision.

@@ -27,8 +27,6 @@ from outcomeci.reasoning.providers import CHAT_PROVIDERS, REVIEW_PROVIDERS, pars
 from outcomeci.workflow.compiler import IDENTIFIER, RUNNERS, ConfigError, validate_lowered
 
 API_VERSION = "outcomeci.workflow/v1"
-TRAINING_API_VERSION = "outcomeci.workflow/v2"
-SUPPORTED_API_VERSIONS = {API_VERSION, TRAINING_API_VERSION}
 ENTRY_POINT_GROUP = "outcomeci.connectors"
 CONNECTOR_CONTRACT = "outcomeci.connector/v1"
 INSTRUCTIONS_DIR = Path(".outcomeci/instructions")
@@ -49,6 +47,8 @@ TOP_LEVEL = {
     "reasoning",
     "steps",
     "outputs",
+    "training",
+    "objective",
 }
 DECISION_FIELDS = ("decided_by", "rule", "override", "otherwise")
 STEP_FIELDS = {
@@ -1034,10 +1034,7 @@ def _converse_step(name, step, node, block, reads, *, scope: _Scope, apis, base:
 
 def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
     """Lower a parsed v1 document to the validated shape plus per-step v1 blocks."""
-    allowed = TOP_LEVEL | (
-        {"training", "objective"} if document.get("apiVersion") == TRAINING_API_VERSION else set()
-    )
-    unknown = set(document) - allowed
+    unknown = set(document) - TOP_LEVEL
     if unknown:
         raise ConfigError(f"unknown top-level fields: {', '.join(sorted(unknown))}")
     default, fallback, profiles = _reasoning(
@@ -1055,6 +1052,10 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
         if set(training) != {"labeler"}:
             raise ConfigError("training requires labeler and supports no other fields")
         labeler = dict(_mapping(training["labeler"], "training.labeler"))
+        explicit_mode = "mode" in labeler
+        mode = labeler.pop("mode", "llm")
+        if mode not in ("llm", "decision"):
+            raise ConfigError("training.labeler.mode must be llm or decision")
         routed = "review_below" in labeler
         review_below = labeler.pop("review_below", None)
         training = {
@@ -1062,6 +1063,24 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
                 labeler, _mapping(document.get("secrets") or {}, "secrets"), "training.labeler"
             )
         }
+        profile = training["labeler"]
+        if mode == "decision":
+            if "fallback" in profile or not (
+                profile["model"] == "openai/gpt-6-luna"
+                or re.fullmatch(r"typesafe/[A-Za-z0-9][A-Za-z0-9._-]{0,150}", profile["model"])
+            ):
+                raise ConfigError(
+                    "training.labeler: decision mode requires openai/gpt-6-luna or "
+                    "typesafe/<model> without fallback"
+                )
+        elif any(
+            item.get("model") == "openai/gpt-6-luna"
+            or str(item.get("model", "")).startswith("typesafe/")
+            for item in (profile, profile.get("fallback", {}))
+        ):
+            raise ConfigError("training.labeler: decision models require mode: decision")
+        if explicit_mode:
+            profile["mode"] = mode
         if routed:
             if (
                 isinstance(review_below, bool)
@@ -1188,7 +1207,7 @@ def load(path: Path) -> dict[str, Any]:
         document = _mapping(yaml.safe_load(path.read_text(encoding="utf-8")), "document")
     except (OSError, yaml.YAMLError) as exc:
         raise ConfigError(f"could not read {path}: {exc}") from exc
-    if document.get("apiVersion") not in SUPPORTED_API_VERSIONS:
+    if document.get("apiVersion") != API_VERSION:
         raise ConfigError(f"apiVersion must be {API_VERSION}")
     stem = path.name.split(".", 1)[0]
     lowered = lower(document, path.parent, stem)

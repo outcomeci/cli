@@ -133,6 +133,33 @@ def validate_answers(questions: dict, response: dict) -> dict:
     return outputs
 
 
+def response_usage(response: dict[str, Any]) -> dict[str, int]:
+    """Validate provider counters before writing a decision usage record."""
+    from outcomeci.reasoning import models
+
+    usage = response.get("usage") or {}
+    if not isinstance(usage, dict):
+        raise ExecutionError("decision response has invalid usage")
+    details = usage.get("input_tokens_details") or {}
+    if not isinstance(details, dict) or any(
+        type(count) is not int or count < 0
+        for count in [
+            usage.get("input_tokens", 0),
+            usage.get("output_tokens", 0),
+            details.get("cached_tokens", 0),
+            details.get("cache_write_tokens", 0),
+        ]
+    ):
+        raise ExecutionError("decision response has invalid usage")
+    return models._usage(
+        {
+            **usage,
+            "cached_tokens": details.get("cached_tokens", 0),
+            "cache_write_tokens": details.get("cache_write_tokens", 0),
+        }
+    )
+
+
 def local_client(compiled: dict, resolver=None):
     def call(*, step: str, input: dict) -> dict:
         from outcomeci.reasoning.models import _key
@@ -141,8 +168,18 @@ def local_client(compiled: dict, resolver=None):
             import litellm
         except ImportError as exc:
             raise ExecutionError("local decision steps require outcomeci-cli[models]") from exc
-        block = compiled["instructions"]["steps"][step]["v1"]
-        profile = block["reasoning"]
+        from outcomeci.reasoning.labeling import decision_questions
+        from outcomeci.reasoning.models import LABELER_PROFILE
+
+        if step == LABELER_PROFILE:
+            profile = (compiled.get("training") or {}).get("labeler")
+            if not isinstance(profile, dict) or profile.get("mode") != "decision":
+                raise ExecutionError("training.labeler is not a declared decision labeler")
+            questions = decision_questions()
+        else:
+            block = compiled["instructions"]["steps"][step]["v1"]
+            profile = block["reasoning"]
+            questions = block["decision"]
         try:
             from outcomeci.reasoning.decision_transport import install_decision_response_guard
 
@@ -151,9 +188,7 @@ def local_client(compiled: dict, resolver=None):
                 model=profile["model"],
                 api_key=_key(profile, resolver),
                 input=json.dumps(input, allow_nan=False),
-                questions=[
-                    {"name": name, **question} for name, question in block["decision"].items()
-                ],
+                questions=[{"name": name, **question} for name, question in questions.items()],
                 timeout=60,
                 num_retries=0,
                 api_base={
