@@ -15,7 +15,8 @@ dependencies = [
     "httpx>=0.27",
     "jsonschema>=4.23",
     "pyte>=0.8",
-    "outcomeci-connectors>=0.15.0,<0.16",
+    # Prerelease floor permits pinned cross-repo development; stable rollout requires 0.15.
+    "outcomeci-connectors>=0.14.0.post1.dev1,<0.16",
 ]
 
 [project.scripts]
