@@ -1052,6 +1052,10 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
         if set(training) != {"labeler"}:
             raise ConfigError("training requires labeler and supports no other fields")
         labeler = dict(_mapping(training["labeler"], "training.labeler"))
+        explicit_mode = "mode" in labeler
+        mode = labeler.pop("mode", "llm")
+        if mode not in ("llm", "decision"):
+            raise ConfigError("training.labeler.mode must be llm or decision")
         routed = "review_below" in labeler
         review_below = labeler.pop("review_below", None)
         training = {
@@ -1059,6 +1063,24 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
                 labeler, _mapping(document.get("secrets") or {}, "secrets"), "training.labeler"
             )
         }
+        profile = training["labeler"]
+        if mode == "decision":
+            if "fallback" in profile or not (
+                profile["model"] == "openai/gpt-6-luna"
+                or re.fullmatch(r"typesafe/[A-Za-z0-9][A-Za-z0-9._-]{0,150}", profile["model"])
+            ):
+                raise ConfigError(
+                    "training.labeler: decision mode requires openai/gpt-6-luna or "
+                    "typesafe/<model> without fallback"
+                )
+        elif any(
+            item.get("model") == "openai/gpt-6-luna"
+            or str(item.get("model", "")).startswith("typesafe/")
+            for item in (profile, profile.get("fallback", {}))
+        ):
+            raise ConfigError("training.labeler: decision models require mode: decision")
+        if explicit_mode:
+            profile["mode"] = mode
         if routed:
             if (
                 isinstance(review_below, bool)

@@ -107,3 +107,60 @@ def test_v2_is_no_longer_supported(tmp_path, compile_document):
             objective="Fix it.",
             training={"labeler": {"model": "openai/test"}},
         )
+
+
+@pytest.mark.parametrize("model", ["openai/gpt-6-luna", "typesafe/jev-latest"])
+def test_decision_labeler_compiles_with_credentials(tmp_path, compile_document, model):
+    result = compile_document(
+        tmp_path,
+        secrets={"judge": "vault:models/judge"},
+        training={
+            "labeler": {
+                "mode": "decision",
+                "model": model,
+                "key": "secrets.judge",
+                "review_below": 0.7,
+            }
+        },
+    )
+    assert result["training"]["labeler"] == {
+        "mode": "decision",
+        "model": model,
+        "key": "judge",
+        "credential": "vault:models/judge",
+        "review_below": 0.7,
+    }
+
+
+def test_explicit_llm_mode_keeps_model_profile(tmp_path, compile_document):
+    result = compile_document(
+        tmp_path, training={"labeler": {"mode": "llm", "model": "openai/test"}}
+    )
+    assert result["training"]["labeler"]["mode"] == "llm"
+
+
+@pytest.mark.parametrize(
+    "labeler",
+    [
+        {"mode": "other", "model": "openai/test"},
+        {"mode": None, "model": "openai/test"},
+        {"mode": {}, "model": "openai/test"},
+        {"mode": "decision", "model": "openai/test"},
+        {"mode": "decision", "model": "anthropic/test"},
+        {"mode": "decision", "model": "typesafe/jev-latest"},
+        {"mode": "decision", "model": "typesafe/unsafe/path", "key": "secrets.judge"},
+        {"mode": "decision", "model": "openai/gpt-6-luna", "fallback": {"model": "openai/test"}},
+        {"mode": "decision", "model": "openai/gpt-6-luna", "key": "secrets.missing"},
+        {"model": "openai/gpt-6-luna"},
+        {"model": "typesafe/jev-latest", "key": "secrets.judge"},
+        {
+            "model": "openai/test",
+            "fallback": {"model": "typesafe/jev-latest", "key": "secrets.judge"},
+        },
+    ],
+)
+def test_labeler_mode_and_model_must_agree(tmp_path, compile_document, labeler):
+    with pytest.raises(ConfigError, match="training.labeler"):
+        compile_document(
+            tmp_path, secrets={"judge": "vault:models/judge"}, training={"labeler": labeler}
+        )
