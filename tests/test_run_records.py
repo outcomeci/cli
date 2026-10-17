@@ -90,6 +90,51 @@ def test_calls_record_keeps_every_call_verbatim_in_broker_order() -> None:
     ]
 
 
+def test_calls_record_carries_a_managed_calls_attempts_verbatim() -> None:
+    attempts = [
+        {
+            "kind": "call",
+            "requested_at": "2026-10-17T10:00:00+00:00",
+            "state": "pending",
+            "retry_after_seconds": 10,
+            "http_status": None,
+            "error": None,
+            "duration_ms": 120,
+        },
+        {
+            "kind": "call",
+            "requested_at": "2026-10-17T10:00:10+00:00",
+            "state": "completed",
+            "retry_after_seconds": None,
+            "http_status": 200,
+            "error": None,
+            "duration_ms": 80,
+        },
+    ]
+    journal = {
+        **JOURNAL,
+        "calls": {
+            "fp-3": {
+                "as": None,
+                "capability": "transcribe.process",
+                "invocation": "inv-1",
+                "proposal_sha256": "fp-3",
+                "request": {"attachment": "att_01", "outputs": ["transcript"]},
+                "managed": True,
+                "attempts": attempts,
+                "result": {"state": "completed", "ok": True, "status": 200, "output": {}},
+                "sequence": 1,
+                "status": "confirmed",
+                "step": "notes",
+            }
+        },
+    }
+    record = run_records.calls_record(journal)
+    assert record["schema_version"] == "outcomeci.calls/v1"
+    assert record["calls"][0]["managed"] is True
+    assert record["calls"][0]["attempts"] == attempts
+
+
 def test_policy_record_lists_advisor_verdicts_and_grant_refusals() -> None:
     record = run_records.policy_record(JOURNAL)
     assert record["schema_version"] == "outcomeci.policy/v1"

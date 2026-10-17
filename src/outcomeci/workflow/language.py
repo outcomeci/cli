@@ -54,7 +54,18 @@ DECISION_FIELDS = ("decided_by", "rule", "override", "otherwise")
 STEP_FIELDS = {
     "decision": {"decision", "with", "using", "when"},
     "dispatch": {"dispatch", "with", "when"},
-    "agent": {"reason", "from", "with", "can", "policy", "returns", "when", "using", "for_each"},
+    "agent": {
+        "reason",
+        "from",
+        "with",
+        "can",
+        "policy",
+        "returns",
+        "when",
+        "using",
+        "for_each",
+        "timeout",
+    },
     "await": {"await", "timeout", "when", *DECISION_FIELDS},
     "converse": {
         "converse",
@@ -108,6 +119,10 @@ VERDICT_SCHEMA = {
 }
 WHEN = re.compile(r"^\s*([A-Za-z_][\w.-]*)\s*(?:(==|!=)\s*(.+?))?\s*$")
 DEFAULT_AWAIT_TIMEOUT_SECONDS = 3600
+# A step that may process media waits on the platform's job; bound it.
+DEFAULT_MEDIA_STEP_TIMEOUT_SECONDS = 1800
+# Trigger kinds whose payload carries attachments a media call can name.
+ATTACHMENT_SOURCES = {"email"}
 
 ORCHESTRATOR = """You are running one step of an OutcomeCI workflow.
 
@@ -331,10 +346,14 @@ def _grants(value: Any, apis: dict[str, dict[str, Any]], scope: _Scope, field: s
             if reference is None and ("path_prefix" in rule or "query_qualifier" in rule):
                 raw = _path_value(raw, rule, f"{entry_field}.{name}")
             if reference is not None:
-                if apis[api]["uses"] == "tavily":
-                    raise ConfigError(f"{entry_field}.{name}: Tavily grants must be static values")
+                if contract.get("managed", False):
+                    raise ConfigError(
+                        f"{entry_field}.{name}: grants on a managed api must be static values"
+                    )
                 rules[name] = reference
             elif isinstance(raw, (str, int, float, dict, list)) and not isinstance(raw, bool):
+                if name == "outputs" and "media" in contract:
+                    _media_outputs(raw, contract, f"{entry_field}.{name}")
                 rules[name] = {"literal": raw}
             else:
                 raise ConfigError(f"{entry_field}.{name} must be a value or a reference")
@@ -353,6 +372,20 @@ def _grants(value: Any, apis: dict[str, dict[str, Any]], scope: _Scope, field: s
                 f"{field}: {capability} is granted more than once; name each grant with `as`"
             )
     return grants
+
+
+def _media_outputs(raw: Any, contract: dict[str, Any], field: str) -> None:
+    """A media `outputs` grant names output types some registry cell supports."""
+    registry = contract["media"]["registry"]
+    union = {output_type for cell in registry.values() for output_type in cell}
+    if not isinstance(raw, list) or not raw or not all(isinstance(item, str) for item in raw):
+        raise ConfigError(f"{field} must be a non-empty list of output types")
+    for item in raw:
+        if item not in union:
+            raise ConfigError(
+                f"{field}: {item!r} is not an output type any media type supports "
+                f"(registry offers: {sorted(union)})"
+            )
 
 
 def _path_value(raw: Any, rule: dict[str, Any], field: str) -> dict[str, Any]:
@@ -543,6 +576,16 @@ def _workflow_origin(value: Any, field: str, allow_private: bool) -> str:
 
 
 def _apis(document: dict[str, Any]) -> tuple[dict[str, Any], list[dict], dict[str, Any]]:
+    """Bind each api to its provider contract.
+
+    On the compiled connection, `managed` says the provider is platform-managed:
+    in a managed run every call goes through the platform. `auth.managed` says
+    no credential is bound, so the platform's credential (or none at all, for
+    a keyless provider such as `media`) is used; it appears only when
+    `managed` is true. `base_url` is None when the provider has no origin the
+    runner may call, which local runs cannot serve; that is legal only on a
+    managed connection.
+    """
     secrets = _mapping(document.get("secrets") or {}, "secrets")
     for name, reference in secrets.items():
         _identifier(name, f"secrets.{name}")
@@ -579,10 +622,24 @@ def _apis(document: dict[str, Any]) -> tuple[dict[str, Any], list[dict], dict[st
             base_url = _workflow_origin(binding.get("base_url"), f"{field}.base_url", allow_private)
         else:
             base_url = contract["base_url"]
+        # The key is present only on managed providers; absent means false.
+        managed = contract.get("managed", False)
+        if not isinstance(managed, bool):
+            raise ConfigError(f"{field}: {found.name} contract has a non-boolean managed flag")
+        if base_url is None and not managed:
+            raise ConfigError(f"{field}: {found.name} contract names no origin")
+        if "media" in contract:
+            media = contract["media"] if isinstance(contract["media"], dict) else {}
+            registry = media.get("registry")
+            if not isinstance(registry, dict) or not registry:
+                raise ConfigError(
+                    f"{field}: {found.name} contract carries no media registry; "
+                    "install outcomeci-connectors>=0.15.0"
+                )
         accepts = contract["auth"]["accepts"]
         keyless = [item["kind"] for item in accepts] == ["none"]
         auth = binding.get("auth")
-        if auth is None and not keyless and found.name != "tavily":
+        if auth is None and not keyless and not managed:
             raise ConfigError(f"{field}.auth is required, such as secrets.{name}")
         if auth is not None and keyless:
             raise ConfigError(f"{field}.auth is not used: {found.name} takes no credential")
@@ -590,7 +647,7 @@ def _apis(document: dict[str, Any]) -> tuple[dict[str, Any], list[dict], dict[st
         if auth is not None:
             secret = _secret(auth, secrets, f"{field}.auth", f"such as secrets.{name}")
             connection_auth["credential"] = secrets[secret]
-        elif found.name == "tavily":
+        elif managed:
             connection_auth["managed"] = True
         apis[name] = {"uses": found.name, "contract": contract, "digest": found.digest()}
         connections.append(
@@ -598,6 +655,7 @@ def _apis(document: dict[str, Any]) -> tuple[dict[str, Any], list[dict], dict[st
                 "ref": name,
                 "provider": "http",
                 "base_url": base_url,
+                "managed": managed,
                 "auth": connection_auth,
                 **({"allow_private_network": True} if allow_private else {}),
             }
@@ -618,6 +676,7 @@ def _apis(document: dict[str, Any]) -> tuple[dict[str, Any], list[dict], dict[st
                 }
                 for operation, item in contract["operations"].items()
             },
+            **({"media": contract["media"]} if "media" in contract else {}),
         }
     return apis, connections, integrations
 
@@ -829,6 +888,13 @@ def _agent_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Pa
     for grant in block["grants"]:
         reads.update(rule["step"] for rule in grant["args"].values() if rule.get("step"))
     node["capabilities"] = sorted({grant["capability"] for grant in block["grants"]})
+    if step.get("timeout") is not None:
+        block["timeout_seconds"] = duration_seconds(step["timeout"], f"{field}.timeout")
+    elif any(
+        "media" in apis[grant["capability"].partition(".")[0]]["contract"]
+        for grant in block["grants"]
+    ):
+        block["timeout_seconds"] = DEFAULT_MEDIA_STEP_TIMEOUT_SECONDS
     if step.get("policy") is not None:
         if not isinstance(step["policy"], str) or not step["policy"].strip():
             raise ConfigError(f"{field}.policy must be text")
@@ -1073,6 +1139,12 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
     apis, connections, integrations = _apis(document)
     humans = _humans(document, apis)
     trigger_name, trigger = _trigger(document.get("trigger"), document.get("secrets") or {})
+    warnings = [
+        f"apis.{name}: media.process has no attachment source; "
+        f"the {trigger_name} trigger carries no attachments"
+        for name, value in apis.items()
+        if "media" in value["contract"] and trigger_name not in ATTACHMENT_SOURCES
+    ]
     if "type" in document and document["type"] != "dispatcher":
         raise ConfigError("type must be dispatcher when specified")
     raw_steps = document.get("steps")
@@ -1168,6 +1240,7 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
         },
         "_v1": {
             "blocks": blocks,
+            "warnings": warnings,
             **({"humans": humans} if humans else {}),
             **({"output_history": history} if history else {}),
             "order": order,
@@ -1199,6 +1272,7 @@ def load(path: Path) -> dict[str, Any]:
         graph["steps"][name]["v1"] = {**block, "trigger": extension["trigger"]}
     graph["source"] = document
     graph["connectors"] = extension["connectors"]
+    graph["warnings"] = extension["warnings"]
     if "humans" in extension:
         graph["humans"] = extension["humans"]
     graph["reasoning"] = extension["reasoning"]

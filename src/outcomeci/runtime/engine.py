@@ -7,6 +7,7 @@ import re
 import shlex
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -46,6 +47,11 @@ class ExecutionOptions:
     # Runs a model step's turns; without one, local runs call the provider.
     model_client: Callable[..., dict[str, Any]] | None = None
     connector_client: Callable[..., dict[str, Any]] | None = None
+    # Cancels a managed call the platform still holds (`request_id=`), and
+    # says whether the run itself is gone, so a step polling a pending call
+    # stops; both come from the managed runner.
+    connector_cancel: Callable[..., dict[str, Any]] | None = None
+    run_cancelled: Callable[[], bool] | None = None
     decision_client: Callable[..., dict[str, Any]] | None = None
     dispatch_client: Callable[..., dict[str, Any]] | None = None
     durable_waits: bool = False
@@ -59,6 +65,8 @@ class ExecutionOptions:
 
 
 _DEFAULT_EXECUTION_OPTIONS = ExecutionOptions()
+# An agent step without its own `timeout` is bounded by this process limit.
+DEFAULT_AGENT_STEP_TIMEOUT_SECONDS = 7200
 
 
 def _id(intent: str) -> str:
@@ -631,6 +639,7 @@ def _run_model_step(
     capability_env: dict[str, str],
     options: ExecutionOptions,
     outcome_root: Path,
+    deadline: float | None = None,
 ) -> tuple[str, int]:
     """One model step invocation: its tool loop, then its result file.
 
@@ -677,6 +686,7 @@ def _run_model_step(
                 capability, inputs, env=capability_env
             ),
             returns=returns["schema"] if returns else None,
+            deadline=deadline,
         )
     finally:
         transcript = models.write_transcript(outcome_root, step, provider or "model", turns)
@@ -708,6 +718,11 @@ def _run_step(
     _container_isolated = options._container_isolated
     repository = root.name
     step_started_at = datetime.now(UTC).isoformat()
+    # The step's own bound: an explicit `timeout`, or the media default. The
+    # broker stops polling a managed call at it; the agent process is bounded
+    # by it too.
+    timeout_seconds = step_block.get("timeout_seconds")
+    deadline = time.monotonic() + timeout_seconds if timeout_seconds else None
     # One per step, so a GitHub App's installation token is exchanged once.
     checkout_auth = Authenticator(rotate=getattr(credential_resolver, "rotate", None))
     try:
@@ -742,6 +757,10 @@ def _run_step(
                     event_sink=event_sink,
                     policy_reviewer=policy_reviewer,
                     connector_client=options.connector_client,
+                    connector_cancel=options.connector_cancel,
+                    run_cancelled=options.run_cancelled,
+                    deadline=deadline,
+                    timeout_seconds=timeout_seconds,
                     grants=(scope or {}).get("grants"),
                     container_isolated=_container_isolated,
                     inputs=(scope or {}).get("inputs"),
@@ -755,6 +774,7 @@ def _run_step(
                             capability_env,
                             options,
                             outcome_root,
+                            deadline=deadline,
                         )
                         summaries.append(summary)
                         model_usage_records += records
@@ -765,7 +785,7 @@ def _run_step(
                             chosen_model,
                             prompt,
                             root,
-                            7200,
+                            timeout_seconds or DEFAULT_AGENT_STEP_TIMEOUT_SECONDS,
                             allow_local_auth=True,
                             extra_env={
                                 **capability_env,

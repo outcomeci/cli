@@ -85,6 +85,10 @@ def test_proxy_never_resolves_credentials_and_records_distinct_read_receipts(tmp
     assert len(calls[0]["request_id"]) == 64
     journal = json.loads((tmp_path / "broker/journal.json").read_text())
     assert journal["calls"][first["receipt"]]["result"]["output"]["usage"] == {"credits": 1}
+    # A search answers at once, so its call carries one attempt, nothing more.
+    recorded = journal["calls"][first["receipt"]]
+    assert recorded["managed"] is True
+    assert [attempt["state"] for attempt in recorded["attempts"]] == ["completed"]
     with pytest.raises(IntegrationError, match="outside this step's grants"):
         runtime.execute("web.search", {**INPUT, "include_domains": []}, step="search")
     assert len(calls) == 2
@@ -92,11 +96,39 @@ def test_proxy_never_resolves_credentials_and_records_distinct_read_receipts(tmp
 
 def test_platform_key_requires_managed_execution(tmp_path):
     value = compiled(tmp_path)
-    auth = value["workflow"]["spec"]["connections"][0]["auth"]
+    connection = value["workflow"]["spec"]["connections"][0]
+    auth = connection["auth"]
+    assert connection["managed"] is True
     assert auth["managed"] is True
     assert "credential" not in auth
-    with pytest.raises(IntegrationError, match="require a managed run"):
+    with pytest.raises(IntegrationError, match="tavily credentials require a managed run"):
         broker(tmp_path, value).execute("web.search", INPUT, step="search")
+
+
+def test_byok_binding_is_still_a_managed_connection(tmp_path):
+    connection = compiled(tmp_path, byok=True)["workflow"]["spec"]["connections"][0]
+    assert connection["managed"] is True
+    assert "managed" not in connection["auth"]
+    assert connection["auth"]["credential"] == "vault:tavily/key"
+
+
+def test_response_without_state_is_completed(tmp_path):
+    """An older api answers a connector call without `state`."""
+    value = compiled(tmp_path, byok=True)
+    runtime = broker(
+        tmp_path,
+        value,
+        connector_client=lambda **call: {"ok": True, "status": 200, "output": {}, "audit": {}},
+    )
+    result = runtime.execute("web.search", INPUT, step="search")
+    assert result["state"] == "completed"
+    assert result["ok"] is True
+    journal = json.loads((tmp_path / "broker/journal.json").read_text())
+    assert journal["calls"][result["receipt"]]["status"] == "confirmed"
+    assert (
+        "attempts" not in journal["calls"][result["receipt"]]
+        or len(journal["calls"][result["receipt"]]["attempts"]) == 1
+    )
 
 
 def test_local_byok_sends_fixed_usage_flags_and_projects_usage(tmp_path, monkeypatch):
@@ -117,10 +149,14 @@ def test_local_byok_sends_fixed_usage_flags_and_projects_usage(tmp_path, monkeyp
     ).execute("web.search", INPUT, step="search")
     assert result["output"]["usage"] == {"credits": 1}
     assert "private-key" not in json.dumps(result)
+    # A local BYOK call is an ordinary HTTP call: calls.json keeps today's shape.
+    journal = json.loads((tmp_path / "broker/journal.json").read_text())
+    call = journal["calls"][result["receipt"]]
+    assert "managed" not in call and "attempts" not in call
 
 
 def test_tavily_rejects_dynamic_grants(tmp_path):
-    with pytest.raises(ConfigError, match="Tavily grants must be static"):
+    with pytest.raises(ConfigError, match="grants on a managed api must be static"):
         compiled(tmp_path, scope={"topic": "trigger.topic"})
 
 

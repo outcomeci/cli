@@ -213,6 +213,17 @@ class CoreClient:
                     raise
         raise AssertionError("unreachable")
 
+    def workflow_connector_cancel(self, lease_token: str, *, request_id: str) -> dict[str, Any]:
+        """Cancel the managed call the api still holds under `request_id`.
+        Not replayed: a cancel is idempotent on the api side and a second
+        request buys nothing. 404 (unknown) and 409 (synchronous provider)
+        arrive as `core_rejected` / `core_conflict`."""
+        return self._post(
+            "connector-call/cancel",
+            {"lease_token": lease_token, "request_id": request_id},
+            timeout=30,
+        )
+
     def workflow_decision(self, lease_token: str, *, step: str, input: dict) -> dict[str, Any]:
         return self._post(
             "decision",

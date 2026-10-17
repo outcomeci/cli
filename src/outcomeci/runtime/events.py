@@ -41,6 +41,13 @@ def event(
         "ok",
         "level",
         "detail",
+        # Managed calls: polling, cancellation and the api's verdict.
+        "retry_after_seconds",
+        "attempt",
+        "resumed",
+        "failure_category",
+        "error",
+        "minutes",
     ):
         value = fields.get(name)
         if value is not None:

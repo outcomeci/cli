@@ -284,10 +284,12 @@ def _http_origin(value: Any, field: str) -> str:
     return value.rstrip("/")
 
 
-def _http_auth(value: Any, field: str) -> dict[str, Any]:
+def _http_auth(value: Any, field: str, *, managed: bool = False) -> dict[str, Any]:
     """A connection's auth: the Vault credential it names and the kinds its
     connector accepts. The runtime picks the accepted kind that matches the
-    credential; a connector that takes no credential accepts only `none`."""
+    credential; a connector that takes no credential accepts only `none`.
+    `auth.managed` (the platform supplies the credential, or none is needed)
+    is legal only on a managed connection and never beside a credential."""
     auth = _mapping(value, field)
     connector = _non_empty_str(auth.get("connector"), f"{field}.connector is required")
     accepts = auth.get("accepts")
@@ -303,10 +305,10 @@ def _http_auth(value: Any, field: str) -> dict[str, Any]:
         raise ConfigError(f"{field}.accepts lists a kind twice or mixes none with others")
     result: dict[str, Any] = {"connector": connector, "accepts": accepts}
     if auth.get("managed"):
-        if connector != "tavily" or auth.get("credential") is not None:
-            raise ConfigError(
-                f"{field}: managed auth is only supported for keyless Tavily bindings"
-            )
+        if auth.get("credential") is not None:
+            raise ConfigError(f"{field}: managed auth takes no credential")
+        if not managed:
+            raise ConfigError(f"{field}: managed auth requires a managed connector")
         return {**result, "managed": True}
     if kinds == ["none"]:
         if auth.get("credential") is not None:
@@ -621,6 +623,14 @@ def _integrations(spec: dict[str, Any], connections: dict[str, dict[str, Any]]) 
             "access": normalized_access,
             "operations": operations,
         }
+        if "media" in item:
+            # The provider's support registry, media type -> output type, so
+            # the runtime can check a completed call against what it asked for.
+            media = _mapping(item["media"], f"{field}.media")
+            registry = media.get("registry")
+            if set(media) != {"registry"} or not isinstance(registry, dict) or not registry:
+                raise ConfigError(f"{field}.media must be {{registry: {{...}}}}")
+            result[name]["media"] = {"registry": registry}
     return result
 
 
@@ -773,8 +783,24 @@ def validate_lowered(root: dict[str, Any], path: Path) -> dict[str, Any]:
         refs.add(ref)
         if item.get("provider") != "http":
             raise ConfigError(f"spec.connections[{index}].provider is unsupported")
-        item["base_url"] = _http_origin(item.get("base_url"), f"spec.connections[{index}].base_url")
-        item["auth"] = _http_auth(item.get("auth"), f"spec.connections[{index}].auth")
+        managed = item.get("managed", False)
+        if not isinstance(managed, bool):
+            raise ConfigError(f"spec.connections[{index}].managed must be boolean")
+        item["managed"] = managed
+        if item.get("base_url") is None:
+            # Only a managed provider may lack an origin: the platform executes it.
+            if not managed:
+                raise ConfigError(
+                    f"spec.connections[{index}].base_url is required on an unmanaged connection"
+                )
+            item["base_url"] = None
+        else:
+            item["base_url"] = _http_origin(
+                item.get("base_url"), f"spec.connections[{index}].base_url"
+            )
+        item["auth"] = _http_auth(
+            item.get("auth"), f"spec.connections[{index}].auth", managed=managed
+        )
         allow_private = item.get("allow_private_network", False)
         if not isinstance(allow_private, bool):
             raise ConfigError(f"spec.connections[{index}].allow_private_network must be boolean")
@@ -940,6 +966,9 @@ def _compile(document: dict[str, Any], root: Path) -> dict[str, Any]:
         raise ConfigError(str(exc)) from None
     compiled["model_capabilities"] = reports
     compiled["capability_warnings"] = flatten_warnings(reports)
+    # Advisory only: a binding the platform can serve but the trigger cannot
+    # feed. Not part of the revision input.
+    compiled["validation_warnings"] = list(graph.get("warnings", []))
     return compiled
 
 

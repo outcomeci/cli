@@ -1593,6 +1593,93 @@ class FinalReportTests(unittest.TestCase):
         ]
         return code, events
 
+    def test_execution_options_wire_cancel_and_heartbeat_failure(self):
+        """A step polling a managed call can cancel it and notices a lost run."""
+        cancels = []
+
+        def handler(request):
+            suffix = request.url.path.split("/v1/internal/", 1)[-1].split("/", 2)[-1]
+            if suffix == "claim":
+                return httpx.Response(200, json=self.claim)
+            if suffix == "connector-call/cancel":
+                cancels.append(json.loads(request.content))
+                return httpx.Response(200, json={"state": "cancelled", "request_id": "r"})
+            if suffix in {"start", "heartbeat"}:
+                return httpx.Response(204 if suffix == "start" else 500, json={})
+            if suffix == "complete":
+                return httpx.Response(200, json={"completed": True})
+            return httpx.Response(404)
+
+        client = CoreClient(
+            "https://api.outcomeci.com",
+            "invocation-1",
+            "boot",
+            "workflow",
+            transport=httpx.MockTransport(handler),
+        )
+        captured = {}
+        with tempfile.TemporaryDirectory() as parent:
+            root = Path(parent) / "private"
+            root.mkdir()
+
+            def trigger(workspace, config, name, payload, **options):
+                captured["options"] = options["options"]
+                options["on_created"]("run-1")
+                outcome = root / ".outcomeci" / "outcomes" / "run-1"
+                outcome.mkdir(parents=True)
+                (outcome / "run.json").write_text("{}")
+                # Not yet gone: the heartbeat has not failed.
+                captured["before"] = options["options"].run_cancelled()
+                options["options"].connector_cancel(request_id="r" * 64)
+                # The api refuses the next heartbeat: the run is gone.
+                LateThread.pulse()
+                captured["after"] = options["options"].run_cancelled()
+                return {"run_id": "run-1", "completed_steps": ["only"], "status": "completed"}
+
+            class InlineThread:
+                def __init__(self, target, daemon):
+                    self.target = target
+
+                def start(self):
+                    self.target()
+
+            class LateThread(InlineThread):
+                """Run the heartbeat loop only when the step asks."""
+
+                pulse = None
+
+                def start(self):
+                    LateThread.pulse = self.target
+
+            with (
+                mock.patch.dict(os.environ, {"AGENT_PRIVATE_ROOT": parent}, clear=False),
+                mock.patch("outcomeci.cloud_runner.main.tempfile.mkdtemp", return_value=str(root)),
+                mock.patch(
+                    "outcomeci.cloud_runner.main.COMPLETION_REPORT_DELAYS_SECONDS", (0,) * 5
+                ),
+                mock.patch("outcomeci.cloud_runner.main.threading.Thread", LateThread),
+                mock.patch("outcomeci.cloud_runner.main.HEARTBEAT_INTERVAL_SECONDS", 0),
+                mock.patch("outcomeci.runtime.engine.trigger", side_effect=trigger),
+                mock.patch(
+                    "outcomeci.workflow.compiler.compile_workflow",
+                    return_value={
+                        "instructions": {"steps": {"only": {}}},
+                        "workflow": {"spec": {"agents": {"default": {}}}},
+                    },
+                ),
+                mock.patch("sys.stderr", new_callable=io.StringIO),
+                # A lost heartbeat fails the run after the step; that is the
+                # runner's existing behaviour, not what this test checks.
+                self.assertRaises(CoreError),
+            ):
+                execute_workflow(
+                    Launch("workflow", "invocation-1", "boot", "https://api.outcomeci.com"),
+                    client,
+                )
+        self.assertFalse(captured["before"])
+        self.assertTrue(captured["after"])
+        self.assertEqual(cancels, [{"lease_token": "lease-secret", "request_id": "r" * 64}])
+
     def test_a_transient_503_on_completion_is_retried_and_reported_once_completed(self):
         client, completions = self.http_client([503, 200])
         code, events = self.run_workflow(client)
