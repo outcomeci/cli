@@ -367,3 +367,27 @@ path. Renaming the configuration starts separate history; it does not silently
 combine databases. Source grants restrict query results, not access to artifacts
 already present in a trusted local workflow process or the same managed run.
 Managed runners query the API and never receive the raw history database.
+
+### Workflow objectives and training annotations
+
+V1 workflows can optionally declare an `objective` and a `training.labeler`:
+
+```yaml
+apiVersion: outcomeci.workflow/v1
+objective: Identify the root cause and propose a concrete fix.
+trigger: manual
+training:
+  labeler:
+    model: openai/gpt-4.1-mini
+    review_below: 0.6
+steps:
+  - investigate:
+      reason: Investigate the reported issue and propose a fix.
+```
+
+The objective gives the labeler the workflow's intended outcome. After a run
+completes, the labeler writes a separate training annotation; a labeler failure
+does not fail the completed run. Optional `review_below` routes annotations with
+lower confidence to human review and must be between 0 and 1. The labeler accepts
+the same model credentials as other model profiles. Both fields are optional,
+and existing v2 workflows remain supported.

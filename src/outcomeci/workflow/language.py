@@ -49,6 +49,8 @@ TOP_LEVEL = {
     "reasoning",
     "steps",
     "outputs",
+    "training",
+    "objective",
 }
 DECISION_FIELDS = ("decided_by", "rule", "override", "otherwise")
 STEP_FIELDS = {
@@ -1034,10 +1036,7 @@ def _converse_step(name, step, node, block, reads, *, scope: _Scope, apis, base:
 
 def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
     """Lower a parsed v1 document to the validated shape plus per-step v1 blocks."""
-    allowed = TOP_LEVEL | (
-        {"training", "objective"} if document.get("apiVersion") == TRAINING_API_VERSION else set()
-    )
-    unknown = set(document) - allowed
+    unknown = set(document) - TOP_LEVEL
     if unknown:
         raise ConfigError(f"unknown top-level fields: {', '.join(sorted(unknown))}")
     default, fallback, profiles = _reasoning(

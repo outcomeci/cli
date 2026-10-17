@@ -1,4 +1,4 @@
-"""The training labeler: a workflow/v2 run's annotation, written once it completes."""
+"""The training labeler: a workflow/v1 run's annotation, written once it completes."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ LABELS = {
 
 def _declare_labeler(path: Path, key: bool = True, **extra) -> None:
     document = yaml.safe_load(path.read_text())
-    document["apiVersion"] = "outcomeci.workflow/v2"
+    document["apiVersion"] = "outcomeci.workflow/v1"
     document["secrets"]["openai"] = "vault:openai/api-key"
     document["training"] = {
         "labeler": {
@@ -171,7 +171,7 @@ def test_a_local_run_leases_the_keys_its_model_profiles_and_labeler_name(tmp_pat
     (tmp_path / "outcome.yml").write_text(
         yaml.safe_dump(
             {
-                "apiVersion": "outcomeci.workflow/v2",
+                "apiVersion": "outcomeci.workflow/v1",
                 "name": "smoke",
                 "trigger": "manual",
                 "secrets": {"anthropic": "vault:models/anthropic", "openai": "vault:models/openai"},
