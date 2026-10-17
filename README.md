@@ -34,10 +34,10 @@ The full guide is at <https://outcomeci.com/docs/outcomeci>.
   [`outcomeci-connectors`](https://github.com/outcomeci/connectors).
 - `reasoning`: the default agent (`codex`, `claude` or `opencode`), a fallback,
   and named profiles a step picks with `using: <name>`. A profile with a
-  `runner` is an agent; one with only a `model`, such as
+  `agent` (or the deprecated `runner` alias) is an agent; one with only a `model`, such as
   `light: {model: anthropic/claude-haiku-4-5}`, reasons with direct model calls
   and no workspace, its granted APIs offered as tools. `review` sets the policy
-  reviewer's model. A model profile's `key: secrets.<name>` selects your
+  reviewer's model. A model profile's `auth: secrets.<name>` (or legacy `key`) selects your
   provider key. Managed Cloud runs can use platform keys for OpenAI and
   Anthropic when `key` is omitted; other chat providers require an explicit
   key. Policy-review model profiles support OpenAI and Anthropic.
@@ -49,6 +49,34 @@ The full guide is at <https://outcomeci.com/docs/outcomeci>.
 
 `oci validate` compiles the workflow and prints its revision; `oci workflow
 compile` prints the compiled steps, grants, instructions and schemas.
+
+Agent profiles can select a named Vault credential as well:
+
+```yaml
+secrets:
+  coder: vault:agents/engineering-codex
+reasoning:
+  default:
+    agent: codex
+    auth: secrets.coder
+```
+
+The Vault entry has `credential_type: agent`, `configuration.provider: codex`,
+and `secrets.auth_json` containing the Codex login JSON. Claude uses
+`configuration.provider: claude` and `secrets.oauth_token`; OpenCode uses
+`configuration.provider: opencode` and `secrets.api_key`. Local runs resolve the
+same typed entry from the local Vault. Cloud runs lease the named identity and
+save rotated credentials back to that entry. Agent credentials are never supplied
+to model calls or the API capability broker.
+
+`agent` and `runner` cannot appear together. Model profiles, their fallbacks,
+and `training.labeler` accept `auth` or `key`, but not both. Each workflow can
+use one identity per agent provider; different providers can use different
+identities. Reusing the same identity is supported. Mixing different explicit
+credentials, or explicit and implicit credentials for the same provider, is
+rejected. A profile inherits the default credential only when it uses the same
+provider. Omitted authentication retains local login discovery or cloud Vault
+selection.
 
 Tavily search supports a platform key in managed Cloud runs:
 

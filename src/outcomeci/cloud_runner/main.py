@@ -209,17 +209,23 @@ def _write_private_file(path: Path, content: str) -> None:
 
 
 def _inject_agent_credential(root: Path, provider: str, credential: Any) -> dict[str, str]:
-    if provider == "codex":
-        home = root / ".codex"
+    from outcomeci_connectors.agents import agent_provider
+
+    try:
+        descriptor = agent_provider(provider)
+        value = credential
+    except ValueError as exc:
+        raise ContractError("unsupported workflow agent") from exc
+    if descriptor.credential_file:
+        home = root / f".{descriptor.home_directory or provider}"
         home.mkdir(mode=0o700, exist_ok=True)
-        _write_private_file(home / "auth.json", json.dumps(credential, separators=(",", ":")))
-        _write_private_file(home / "config.toml", CODEX_FILE_AUTH_CONFIG)
-        return {"CODEX_HOME": str(home)}
-    if provider == "claude":
-        return {"CLAUDE_CODE_OAUTH_TOKEN": str(credential)}
-    if provider == "opencode":
-        return {"OPENROUTER_API_KEY": str(credential)}
-    raise ContractError("unsupported workflow agent")
+        _write_private_file(
+            home / descriptor.credential_file, json.dumps(value, separators=(",", ":"))
+        )
+        for name, content in descriptor.config_files.items():
+            _write_private_file(home / name, content)
+        return {descriptor.environment_variable: str(home)}
+    return {descriptor.environment_variable: value}
 
 
 def _report_final(report: Callable[[], None]) -> None:

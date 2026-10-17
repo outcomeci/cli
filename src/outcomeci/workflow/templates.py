@@ -47,7 +47,7 @@ apis:
   github: {uses: github, auth: secrets.github}
 
 reasoning:
-  default: {runner: codex}
+  default: {agent: codex}
 
 steps:
   - investigate:

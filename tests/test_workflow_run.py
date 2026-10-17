@@ -428,7 +428,7 @@ def test_steps_on_model_profiles_need_no_agent_but_their_provider_must_be_reacha
             }
         },
     }
-    assert workflow_run._runners(mixed, None) == ["codex", "claude"]
+    assert workflow_run._runners(mixed, None) == ["claude"]
     assert workflow_run._run_hosts(mixed, ["codex", "claude"]) == [
         "api.openai.com",
         "api.anthropic.com",

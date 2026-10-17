@@ -320,6 +320,7 @@ def issue_debug_lease(
     *,
     ttl_seconds: int = 600,
     agent_provider: str | None = None,
+    agent_credential: str | None = None,
 ) -> dict[str, Any]:
     """Fetch a short-lived cloud vault lease for locally debugging one workflow.
 
@@ -329,6 +330,8 @@ def issue_debug_lease(
     body: dict[str, Any] = {"ttl_seconds": ttl_seconds}
     if agent_provider is not None:
         body["agent_provider"] = agent_provider
+    if agent_credential is not None:
+        body["agent_credential"] = agent_credential
     status, value = _authorized_request(
         f"/workspaces/{workspace_id}/workflows/{workflow_id}/debug-lease",
         method="POST",

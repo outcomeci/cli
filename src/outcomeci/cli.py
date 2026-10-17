@@ -60,7 +60,9 @@ def _linked_credential(args: argparse.Namespace) -> dict[str, Any]:
             raise ExecutionError("a plain secret takes one --ref; add --credential-type for fields")
         return link
     placeholders = dict.fromkeys(references, "linked")
-    built = credentials.build(credential_type, args, value=None, secrets=placeholders)
+    built = credentials.build(
+        credential_type, args, value=None, secrets=placeholders, validate_secrets=False
+    )
     return {
         "credential_type": built["credential_type"],
         "configuration": built["configuration"],

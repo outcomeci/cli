@@ -27,6 +27,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from outcomeci_connectors.agents import agent_provider, agent_providers
+
 from outcomeci.cloud import (
     CloudRequestError,
     complete_debug_agent_lease,
@@ -57,13 +59,14 @@ RUNNER_IMAGE = "ghcr.io/outcomeci/outcome-runner"
 LOCAL_RUN_TTL_SECONDS = 12 * 3600
 # Agent logins a local run reads from the environment, or else from the local
 # Vault at agents/<provider>. Codex keeps its own login file instead.
-AGENT_ENV = {"claude": "CLAUDE_CODE_OAUTH_TOKEN", "opencode": "OPENROUTER_API_KEY"}
-# The API host each agent must reach from inside the container.
-AGENT_HOSTS = {
-    "codex": "api.openai.com",
-    "claude": "api.anthropic.com",
-    "opencode": "openrouter.ai",
+
+AGENT_ENV = {
+    name: provider.environment_variable
+    for name, provider in agent_providers().items()
+    if not provider.credential_file
 }
+# The API host each agent must reach from inside the container.
+AGENT_HOSTS = {name: provider.api_host for name, provider in agent_providers().items()}
 # The API host a step on a model profile calls, by provider.
 MODEL_HOSTS = {"anthropic": "api.anthropic.com", "openai": "api.openai.com"}
 NETWORK_PROBE_TIMEOUT_SECONDS = 60
@@ -120,11 +123,12 @@ def _steps(compiled: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def _agent_steps(compiled: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """The steps an agent runs: every step not on a model profile."""
+    """Agent and conversation steps that do not use direct model profiles."""
     return {
         name: step
         for name, step in _steps(compiled).items()
         if not (step.get("v1") or {}).get("reasoning")
+        and (step.get("v1") or {}).get("kind", "agent") in {"agent", "converse"}
     }
 
 
@@ -140,12 +144,15 @@ def _runners(compiled: dict[str, Any], agent: str | None) -> list[str]:
         return []
     if agent:
         return [agent]
-    found = [_default_agent(compiled)]
+    found = []
     for step in steps.values():
-        runner = (step.get("policy") or {}).get("runner")
-        if runner and runner not in found:
+        runner = (step.get("policy") or {}).get("runner") or _default_agent(compiled)
+        if runner not in found:
             found.append(runner)
-    return found
+    default = _default_agent(compiled)
+    return ([default] if default in found else []) + [
+        runner for runner in found if runner != default
+    ]
 
 
 def _model_hosts(compiled: dict[str, Any]) -> list[str]:
@@ -216,7 +223,7 @@ def run_cloud(
         name, payload = _resolve_trigger(
             compiled, trigger_name or _default_trigger(compiled), payload_path
         )
-    leases = _issue_leases(workspace_id, workflow_id, runners)
+    leases = _issue_leases(workspace_id, workflow_id, runners, _agent_credentials(compiled))
     lease = leases[0]
 
     with ExitStack() as held:
@@ -265,7 +272,12 @@ def _retryable(root: Path, run_id: str) -> None:
         )
 
 
-def _issue_leases(workspace_id: str, workflow_id: str, runners: list[str]) -> list[dict[str, Any]]:
+def _issue_leases(
+    workspace_id: str,
+    workflow_id: str,
+    runners: list[str],
+    credentials: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
     """One Vault lease per runner the run needs, each holding that runner's login.
 
     When a later one is refused, the logins already leased are released before
@@ -281,6 +293,11 @@ def _issue_leases(workspace_id: str, workflow_id: str, runners: list[str]) -> li
                 workflow_id,
                 ttl_seconds=IMAGE_LEASE_TTL_SECONDS,
                 agent_provider=runner,
+                **(
+                    {"agent_credential": credentials[runner]}
+                    if credentials and runner in credentials
+                    else {}
+                ),
             )
             if runner is not None and not isinstance(lease.get("agent"), dict):
                 raise ExecutionError(f"the Vault lease carried no {runner} login for the run")
@@ -844,6 +861,23 @@ def _default_trigger(compiled: dict[str, Any]) -> str:
     raise ExecutionError(f"pass --trigger; the workflow declares {', '.join(sorted(triggers))}")
 
 
+def _agent_credentials(compiled: dict[str, Any]) -> dict[str, str]:
+    """Named credentials for the provider identities used by this run."""
+    default = compiled["workflow"]["spec"].get("agents", {}).get("default", {})
+    policies = [step.get("policy", {}) for step in _agent_steps(compiled).values()]
+    if policies and default.get("fallback"):
+        policies.append(default["fallback"])
+    found: dict[str, str] = {}
+    for policy in policies:
+        provider = policy.get("runner") or default.get("runner") or "codex"
+        credential = policy.get("credential")
+        if credential:
+            if provider in found and found[provider] != credential:
+                raise ExecutionError(f"a run cannot use multiple credentials for {provider}")
+            found[provider] = credential
+    return found
+
+
 def _vault_references(compiled: dict[str, Any]) -> list[str]:
     """The vault: references a run resolves: its API calls' credentials, and
     the keys its model profiles and training labeler name."""
@@ -887,8 +921,32 @@ def _codex_auth_path() -> Path:
     return (Path(configured).expanduser() if configured else Path.home() / ".codex") / "auth.json"
 
 
-def _local_login(root: Path, provider: str) -> dict[str, Any]:
+def _local_login(root: Path, provider: str, credential: str | None = None) -> dict[str, Any]:
     """This machine's login for one agent provider, as a cloud lease would carry it."""
+    if credential is not None:
+        from outcomeci.vault import local as local_vault
+
+        value = local_vault.resolve(root, credential)
+        if (
+            not isinstance(value, dict)
+            or value.get("credential_type") != "agent"
+            or value.get("configuration", {}).get("provider") != provider
+        ):
+            raise ExecutionError(f"{credential} must hold an agent credential for {provider}")
+        descriptor = agent_provider(provider)
+        fields = dict(value.get("secrets") or {})
+        if descriptor.credential_file and isinstance(fields.get(descriptor.credential_secret), str):
+            try:
+                fields[descriptor.credential_secret] = json.loads(
+                    fields[descriptor.credential_secret]
+                )
+            except ValueError as exc:
+                raise ExecutionError(f"invalid agent credential at {credential}") from exc
+        try:
+            login = descriptor.validate_credentials(fields)[descriptor.credential_secret]
+        except ValueError as exc:
+            raise ExecutionError(str(exc)) from exc
+        return {"provider": provider, "credential": login, "vault_ref": credential}
     if provider == "codex":
         path = _codex_auth_path()
         try:
@@ -913,12 +971,17 @@ def _local_login(root: Path, provider: str) -> dict[str, Any]:
     return {"provider": provider, "credential": value}
 
 
-def _write_back_codex(hold: _AgentHold) -> None:
+def _write_back_codex(hold: _AgentHold, root: Path | None = None) -> None:
     """Keep a Codex login the run rotated: the old refresh token is spent."""
     for login in hold.agent_leases:
         rotated = _codex_rotation(hold.output / OUTPUT_HOME, login)
         if rotated is not None:
-            atomic_write_json(_codex_auth_path(), rotated, mode=0o600)
+            if login.get("vault_ref") and root is not None:
+                from outcomeci.vault import local as local_vault
+
+                local_vault.rotate(root, login["vault_ref"], {"auth_json": json.dumps(rotated)})
+            else:
+                atomic_write_json(_codex_auth_path(), rotated, mode=0o600)
 
 
 def run_local(
@@ -951,7 +1014,8 @@ def run_local(
         )
     values = _local_values(root, compiled)
     runners = _runners(compiled, agent)
-    logins = [_local_login(root, provider) for provider in runners]
+    credentials = _agent_credentials(compiled)
+    logins = [_local_login(root, provider, credentials.get(provider)) for provider in runners]
     engine = discover_engine(runtime)
     _check_image(image, engine=engine)
     _check_network(image, network, _run_hosts(compiled, runners), engine=engine)
@@ -980,5 +1044,5 @@ def run_local(
                 engine=engine,
             )
         finally:
-            _write_back_codex(hold)
+            _write_back_codex(hold, root)
             _save_local_rotations(root, hold.output)

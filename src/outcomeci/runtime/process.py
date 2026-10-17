@@ -239,47 +239,11 @@ def invoke(
     if read_only:
         env = {key: value for key, value in env.items() if not key.startswith("OUTCOMECI_")}
     _authorize_agent(agent, model, env, allow_local_auth=allow_local_auth)
-    if agent == "codex":
-        argv = ["codex", "exec", "--approve-for-me", "--skip-git-repo-check"]
-        if container_isolated:
-            # OutcomeCI Cloud runs inside a dedicated, least-privilege Fargate
-            # task. Codex's nested Linux sandbox is unavailable there; the
-            # container and capability broker are the security boundary.
-            argv = [
-                "codex",
-                "exec",
-                "--dangerously-bypass-approvals-and-sandbox",
-                "--skip-git-repo-check",
-            ]
-        if read_only and not container_isolated:
-            # Inside a container Codex's own sandbox is unavailable too; a
-            # read-only call there runs in an empty temporary workspace with
-            # no capability access, which is what keeps it read-only.
-            argv = ["codex", "exec", "--sandbox", "read-only", "--skip-git-repo-check"]
-        if model:
-            argv += ["--model", model]
-        argv += ["-"]
-        input_text = prompt
-    elif agent == "claude":
-        argv = ["claude", "--print", "--permission-mode", "acceptEdits"]
-        if container_isolated:
-            # Same reasoning as Codex above: OutcomeCI Cloud's Fargate task is
-            # the security boundary, and this runs fully non-interactively.
-            # acceptEdits only auto-approves file edits, not arbitrary tool
-            # calls -- the integration broker CLI still hits an approval
-            # prompt that can never be answered here, and Claude reports the
-            # call as rejected rather than actually invoking it.
-            argv = ["claude", "--print", "--dangerously-skip-permissions"]
-        if read_only:
-            argv = ["claude", "--print", "--tools", "", "--permission-mode", "default"]
-        if model:
-            argv += ["--model", model]
-        # On stdin, not argv: a single argument is capped at 128 KiB, and a
-        # prompt carrying a step's context or a review's receipts exceeds it.
-        input_text = prompt
-    else:  # opencode, already validated above
-        argv = ["opencode", "run", "--pure", "--auto", "--format", "json", "--model", model, prompt]
-        input_text = None
+    from outcomeci.runtime.agent_adapters import command_for
+
+    argv, input_text = command_for(
+        agent, model, prompt, container_isolated=container_isolated, read_only=read_only
+    )
     history_enabled = (extra_env or {}).get("OUTCOMECI_OUTPUT_HISTORY") == "1"
     if writable_paths is not None and not container_isolated:
         bwrap = shutil.which("bwrap")
