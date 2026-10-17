@@ -21,7 +21,7 @@ humans:
   requester: {system: slack, type: user, identifier: trigger.user}
 
 reasoning:
-  default:  {runner: codex,  model: gpt-5.5}
+  default:  {runner: codex}
   fallback: [{runner: claude, model: claude-opus-5-5}]
 
 steps:
