@@ -98,9 +98,9 @@ def test_an_invalid_fallback_is_refused(tmp_path: Path, fallback: dict, error: s
         compile_workflow(_workflow(tmp_path, reasoning=reasoning))
 
 
-def test_reasoning_accepts_only_runner_and_model(tmp_path: Path) -> None:
+def test_reasoning_rejects_unknown_agent_fields(tmp_path: Path) -> None:
     reasoning = {"default": {"runner": "codex", "bogus": True}}
-    with pytest.raises(ConfigError, match="supports runner and model"):
+    with pytest.raises(ConfigError, match="supports agent, runner, model and auth"):
         compile_workflow(_workflow(tmp_path, reasoning=reasoning))
 
 

@@ -12,11 +12,12 @@ from zoneinfo import available_timezones
 
 import jsonschema
 import yaml
+from outcomeci_connectors.agents import agent_providers
 
 from outcomeci import __version__
 from outcomeci.security import private_path
 
-RUNNERS = {"codex", "claude", "opencode"}
+RUNNERS = set(agent_providers())
 AUTH_KINDS = {
     "none",
     "token",
@@ -109,7 +110,22 @@ def _agent_policy(value: Any, field: str) -> dict[str, Any]:
         model = _non_empty_str(model, f"{field}.model must be non-empty")
     if runner == "opencode" and (not isinstance(model, str) or not model.startswith("openrouter/")):
         raise ConfigError(f"{field}.model must use openrouter/provider/model for OpenCode")
-    return {key: item[key] for key in ("runner", "model") if item.get(key) is not None}
+    return {
+        key: item[key] for key in ("runner", "model", "credential") if item.get(key) is not None
+    }
+
+
+def _effective_agent_policy(policy: dict[str, Any], default: dict[str, Any]) -> dict[str, Any]:
+    result = {
+        "runner": policy.get("runner", default.get("runner")),
+        "model": policy.get("model", default.get("model")),
+    }
+    credential = policy.get("credential")
+    if not credential and (result["runner"] or "codex") == (default.get("runner") or "codex"):
+        credential = default.get("credential")
+    if credential:
+        result["credential"] = credential
+    return result
 
 
 def _contract(value: Any, field: str) -> dict[str, Any]:
@@ -628,7 +644,7 @@ def _inline_content(value: Any) -> bool:
     """Instructions given as {content: <text>} instead of a file path."""
     return (
         isinstance(value, dict)
-        and set(value) <= {"content", "runner", "model"}
+        and set(value) <= {"content", "runner", "model", "credential"}
         and isinstance(value.get("content"), str)
         and bool(value["content"].strip())
     )
@@ -678,7 +694,7 @@ def validate_lowered(root: dict[str, Any], path: Path) -> dict[str, Any]:
     _agent_policy(orchestrator, f"spec.instructions.{orchestrator_name}")
 
     default_raw = _mapping(agents.get("default", {}), "spec.agents.default")
-    unknown_default = set(default_raw) - {"runner", "model", "fallback"}
+    unknown_default = set(default_raw) - {"runner", "model", "fallback", "credential"}
     if unknown_default:
         raise ConfigError(
             f"spec.agents.default has unknown fields: {', '.join(sorted(unknown_default))}"
@@ -876,10 +892,7 @@ def _compile(document: dict[str, Any], root: Path) -> dict[str, Any]:
             "humans": contract["humans"],
             "capabilities": contract["capabilities"],
             "required_capabilities": contract["required_capabilities"],
-            "policy": {
-                "runner": policy.get("runner", default.get("runner")),
-                "model": policy.get("model", default.get("model")),
-            },
+            "policy": _effective_agent_policy(policy, default),
             **({"v1": contract["v1"]} if "v1" in contract else {}),
         }
         for item in contract["outputs"]:
@@ -897,6 +910,20 @@ def _compile(document: dict[str, Any], root: Path) -> dict[str, Any]:
                 schemas[item["schema"]] = _reference(
                     root, item["schema"], "artifact schema", json_value=True
                 )
+    identities: dict[str, str | None] = {}
+    policies = [
+        step["policy"] for step in steps.values() if not step.get("v1", {}).get("reasoning")
+    ]
+    if policies and default.get("fallback"):
+        policies.append(default["fallback"])
+    for policy in policies:
+        agent = policy.get("runner") or "codex"
+        credential = policy.get("credential")
+        if agent in identities and identities[agent] != credential:
+            raise ConfigError(
+                f"one workflow must use one credential for {agent}; do not mix different auth references or explicit and implicit authentication"
+            )
+        identities[agent] = credential
     normalized = json.loads(json.dumps(document, sort_keys=True, separators=(",", ":")))
     resolved = {
         "orchestrator": orchestrator,

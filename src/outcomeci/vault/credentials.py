@@ -15,6 +15,7 @@ from typing import Any
 from outcomeci.runtime.process import ExecutionError
 
 CREDENTIAL_TYPES = (
+    "agent",
     "api_key",
     "auth_header",
     "basic",
@@ -24,6 +25,7 @@ CREDENTIAL_TYPES = (
     "app_installation",
 )
 CONFIGURATION_FIELDS: dict[str, tuple[str, ...]] = {
+    "agent": ("provider",),
     "api_key": ("header_name", "prefix"),
     "auth_header": ("header_name", "scheme"),
     "basic": (),
@@ -33,6 +35,7 @@ CONFIGURATION_FIELDS: dict[str, tuple[str, ...]] = {
     "app_installation": ("app_id", "installation_id"),
 }
 SECRET_FIELDS: dict[str, tuple[str, ...]] = {
+    "agent": ("auth_json", "oauth_token", "api_key"),
     "api_key": ("api_key",),
     "auth_header": ("value",),
     "basic": ("username", "password"),
@@ -42,6 +45,7 @@ SECRET_FIELDS: dict[str, tuple[str, ...]] = {
     "app_installation": ("private_key",),
 }
 REQUIRED_CONFIGURATION: dict[str, tuple[str, ...]] = {
+    "agent": ("provider",),
     "oauth2": ("client_id",),
     "oidc": ("client_id",),
     "jwt_bearer": ("issuer",),
@@ -58,6 +62,7 @@ DEFAULT_SECRET = {
 }
 # Command-line option, configuration field.
 OPTIONS = (
+    ("agent_provider", "provider"),
     ("header_name", "header_name"),
     ("prefix", "prefix"),
     ("scheme", "scheme"),
@@ -86,6 +91,11 @@ def add_arguments(parser: argparse.ArgumentParser) -> None:
         "--credential-type",
         choices=CREDENTIAL_TYPES,
         help="Store a typed credential; a connector authenticates with it by its type",
+    )
+    parser.add_argument(
+        "--agent-provider",
+        choices=("codex", "claude", "opencode"),
+        help="Agent credential provider",
     )
     parser.add_argument("--header-name", help="Header an api_key or auth_header value goes in")
     parser.add_argument("--prefix", help="Prefix before an api_key value")
@@ -120,11 +130,17 @@ def build(
     *,
     value: str | None,
     secrets: dict[str, str] | None,
+    validate_secrets: bool = True,
 ) -> dict[str, Any]:
     """A typed credential from command-line options, checked like OutcomeCI Vault checks it."""
     configuration: dict[str, Any] = {}
     for option, name in OPTIONS:
         given = getattr(args, option, None)
+        if option == "agent_provider" and credential_type == "agent":
+            provider = getattr(args, "provider", None)
+            if given and provider and given != provider:
+                raise ExecutionError("--provider and --agent-provider must match")
+            given = given or provider
         if given in (None, [], ""):
             continue
         if option == "scope" and credential_type == "jwt_bearer":
@@ -146,6 +162,10 @@ def build(
         )
     if secrets is None:
         name = args.secret_name or DEFAULT_SECRET.get(credential_type)
+        if credential_type == "agent":
+            from outcomeci_connectors.agents import agent_provider
+
+            name = name or agent_provider(configuration["provider"]).credential_secret
         if name is None:
             raise ExecutionError(
                 f"a {credential_type} credential takes --secrets-json-stdin with "
@@ -158,6 +178,20 @@ def build(
             f"a {credential_type} credential does not hold {', '.join(sorted(unknown))}"
         )
     needed = list(SECRET_FIELDS[credential_type])
+    if credential_type == "agent":
+        from outcomeci_connectors.agents import agent_provider
+
+        descriptor = agent_provider(configuration["provider"])
+        needed = [descriptor.credential_secret]
+        if set(secrets) != set(needed):
+            raise ExecutionError(
+                f"{configuration['provider']} requires only {descriptor.credential_secret}"
+            )
+        if validate_secrets:
+            try:
+                descriptor.validate_credentials(secrets)
+            except ValueError as exc:
+                raise ExecutionError(str(exc)) from exc
     if credential_type == "oauth2":
         needed = ["client_secret"] + (
             ["refresh_token"] if configuration.get("grant_type") == "refresh_token" else []

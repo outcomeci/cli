@@ -140,7 +140,8 @@ def providers() -> dict[str, Any]:
     found = {}
     for entry in entry_points(group=ENTRY_POINT_GROUP):
         provider = entry.load()
-        found[provider.name] = provider
+        if getattr(provider, "capability", "http") != "agent":
+            found[provider.name] = provider
     return found
 
 
@@ -221,6 +222,7 @@ class _Scope:
         self.steps: dict[str, dict[str, Any]] = {}
         self.bound: set[str] = set()
         self.profiles: dict[str, dict[str, Any]] = {}
+        self.secrets: dict[str, Any] = {}
         self.history: set[str] = set()
         self.humans: set[str] = set()
 
@@ -407,14 +409,14 @@ def _reasoning(
         _identifier(name, field)
         item = _mapping(reasoning[name], field)
         profiles[name] = (
-            {"agent": _agent(item, field)}
-            if "runner" in item
+            {"agent": _agent(item, field, secrets)}
+            if "runner" in item or "agent" in item
             # The policy reviewer makes one call with no fallback path.
             else _model(item, secrets, field, fallback=name != "review")
         )
     if "agent" in profiles.get("review", {}):
         raise ConfigError("reasoning.review is a model: {model, key?}, not an agent")
-    default = _agent(reasoning.get("default", {"runner": "codex"}), "reasoning.default")
+    default = _agent(reasoning.get("default", {"agent": "codex"}), "reasoning.default", secrets)
     fallback = reasoning.get("fallback")
     if fallback is None:
         return default, None, profiles
@@ -422,7 +424,7 @@ def _reasoning(
         raise ConfigError("reasoning.fallback must be a list")
     if len(fallback) > 1:
         raise ConfigError("this runtime tries one fallback; list a single reasoning.fallback entry")
-    chosen = _agent(fallback[0], "reasoning.fallback[0]")
+    chosen = _agent(fallback[0], "reasoning.fallback[0]", secrets)
     if "runner" not in chosen:
         raise ConfigError("reasoning.fallback[0].runner is required")
     return default, chosen, profiles
@@ -435,6 +437,11 @@ def _model(
     without a key the platform's key pays; with one, the named Vault secret
     holds the provider key. The fallback is tried when the model's provider
     is rate limited or unavailable."""
+    item = dict(item)
+    if "auth" in item:
+        if "key" in item:
+            raise ConfigError(f"{field} cannot contain both auth and key")
+        item["key"] = item.pop("auth")
     allowed = {"model", "key", "fallback"} if fallback else {"model", "key"}
     if set(item) - allowed:
         raise ConfigError(
@@ -482,10 +489,17 @@ def _model(
     return result
 
 
-def _using(value: Any, profiles: dict[str, dict[str, Any]], node, block, field: str) -> None:
+def _using(
+    value: Any,
+    profiles: dict[str, dict[str, Any]],
+    node,
+    block,
+    field: str,
+    secrets: dict[str, Any],
+) -> None:
     """A step's reasoning: a profile's name, or an inline agent `{runner, model}`."""
     if not isinstance(value, str):
-        node.update(_agent(value, field))
+        node.update(_agent(value, field, secrets))
         return
     if value == "review" or value not in profiles:
         raise ConfigError(f"{field} must name a reasoning profile other than review")
@@ -501,13 +515,22 @@ def _using(value: Any, profiles: dict[str, dict[str, Any]], node, block, field: 
         block["reasoning"] = {"profile": value, **profile}
 
 
-def _agent(value: Any, field: str) -> dict[str, Any]:
-    item = _mapping(value, field)
-    if set(item) - {"runner", "model"}:
-        raise ConfigError(f"{field} supports runner and model")
+def _agent(value: Any, field: str, secrets: dict[str, Any]) -> dict[str, Any]:
+    item = dict(_mapping(value, field))
+    selector = "agent" if "agent" in item else "runner"
+    if "agent" in item:
+        if "runner" in item:
+            raise ConfigError(f"{field} cannot contain both agent and runner")
+        item["runner"] = item.pop("agent")
+    if set(item) - {"runner", "model", "auth"}:
+        raise ConfigError(f"{field} supports agent, runner, model and auth")
     if "runner" in item and item["runner"] not in RUNNERS:
-        raise ConfigError(f"{field}.runner must be one of {', '.join(sorted(RUNNERS))}")
-    return {key: item[key] for key in ("runner", "model") if key in item}
+        raise ConfigError(f"{field}.{selector} must be one of {', '.join(sorted(RUNNERS))}")
+    result = {key: item[key] for key in ("runner", "model") if key in item}
+    if "auth" in item:
+        name = _secret(item["auth"], secrets, f"{field}.auth", "secrets.<name>")
+        result["credential"] = str(secrets[name])
+    return result
 
 
 def _secret(auth: Any, secrets: dict[str, Any], field: str, hint: str) -> str:
@@ -808,7 +831,7 @@ def _agent_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Pa
     field = f"steps.{name}"
     node["instructions"] = _reason(step.get("reason"), base, f"{field}.reason")
     if "using" in step:
-        _using(step["using"], scope.profiles, node, block, f"{field}.using")
+        _using(step["using"], scope.profiles, node, block, f"{field}.using", scope.secrets)
     if "for_each" in step:
         match = FOR_EACH.fullmatch(str(step["for_each"]))
         if not match:
@@ -992,7 +1015,7 @@ def _converse_step(name, step, node, block, reads, *, scope: _Scope, apis, base:
         else {"content": CONVERSE_INSTRUCTIONS}
     )
     if "using" in step:
-        _using(step["using"], scope.profiles, node, block, f"{field}.using")
+        _using(step["using"], scope.profiles, node, block, f"{field}.using", scope.secrets)
     attachment = respond.get("attachment")
     node["capabilities"] = sorted(
         {f"{api}.{operation}", f"{api}.{respond['respond']}"}
@@ -1112,6 +1135,7 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
     )
     scope = _Scope()
     scope.profiles = profiles
+    scope.secrets = dict(document.get("secrets") or {})
     scope.humans = set(humans)
     nodes: dict[str, Any] = {}
     blocks: dict[str, Any] = {}
