@@ -68,7 +68,7 @@ the upstream plans impose; all pass by design.
 | One proposal is one `request_id`; a lost response or a resume never creates a second job | PASS (D3, D4: the fingerprint is the `request_id`; a journal call in `pending` is resumed, never re-proposed) |
 | The run record is complete raw data (`calls.json` reconstructs every poll and cancel without the api) | PASS (D5) |
 | Existing Tavily workflows compile to the same connection shape plus `managed: true` and behave the same locally and managed | PASS (D1 keeps `auth.managed` semantics; D2 keeps the proxy-when-wired rule) |
-| Fail at compile time, not run time, when the platform cannot serve the binding | PASS (D6: contract without `managed` or without `media.registry` is a `ConfigError`) |
+| Fail at compile time, not run time, when the platform cannot serve the binding | PASS (D6: a `media` binding whose locked contract lacks `media.registry` is a `ConfigError`; a contract without `managed` is a normal broker provider) |
 
 ## Project Structure
 
@@ -111,7 +111,7 @@ src/outcomeci/
 
 pyproject.toml               # MODIFY: outcomeci-connectors>=0.15.0,<0.16
 Dockerfile.runner            # UNCHANGED (installs from PyPI; the pin above moves it)
-README.md                    # MODIFY: media binding, step timeout, managed providers, digest note
+README.md                    # MODIFY: media binding, step timeout, managed providers, tavily revision note
 
 tests/
 ├── test_media.py            # CREATE: compile rules, dispatch, polling, cancel, journal shape
@@ -144,8 +144,13 @@ Findings from reading the named files and the upstream plans
   (`auth.managed`). Both facts must survive, so the compiled connection needs
   a connection-level `managed` in addition to `auth.managed` (D1).
 
-- **R2. The connectors contract after 0.15.0.** `managed` is emitted on every
-  contract (`False` by default, `True` on `tavily` and `media`).
+- **R2. The connectors contract after 0.15.0.** `managed: true` is emitted
+  only on managed providers (`tavily` and `media`); every other contract has
+  no `managed` key at all, and a missing key means false. So the 0.15.0 bump
+  changes the locked contract (and hence the provider digest and
+  `workflow_revision`) of tavily-bound workflows only; `custom` and every
+  other provider digest is byte-identical to 0.14.x, and `media` workflows
+  are new.
   `base_url_from: "workflow"` is emitted only when `base_url is None and not
   managed`, so `custom` keeps it and `media` has `base_url: null` with no
   `base_url_from`. `media` accepts only `{"kind": "none"}`, has
@@ -161,8 +166,9 @@ Findings from reading the named files and the upstream plans
   `execute`, so the same proposal in the same revision digests to the same
   `request_id` on a crash resume (US3.4) and two different argument sets are
   two proposals (US3.5). No change to `digest` is needed. Caveat: `revision`
-  is the compiled hash, which moves with the runner's connectors build; a
-  resume on a different runner build after a crash mid-poll would re-digest.
+  is the compiled hash, which moves when the runner's connectors build
+  changes the locked contract of a bound provider (at 0.15.0, tavily only);
+  a resume on such a runner build after a crash mid-poll would re-digest.
   D4 handles that by matching a pending managed call in the journal by
   `(step, capability, request)` before fingerprinting a fresh proposal.
 
@@ -238,10 +244,9 @@ Findings from reading the named files and the upstream plans
 `language.py::_apis` reads the contract once and emits:
 
 ```python
-managed = contract.get("managed")
+managed = contract.get("managed", False)   # key present only when true; absent means false
 if not isinstance(managed, bool):
-    raise ConfigError(f"{field}: {found.name} contract predates managed providers; "
-                      "install outcomeci-connectors>=0.15.0")
+    raise ConfigError(f"{field}: {found.name} contract has a non-boolean managed flag")
 workflow_origin = contract.get("base_url_from") == "workflow"   # unchanged
 base_url = _workflow_origin(...) if workflow_origin else contract["base_url"]  # may be None
 keyless = [item["kind"] for item in accepts] == ["none"]
@@ -472,10 +477,12 @@ In `language.py`:
   otherwise `ConfigError(f"{entry_field}.outputs: {bad!r} is not an output
   type any media type supports (registry offers: {sorted(union)})")`
   (US2.3). `options` is not grantable, so nothing to check there.
-- `_apis`: the `managed` type check from D1 doubles as the "stale connectors"
-  error (FR-011). A `media`-shaped provider (contract has `media`) whose
-  registry is missing or empty is a `ConfigError` naming
-  `outcomeci-connectors>=0.15.0`.
+- `_apis`: a contract without a `managed` key is a normal broker provider,
+  never an error (so a 0.14.x contract for `custom` or any other provider
+  compiles exactly as before). The "stale connectors" error (FR-011) is
+  carried by the registry check alone: a `media` binding whose locked
+  contract lacks `media.registry` (or whose registry is empty) is a
+  `ConfigError` naming `outcomeci-connectors>=0.15.0`.
 - `lower()`: after `_trigger`, `attachment_sources = {"email"}`; for each
   api whose contract has `media`, if `trigger_name not in attachment_sources`,
   append `f"apis.{name}: media.process has no attachment source; the
@@ -597,9 +604,12 @@ tiny registry where a smaller one is clearer.
     message contains `subtitles` and `transcript`.
   - `test_outputs_must_be_a_list_of_strings`: `outputs: transcript` (scalar)
     and `outputs: []` both fail naming `.outputs`.
-  - `test_stale_contract_is_a_compile_error`: a fake provider whose contract
-    lacks `managed` → message names `outcomeci-connectors>=0.15.0`; one
-    whose contract has `media: {}` → same.
+  - `test_stale_contract_is_a_compile_error`: a `media` binding whose fake
+    contract has `media: {}` (no registry) → message names
+    `outcomeci-connectors>=0.15.0`.
+  - `test_contract_without_managed_key_is_an_ordinary_provider`: a fake
+    provider whose contract lacks `managed` compiles with
+    `connection["managed"] is False` and no error.
   - `test_cron_trigger_warns_about_attachment_source`: compiles; `validation_warnings`
     has one entry naming `apis.transcribe` and `media.process`; an `email`
     trigger produces none.
@@ -695,12 +705,15 @@ and that `base_url` is still required (keys on `base_url_from`, not on
   but the first runner build after this merge is the one that picks up
   0.15.0, and shared-infra must pin that digest.
 - **Release note (user-facing, cli release and README):**
-  "`outcomeci-connectors` 0.15.0 adds a `managed` key to every provider
-  contract. Every workflow that binds an api therefore gets a new provider
-  digest and a new `workflow_revision` on its next compile, once. Nothing in
-  the workflow changes; `oci workflow sync` will record the new revision.
-  Runs paused before the upgrade resume under their cloud revision id, which
-  does not depend on the compiled hash." Also: new `timeout` field on agent
+  "`outcomeci-connectors` 0.15.0 marks `tavily` as a managed provider
+  (`managed: true` in its contract; providers that are not managed carry no
+  `managed` key, and a missing key means false). Workflows that bind
+  `tavily` therefore get a new provider digest and a new `workflow_revision`
+  on their next compile, once; nothing in the workflow changes, and `oci
+  workflow sync` will record the new revision. Workflows bound to any other
+  provider keep their current digest and revision, and `media` workflows are
+  new. Runs paused before the upgrade resume under their cloud revision id,
+  which does not depend on the compiled hash." Also: new `timeout` field on agent
   and model steps; new `integration.pending` / `integration.cancelled`
   events and `attempts` on managed calls in `calls.json`; the
   `integration.managed_unavailable` message now names the provider.
@@ -713,7 +726,7 @@ and that `base_url` is still required (keys on `base_url_from`, not on
 |----------|------------|-------------------------------------|
 | Connection-level `managed` in addition to `auth.managed` (D1) | Tavily BYOK in a managed run is still proxied; "provider is managed" and "platform supplies the credential" are two facts that differ for that case | Reusing `auth.managed` for both would either stop proxying BYOK Tavily (behaviour change, FR-011) or make a credential-bearing connection claim a platform credential. |
 | Poll loop in `pending.py` called from `policy.py`, not inside the executor (D3, D4) | The journal (attempts, events, statuses) is written under the policy lock; the executor has no journal and must stay "one request per call" so each attempt is recorded | Looping inside `IntegrationExecutor.execute` would hide attempts from the journal or need a journal callback threaded through the executor; a loop in `main.py`'s `connector_client` lambda would be untestable without a runner and could not reach the step deadline. |
-| Resume lookup by `(step, capability, request)` for pending managed calls (D4) | The fingerprint includes the compiled revision hash, which moves with the runner's connectors build; a crash mid-poll followed by a resume on a newer runner image must still reuse the api's receipt | Making the fingerprint ignore the revision for managed calls would change `request_id` for every managed call, including Tavily, and break the api's stored receipts during the upgrade window. |
+| Resume lookup by `(step, capability, request)` for pending managed calls (D4) | The fingerprint includes the compiled revision hash, which moves whenever a connectors build changes a bound provider's contract (tavily at 0.15.0); a crash mid-poll followed by a resume on a newer runner image must still reuse the api's receipt | Making the fingerprint ignore the revision for managed calls would change `request_id` for every managed call, including Tavily, and break the api's stored receipts during the upgrade window. |
 
 ## Deviations other repos must know
 
