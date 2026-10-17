@@ -27,8 +27,6 @@ from outcomeci.reasoning.providers import CHAT_PROVIDERS, REVIEW_PROVIDERS, pars
 from outcomeci.workflow.compiler import IDENTIFIER, RUNNERS, ConfigError, validate_lowered
 
 API_VERSION = "outcomeci.workflow/v1"
-TRAINING_API_VERSION = "outcomeci.workflow/v2"
-SUPPORTED_API_VERSIONS = {API_VERSION, TRAINING_API_VERSION}
 ENTRY_POINT_GROUP = "outcomeci.connectors"
 CONNECTOR_CONTRACT = "outcomeci.connector/v1"
 INSTRUCTIONS_DIR = Path(".outcomeci/instructions")
@@ -1187,7 +1185,7 @@ def load(path: Path) -> dict[str, Any]:
         document = _mapping(yaml.safe_load(path.read_text(encoding="utf-8")), "document")
     except (OSError, yaml.YAMLError) as exc:
         raise ConfigError(f"could not read {path}: {exc}") from exc
-    if document.get("apiVersion") not in SUPPORTED_API_VERSIONS:
+    if document.get("apiVersion") != API_VERSION:
         raise ConfigError(f"apiVersion must be {API_VERSION}")
     stem = path.name.split(".", 1)[0]
     lowered = lower(document, path.parent, stem)

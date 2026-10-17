@@ -389,5 +389,5 @@ The objective gives the labeler the workflow's intended outcome. After a run
 completes, the labeler writes a separate training annotation; a labeler failure
 does not fail the completed run. Optional `review_below` routes annotations with
 lower confidence to human review and must be between 0 and 1. The labeler accepts
-the same model credentials as other model profiles. Both fields are optional,
-and existing v2 workflows remain supported.
+the same model credentials as other model profiles. Both fields are optional.
+Use `apiVersion: outcomeci.workflow/v1`; v2 is no longer supported.

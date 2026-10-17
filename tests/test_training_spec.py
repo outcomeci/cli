@@ -4,9 +4,9 @@ import yaml
 from outcomeci.workflow.compiler import ConfigError, compile_workflow
 
 
-@pytest.fixture(params=["outcomeci.workflow/v1", "outcomeci.workflow/v2"])
-def api_version(request):
-    return request.param
+@pytest.fixture
+def api_version():
+    return "outcomeci.workflow/v1"
 
 
 @pytest.fixture
@@ -97,3 +97,13 @@ def test_a_workflow_objective_compiles_and_affects_revision(tmp_path, compile_do
 def test_an_objective_must_be_a_non_empty_string(tmp_path, value, compile_document):
     with pytest.raises(ConfigError, match="objective"):
         compile_document(tmp_path, objective=value)
+
+
+def test_v2_is_no_longer_supported(tmp_path, compile_document):
+    with pytest.raises(ConfigError, match="unsupported apiVersion.*use outcomeci.workflow/v1"):
+        compile_document(
+            tmp_path,
+            apiVersion="outcomeci.workflow/v2",
+            objective="Fix it.",
+            training={"labeler": {"model": "openai/test"}},
+        )
