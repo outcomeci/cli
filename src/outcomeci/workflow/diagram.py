@@ -161,8 +161,14 @@ def _gate(block: Mapping[str, Any], connectors: Mapping[str, Any]) -> dict[str, 
         }
         if spec.get("subject"):
             gate["subject"] = str(spec["subject"])
-        if spec.get("by"):
-            gate["by"] = str(spec["by"])
+        decision = spec.get("decision")
+        if isinstance(decision, Mapping):
+            rule = decision.get("rule") or {}
+            gate["decision"] = {
+                "of": str(decision.get("of")),
+                "rule": str(rule.get("count") or rule.get("kind") or "any"),
+                **({"override": str(decision["override"])} if decision.get("override") else {}),
+            }
         if kind == "await" and spec.get("emoji"):
             gate["emoji"] = str(spec["emoji"])
         if isinstance(spec.get("timeout_seconds"), int):

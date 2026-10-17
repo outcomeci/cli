@@ -8,6 +8,7 @@ outputs and recorded calls.
 
     secrets:  vault references, usable only by an API binding
     apis:     a binding of a secret to a provider from outcomeci/connectors
+    humans:   people and groups a step can address or let decide
     steps:    functions over those, run top to bottom
 """
 
@@ -44,15 +45,17 @@ TOP_LEVEL = {
     "trigger",
     "secrets",
     "apis",
+    "humans",
     "reasoning",
     "steps",
     "outputs",
 }
+DECISION_FIELDS = ("decided_by", "rule", "override", "otherwise")
 STEP_FIELDS = {
     "decision": {"decision", "with", "using", "when"},
     "dispatch": {"dispatch", "with", "when"},
     "agent": {"reason", "from", "with", "can", "policy", "returns", "when", "using", "for_each"},
-    "await": {"await", "timeout", "when"},
+    "await": {"await", "timeout", "when", *DECISION_FIELDS},
     "converse": {
         "converse",
         "until",
@@ -63,9 +66,16 @@ STEP_FIELDS = {
         "timeout",
         "reason",
         "using",
-        "by",
+        *DECISION_FIELDS,
     },
 }
+HUMAN_TYPES = {"user", "email", "group", "channel"}
+HUMAN_FIELDS = {"type", "id", "users", "identifier"}
+DECISION_RULES = {"any", "majority", "all"}
+DEFAULT_ASK_TIMEOUT_SECONDS = 86400
+# A parked wait is held for at most seven days, so asking someone after the
+# deadline cannot extend it past that.
+MAX_ASK_TIMEOUT_SECONDS = 7 * 86400
 FOR_EACH = re.compile(r"^\s*(\S+)\s+as\s+(\S+)\s*$")
 CONVERSE = re.compile(r"^\s*([a-z][a-z0-9_-]*)\.([a-z][a-z0-9_-]*)\((.+)\)\s*$")
 DEFAULT_MAX_TURNS = 12
@@ -81,6 +91,21 @@ SCALARS = {
     "any": {},
 }
 DURATION = re.compile(r"^(\d+)(s|m|h|d)$")
+VERDICT_SCHEMA = {
+    "type": "object",
+    "required": ["outcome", "how", "votes"],
+    "properties": {
+        "outcome": {"type": "string", "enum": ["approved", "rejected", "undecided"]},
+        "how": {"type": "string", "enum": ["rule", "override", "timeout", "relaxed", "none"]},
+        "rule": {"type": "string"},
+        "of": {"type": "array", "items": {"type": "string"}},
+        "votes": {
+            "type": "object",
+            "additionalProperties": {"type": "string", "enum": ["approve", "reject"]},
+        },
+        "override_by": {"type": "string"},
+    },
+}
 WHEN = re.compile(r"^\s*([A-Za-z_][\w.-]*)\s*(?:(==|!=)\s*(.+?))?\s*$")
 DEFAULT_AWAIT_TIMEOUT_SECONDS = 3600
 
@@ -102,10 +127,11 @@ path in the context, matching the `returns` schema exactly. If the step has no
 
 AWAIT_INSTRUCTIONS = "The runtime resolves this step by watching for a human signal."
 
-CONVERSE_INSTRUCTIONS = """Discuss the plan with the requester until they approve it.
+CONVERSE_INSTRUCTIONS = """Discuss the plan in its thread until it is approved.
 
-Answer questions plainly, revise the plan when they ask for a change, and treat
-it as approved only when they say so. Never start the work itself."""
+Answer questions plainly, revise the plan when someone asks for a change, and
+treat it as approved only when a person whose word decides says so. Never
+start the work itself."""
 
 
 @cache
@@ -196,6 +222,7 @@ class _Scope:
         self.bound: set[str] = set()
         self.profiles: dict[str, dict[str, Any]] = {}
         self.history: set[str] = set()
+        self.humans: set[str] = set()
 
     def reference(self, value: Any, field: str) -> dict[str, Any] | None:
         """Parse `value` as a reference, or return None when it is a literal."""
@@ -207,6 +234,13 @@ class _Scope:
                 raise ConfigError(f"{field}: unknown history query {rest}")
             return {"ref": value, "step": None}
         if head == "trigger" or head in self.bound:
+            return {"ref": value, "step": None}
+        if head == "humans":
+            name, _, attribute = rest.partition(".")
+            if name not in self.humans or attribute not in HUMAN_FIELDS | {""}:
+                raise ConfigError(
+                    f"{field}: {value} must be humans.<name> or humans.<name>.id or .users"
+                )
             return {"ref": value, "step": None}
         if head not in self.steps:
             return None
@@ -636,14 +670,119 @@ def _trigger(value: Any, secrets: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     )
 
 
-def _by(value: Any, scope: _Scope, reads: set, field: str) -> str | None:
-    """`by:` limits a human signal to one person, named by a reference such as trigger.user."""
-    if value is None:
+def _principal(value: Any, apis: dict[str, Any], field: str) -> dict[str, Any]:
+    """`{system, type, identifier}`: one person or group, found through a declared api.
+
+    `identifier` is a literal (a Slack id, an email address, `@group` or
+    `#channel`) or a trigger reference such as `trigger.user`.
+    """
+    principal = _mapping(value, field)
+    if set(principal) != {"system", "type", "identifier"}:
+        raise ConfigError(f"{field} takes exactly system, type and identifier")
+    system = principal["system"]
+    if system not in apis or apis[system]["uses"] != "slack":
+        raise ConfigError(f"{field}.system must name a declared api that uses slack")
+    kind = principal["type"]
+    if kind not in HUMAN_TYPES:
+        raise ConfigError(f"{field}.type must be one of {', '.join(sorted(HUMAN_TYPES))}")
+    identifier = principal["identifier"]
+    if not isinstance(identifier, str) or not identifier.strip():
+        raise ConfigError(f"{field}.identifier must be a name, address, id or trigger reference")
+    identifier = identifier.strip()
+    if identifier.startswith("trigger."):
+        found: dict[str, Any] = {"ref": identifier}
+    else:
+        found = {"literal": identifier}
+    return {"system": system, "type": kind, "identifier": found}
+
+
+def _humans(document: dict[str, Any], apis: dict[str, Any]) -> dict[str, Any]:
+    """`humans:` names people and groups; a list unions earlier names or inline principals."""
+    humans: dict[str, Any] = {}
+    for name, raw in _mapping(document.get("humans") or {}, "humans").items():
+        field = f"humans.{name}"
+        _identifier(name, field)
+        if isinstance(raw, list):
+            if not raw:
+                raise ConfigError(f"{field} lists at least one human")
+            members = []
+            for index, item in enumerate(raw):
+                if isinstance(item, str):
+                    if item not in humans:
+                        raise ConfigError(f"{field}[{index}]: {item!r} is not declared above it")
+                    members.append({"human": item})
+                else:
+                    members.append(_principal(item, apis, f"{field}[{index}]"))
+            humans[name] = {"type": "list", "members": members}
+        else:
+            humans[name] = _principal(raw, apis, field)
+    return humans
+
+
+def _rule(value: Any, field: str) -> dict[str, Any]:
+    if isinstance(value, bool) or (isinstance(value, int) and value < 1):
+        raise ConfigError(f"{field} must be any, majority, all, or a count of at least 1")
+    if isinstance(value, int):
+        return {"kind": "count", "count": value}
+    if value not in DECISION_RULES:
+        raise ConfigError(f"{field} must be any, majority, all, or a count of at least 1")
+    return {"kind": value}
+
+
+def _decision(step: dict[str, Any], humans: dict[str, Any], field: str) -> dict[str, Any] | None:
+    """`decided_by:` names whose word decides a human signal; `rule`, `override`
+    and `otherwise` say how.
+
+    `rule` is any (default), majority, all, or a count. `override` names whose
+    word closes the step whatever the tally. `otherwise` says what the
+    deadline does: stop (default), continue, `{ask: <name>, timeout}` or
+    `{rule: ...}`.
+    """
+    of = step.get("decided_by")
+    if of is None:
+        extra = [key for key in DECISION_FIELDS if key in step]
+        if extra:
+            raise ConfigError(f"{field}.{extra[0]} needs decided_by")
         return None
-    reference = scope.required(value, field)
-    if reference["step"]:
-        reads.add(reference["step"])
-    return reference["ref"]
+    if of not in humans:
+        raise ConfigError(f"{field}.decided_by must name a declared human")
+    override = step.get("override")
+    if override is not None and override not in humans:
+        raise ConfigError(f"{field}.override must name a declared human")
+    lowered: dict[str, Any] = {
+        "of": of,
+        "rule": _rule(step.get("rule", "any"), f"{field}.rule"),
+        "override": override,
+        "otherwise": {"kind": "stop"},
+    }
+    otherwise = step.get("otherwise", "stop")
+    if isinstance(otherwise, str) and otherwise in {"stop", "continue"}:
+        lowered["otherwise"] = {"kind": otherwise}
+    elif (
+        isinstance(otherwise, dict) and set(otherwise) <= {"ask", "timeout"} and "ask" in otherwise
+    ):
+        if otherwise["ask"] not in humans:
+            raise ConfigError(f"{field}.otherwise.ask must name a declared human")
+        ask_timeout = duration_seconds(
+            otherwise.get("timeout", DEFAULT_ASK_TIMEOUT_SECONDS), f"{field}.otherwise.timeout"
+        )
+        if ask_timeout > MAX_ASK_TIMEOUT_SECONDS:
+            raise ConfigError(f"{field}.otherwise.timeout is at most 7d")
+        lowered["otherwise"] = {
+            "kind": "ask",
+            "ask": otherwise["ask"],
+            "timeout_seconds": ask_timeout,
+        }
+    elif isinstance(otherwise, dict) and set(otherwise) == {"rule"}:
+        lowered["otherwise"] = {
+            "kind": "relax",
+            "rule": _rule(otherwise["rule"], f"{field}.otherwise.rule"),
+        }
+    else:
+        raise ConfigError(
+            f"{field}.otherwise must be stop, continue, {{ask: <human>, timeout}} or {{rule: ...}}"
+        )
+    return lowered
 
 
 def _read_inputs(step, block, reads, scope: _Scope, field: str) -> None:
@@ -665,7 +804,7 @@ def _returns(block, name: str, schema: dict[str, Any]) -> dict[str, Any]:
     return schema["properties"]
 
 
-def _agent_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Path):
+def _agent_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Path, humans):
     field = f"steps.{name}"
     node["instructions"] = _reason(step.get("reason"), base, f"{field}.reason")
     if "using" in step:
@@ -717,7 +856,7 @@ def _agent_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Pa
     return outputs
 
 
-def _decision_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Path):
+def _decision_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Path, humans):
     from outcomeci.reasoning.decisions import questions_schema
 
     field = f"steps.{name}"
@@ -739,7 +878,7 @@ def _decision_step(name, step, node, block, reads, *, scope: _Scope, apis, base:
     return _returns(block, name, schema)
 
 
-def _dispatch_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Path):
+def _dispatch_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Path, humans):
     from outcomeci.reasoning.decisions import object_schema
 
     field = f"steps.{name}"
@@ -763,7 +902,7 @@ def _dispatch_step(name, step, node, block, reads, *, scope: _Scope, apis, base:
     return _returns(block, name, schema)
 
 
-def _await_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Path):
+def _await_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Path, humans):
     field = f"steps.{name}"
     watch = _mapping(step["await"], f"{field}.await")
     if len(watch) != 1:
@@ -773,9 +912,8 @@ def _await_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Pa
     if api not in apis or watcher not in apis[api]["contract"]["watchers"]:
         raise ConfigError(f"{field}.await: {signal} is not a watcher of a declared api")
     arguments = _mapping(arguments, f"{field}.await.{signal}")
-    if set(arguments) - {"message", "emoji", "by"}:
-        raise ConfigError(f"{field}.await.{signal} supports message, emoji and by")
-    by = _by(arguments.get("by"), scope, reads, f"{field}.await.{signal}.by")
+    if set(arguments) - {"message", "emoji"}:
+        raise ConfigError(f"{field}.await.{signal} supports message and emoji")
     message = scope.required(arguments.get("message"), f"{field}.await.{signal}.message")
     if ".calls." not in message["ref"]:
         raise ConfigError(f"{field}.await.{signal}.message must reference a recorded call")
@@ -791,7 +929,7 @@ def _await_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Pa
         "operation": operation,
         "respond": declared.get("respond"),
         "thread_field": declared.get("thread_field"),
-        "by": by,
+        "decision": _decision(step, humans, field),
         "message": message["ref"],
         "emoji": str(arguments.get("emoji", "+1")).strip(":"),
         "timeout_seconds": duration_seconds(
@@ -802,7 +940,7 @@ def _await_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Pa
     return {}
 
 
-def _converse_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Path):
+def _converse_step(name, step, node, block, reads, *, scope: _Scope, apis, base: Path, humans):
     """`converse: <api>.<operation>(<recorded message>)`: discuss a plan in its thread."""
     field = f"steps.{name}"
     match = CONVERSE.fullmatch(str(step["converse"]))
@@ -841,8 +979,12 @@ def _converse_step(name, step, node, block, reads, *, scope: _Scope, apis, base:
     if isinstance(max_turns, bool) or not isinstance(max_turns, int) or not 2 <= max_turns <= 100:
         raise ConfigError(f"{field}.max_turns must be between 2 and 100")
     names = step.get("returns", ["plan", "status"])
-    if not isinstance(names, list) or not set(names) <= {"plan", "status", "decision"} or not names:
-        raise ConfigError(f"{field}.returns lists plan, status and/or decision")
+    if (
+        not isinstance(names, list)
+        or not set(names) <= {"plan", "status", "decision", "verdict"}
+        or not names
+    ):
+        raise ConfigError(f"{field}.returns lists plan, status, decision and/or verdict")
     respond = watchers[watcher]
     node["instructions"] = (
         _reason(step["reason"], base, f"{field}.reason")
@@ -865,7 +1007,7 @@ def _converse_step(name, step, node, block, reads, *, scope: _Scope, apis, base:
         "attachment": attachment,
         "message": message["ref"],
         "subject": subject["ref"],
-        "by": _by(step.get("by"), scope, reads, f"{field}.by"),
+        "decision": _decision(step, humans, field),
         "plan_schema": plan_schema,
         "max_turns": max_turns,
         "timeout_seconds": duration_seconds(
@@ -877,6 +1019,7 @@ def _converse_step(name, step, node, block, reads, *, scope: _Scope, apis, base:
         "plan": plan_schema,
         "decision": {"type": "string", "enum": ["approved", "rejected", "undecided"]},
         "status": {"type": "string", "enum": ["converged", "rejected", "capped", "timed_out"]},
+        "verdict": VERDICT_SCHEMA,
     }
     return _returns(
         block,
@@ -928,6 +1071,7 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
                 raise ConfigError("training.labeler.review_below must be a number from 0 to 1")
             training["labeler"]["review_below"] = float(review_below)
     apis, connections, integrations = _apis(document)
+    humans = _humans(document, apis)
     trigger_name, trigger = _trigger(document.get("trigger"), document.get("secrets") or {})
     if "type" in document and document["type"] != "dispatcher":
         raise ConfigError("type must be dispatcher when specified")
@@ -949,6 +1093,7 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
     )
     scope = _Scope()
     scope.profiles = profiles
+    scope.humans = set(humans)
     nodes: dict[str, Any] = {}
     blocks: dict[str, Any] = {}
     order: list[str] = []
@@ -958,7 +1103,7 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
         name, raw = next(iter(entry.items()))
         field = f"steps.{name}"
         _identifier(name, field)
-        if name in scope.steps or name in {"trigger", "calls", "history"}:
+        if name in scope.steps or name in {"trigger", "calls", "history", "humans"}:
             raise ConfigError(f"{field} is a duplicate or reserved step name")
         step = _mapping(raw, field)
         discriminants = set(step) & {"await", "converse", "decision", "dispatch"}
@@ -984,7 +1129,9 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
             "decision": _decision_step,
             "dispatch": _dispatch_step,
         }[kind]
-        outputs = lowering(name, step, node, block, reads, scope=scope, apis=apis, base=base)
+        outputs = lowering(
+            name, step, node, block, reads, scope=scope, apis=apis, base=base, humans=humans
+        )
         if block.get("returns"):
             node["expects"]["outputs"].append(
                 {
@@ -1021,6 +1168,7 @@ def lower(document: dict[str, Any], base: Path, stem: str) -> dict[str, Any]:
         },
         "_v1": {
             "blocks": blocks,
+            **({"humans": humans} if humans else {}),
             **({"output_history": history} if history else {}),
             "order": order,
             "trigger": trigger_name,
@@ -1051,6 +1199,8 @@ def load(path: Path) -> dict[str, Any]:
         graph["steps"][name]["v1"] = {**block, "trigger": extension["trigger"]}
     graph["source"] = document
     graph["connectors"] = extension["connectors"]
+    if "humans" in extension:
+        graph["humans"] = extension["humans"]
     graph["reasoning"] = extension["reasoning"]
     if "output_history" in extension:
         graph["output_history"] = extension["output_history"]

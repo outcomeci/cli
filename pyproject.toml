@@ -15,7 +15,7 @@ dependencies = [
     "httpx>=0.27",
     "jsonschema>=4.23",
     "pyte>=0.8",
-    "outcomeci-connectors>=0.13.0,<0.14",
+    "outcomeci-connectors>=0.14.0,<0.15",
 ]
 
 [project.scripts]

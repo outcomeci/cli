@@ -16,6 +16,10 @@ apis:
   slack:  {uses: slack,  auth: secrets.slack}
   github: {uses: github, auth: secrets.github}
 
+# The person who asked: the plan is theirs to approve, whoever else joins the thread.
+humans:
+  requester: {system: slack, type: user, identifier: trigger.user}
+
 reasoning:
   default:  {runner: codex,  model: gpt-5.5}
   fallback: [{runner: claude, model: claude-opus-5-5}]
@@ -38,7 +42,7 @@ steps:
   - discuss:
       with: draft.plan
       converse: slack.thread(draft.calls.slack.post)
-      by: trigger.user     # only the requester steers and approves the plan
+      decided_by: requester  # others may discuss; only the requester approves
       until: converged
       max_turns: 12
       returns: [plan, status, decision]

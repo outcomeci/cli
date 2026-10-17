@@ -909,6 +909,7 @@ def _compile(document: dict[str, Any], root: Path) -> dict[str, Any]:
     revision_input = {
         **({"source": graph["source"]} if "source" in graph else {}),
         **({"connectors": graph["connectors"]} if "connectors" in graph else {}),
+        **({"humans": graph["humans"]} if "humans" in graph else {}),
         **({"reasoning": graph["reasoning"]} if "reasoning" in graph else {}),
         **({"training": graph["training"]} if "training" in graph else {}),
         **({"objective": graph["objective"]} if "objective" in graph else {}),

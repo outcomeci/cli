@@ -347,7 +347,6 @@ def test_conversation_return_names_are_not_consumer_literals(tmp_path):
         + "  - clarify:\n"
         + "      converse: slack.thread(announce.calls.slack.post)\n"
         + "      with: announce.plan\n"
-        + "      by: trigger.user\n"
         + "      returns: [plan, status, decision]\n"
     )
     assert publication._consumer_values(source) == ["vault:private/slack"]

@@ -980,8 +980,17 @@ def _settle(
     Returns True with state["step"] set when an agent step is next, or False
     once every step is done and the run is completed.
     """
+    from outcomeci.runtime import humans as human_directory
     from outcomeci.runtime import steps as v1_runtime
 
+    if compiled.get("humans"):
+        try:
+            human_directory.resolve(root, compiled, state, options.credential_resolver)
+        except (ExecutionError, OSError) as exc:
+            state.update({"status": "error", "error": str(exc)})
+            state["steps"] = _step_states(compiled, state)
+            _write(root, state)
+            raise ExecutionError(f"humans could not be resolved: {exc}") from exc
     while True:
         ready = _ready(compiled, state.get("completed_steps", []))
         if not ready:
