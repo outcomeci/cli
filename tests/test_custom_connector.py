@@ -48,6 +48,9 @@ def test_a_custom_binding_takes_its_origin_from_the_workflow(tmp_path):
     value = compiled(tmp_path)
     connection = value["workflow"]["spec"]["connections"][0]
     assert connection["base_url"] == "https://api.acme.test"
+    # The workflow names the origin; the platform runs nothing for it.
+    assert connection["managed"] is False
+    assert "managed" not in connection["auth"]
     assert connection["allow_private_network"] is False
     assert connection["auth"]["connector"] == "custom"
     assert connection["auth"]["credential"] == "vault:acme/token"

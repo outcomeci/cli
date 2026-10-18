@@ -321,6 +321,66 @@ def _redact(value: Any, secrets: list[str]) -> Any:
     return value
 
 
+def _managed_unavailable_message(connection: Mapping[str, Any]) -> str:
+    """Why a local run cannot serve a managed connection, naming the provider."""
+    auth = connection["auth"]
+    name = auth.get("connector", connection["ref"])
+    kinds = {entry["kind"] for entry in auth.get("accepts", [])}
+    if connection.get("base_url") is None or kinds <= {"none"}:
+        return f"{name} runs only in managed runs; a local run cannot serve it"
+    return f"platform {name} credentials require a managed run; configure `auth` for a local run"
+
+
+def _managed_response(
+    response: Any,
+    operation: Mapping[str, Any],
+    inputs: Mapping[str, Any],
+    *,
+    contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    """One connector-call answer, its `state` normalised: an older api that
+    sends no state answered a completed call. A pending answer carries only
+    `state` and `retry_after_seconds`; a completed or cancelled one carries
+    `ok` and `status`. A completed media call must hold every output type
+    the request asked for."""
+    if not isinstance(response, dict):
+        raise IntegrationError(
+            "integration.response_invalid",
+            "managed call returned no object",
+            category="validation",
+        )
+    state = response.get("state", "completed")
+    if state not in {"pending", "completed", "cancelled"}:
+        raise IntegrationError(
+            "integration.response_invalid",
+            f"managed call returned unknown state {state!r}",
+            category="validation",
+        )
+    normalised = {**response, "state": state}
+    if state == "pending":
+        return normalised
+    if "ok" not in normalised or "status" not in normalised:
+        raise IntegrationError(
+            "integration.response_invalid",
+            f"{state} managed call answered without ok and status",
+            category="validation",
+        )
+    if state == "completed" and normalised["ok"] is True and "media" in contract:
+        requested = inputs.get("outputs") or []
+        output = normalised.get("output")
+        produced = output.get("outputs") if isinstance(output, dict) else None
+        missing = [
+            item for item in requested if not isinstance(produced, dict) or item not in produced
+        ]
+        if missing:
+            raise IntegrationError(
+                "integration.response_invalid",
+                f"managed call completed without requested output {', '.join(missing)}",
+                category="validation",
+            )
+    return normalised
+
+
 def _rejected(body: Any) -> None:
     """Refuse a provider's own `ok: false` answer, keeping only a safe code."""
     if isinstance(body, dict) and body.get("ok") is False:
@@ -790,23 +850,26 @@ class IntegrationExecutor:
         connection = next(
             item for item in spec["connections"] if item["ref"] == integration["connection"]
         )
-        if connection["auth"].get("connector") == "tavily":
+        if connection.get("managed"):
             if self.connector_client is not None:
                 if not request_id:
                     raise IntegrationError(
                         "integration.receipt_required",
-                        "Tavily calls require a durable receipt",
+                        "managed calls require a durable receipt",
                         category="configuration",
                     )
-                return self.connector_client(
+                response = self.connector_client(
                     step=step, capability=capability, request_id=request_id, input=dict(inputs)
                 )
-            if connection["auth"].get("managed"):
+                return _managed_response(response, operation, inputs, contract=integration)
+            if connection["base_url"] is None or connection["auth"].get("managed"):
                 raise IntegrationError(
                     "integration.managed_unavailable",
-                    "Platform Tavily credentials require a managed run; configure auth for local use",
+                    _managed_unavailable_message(connection),
                     category="configuration",
                 )
+            # A credential bound to a managed provider with an origin (BYOK):
+            # a local run calls the provider itself.
         request = operation["request"]
         dynamic = request.get("_dynamic", False)
         path = request["path"] if dynamic else _render(request["path"], inputs, path_value=True)
@@ -975,7 +1038,7 @@ def doctor(
             {
                 "check": "credential_reference",
                 "connection": connection["ref"],
-                "status": "pass" if configured else "fail",
+                "status": ("managed" if auth.get("managed") else "pass" if configured else "fail"),
                 "accepts": [entry["kind"] for entry in auth["accepts"]],
             }
         )
@@ -989,7 +1052,7 @@ def doctor(
                     "detail": detail,
                 }
             )
-        if connectivity:
+        if connectivity and connection.get("base_url") is not None:
             try:
                 _safe_destination(
                     connection["base_url"], connection.get("allow_private_network", False)

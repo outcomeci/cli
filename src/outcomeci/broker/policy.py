@@ -13,10 +13,12 @@ import os
 import re
 import secrets
 import tempfile
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from outcomeci.broker import pending
 from outcomeci.broker.executor import IntegrationError, IntegrationExecutor, same
 from outcomeci.runtime.events import event, safe_text
 from outcomeci.runtime.process import invoke
@@ -220,10 +222,21 @@ class PolicyExecutor:
         grants: list[dict[str, Any]] | None = None,
         step_policy: dict[str, Any] | None = None,
         container_isolated: bool = False,
+        connector_cancel: Callable[..., Any] | None = None,
+        run_cancelled: Callable[[], bool] | None = None,
+        deadline: float | None = None,
+        timeout_seconds: int | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
     ):
         """`grants` (v1 steps) scope every call by argument; None means no grant
         layer. `step_policy` is a step's inline policy, reviewed before each call
-        with a side effect, in place of any integration-level policy."""
+        with a side effect, in place of any integration-level policy.
+
+        A managed call the platform answers `pending` is polled until it ends
+        or `deadline` (a `clock()` instant) passes or `run_cancelled()` says
+        the run is gone; either sends one `connector_cancel(request_id=...)`.
+        """
         self.executor = executor
         self.directory = directory
         self.context = context
@@ -232,6 +245,12 @@ class PolicyExecutor:
         self.grants = grants
         self.step_policy = step_policy
         self.container_isolated = container_isolated
+        self.connector_cancel = connector_cancel
+        self.run_cancelled = run_cancelled
+        self.deadline = deadline
+        self.timeout_seconds = timeout_seconds
+        self.clock = clock
+        self.sleep = sleep
         # Names this invocation's calls, so a review weighs only the calls
         # the agent it is reviewing made.
         self.invocation = secrets.token_hex(8)
@@ -413,6 +432,206 @@ class PolicyExecutor:
             category="policy",
         )
 
+    def _managed(self, integration: Mapping[str, Any]) -> bool:
+        """Whether calls on this integration go to the platform: a managed
+        connection in a run that has a connector client."""
+        if self.executor.connector_client is None:
+            return False
+        connection = next(
+            item
+            for item in self.executor.compiled["workflow"]["spec"]["connections"]
+            if item["ref"] == integration["connection"]
+        )
+        return bool(connection.get("managed"))
+
+    @staticmethod
+    def _pending_managed(
+        state: dict[str, Any], step: str, capability: str, request: Mapping[str, Any]
+    ) -> dict[str, Any] | None:
+        """A managed call of this step left pending for the same proposal
+        (purpose aside), whatever revision hash fingerprinted it."""
+        wanted = {key: value for key, value in request.items() if key != "purpose"}
+        for call in state["calls"].values():
+            if (
+                call.get("status") == "pending"
+                and call.get("managed")
+                and call.get("step") == step
+                and call.get("capability") == capability
+                and {k: v for k, v in (call.get("request") or {}).items() if k != "purpose"}
+                == wanted
+            ):
+                return call
+        return None
+
+    def _resume(
+        self,
+        state: dict[str, Any],
+        call: dict[str, Any],
+        step: str,
+        capability: str,
+        request: dict[str, Any],
+    ) -> dict[str, Any]:
+        fingerprint = call["proposal_sha256"]
+        call.setdefault("attempts", [])
+        call["invocation"] = self.invocation
+        self._event(
+            state,
+            "integration.pending",
+            step,
+            capability,
+            "Managed request resumed; polling the platform for its result",
+            proposal_sha256=fingerprint,
+            resumed=True,
+            attempt=len(call["attempts"]),
+        )
+        self._save(state)
+        try:
+            return self._managed_call(state, call, step, capability, request)
+        except Exception as exc:
+            if call["status"] == "pending":
+                self._event(
+                    state,
+                    "integration.failed",
+                    step,
+                    capability,
+                    "Integration request failed or delivery is uncertain",
+                    proposal_sha256=fingerprint,
+                    detail=str(exc),
+                    level="error",
+                )
+                call["status"] = "uncertain"
+                self._save(state)
+            raise
+
+    def _confirm(
+        self, state: dict[str, Any], call: dict[str, Any], result: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Store a completed answer and tell the agent. A managed `ok: false`
+        completion is a failed call whose receipt goes back as data."""
+        fingerprint = call["proposal_sha256"]
+        result["receipt"] = fingerprint
+        provider = (
+            result.get("output", {}).get("result", {})
+            if isinstance(result.get("output"), dict)
+            else {}
+        )
+        ok = bool(result.get("ok")) and not (
+            isinstance(provider, dict) and provider.get("ok") is False
+        )
+        call.update(
+            status="confirmed" if ok or not call.get("managed") else "failed", result=result
+        )
+        status = result.get("status")
+        output = result.get("output") if isinstance(result.get("output"), dict) else {}
+        usage = output.get("usage") if isinstance(output.get("usage"), dict) else {}
+        error = output.get("error")
+        self._event(
+            state,
+            "integration.completed" if ok else "integration.failed",
+            call["step"],
+            call["capability"],
+            ("Integration request succeeded" if ok else "Integration request failed"),
+            proposal_sha256=fingerprint,
+            ok=ok,
+            http_status=(status if isinstance(status, int) and 100 <= status <= 599 else None),
+            level="info" if ok else "error",
+            failure_category=result.get("failure_category"),
+            error=error if isinstance(error, str) else None,
+            minutes=usage.get("minutes") if call.get("managed") else None,
+        )
+        self._save(state)
+        return result
+
+    def _managed_call(
+        self,
+        state: dict[str, Any],
+        call: dict[str, Any],
+        step: str,
+        capability: str,
+        request: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Send a managed call and, when the platform answers pending, poll it
+        to its end. Every request is one entry of the call's `attempts`."""
+        fingerprint = call["proposal_sha256"]
+
+        def send() -> dict[str, Any]:
+            return self.executor.execute(capability, request, step=step, request_id=fingerprint)
+
+        def record(attempt: pending.Attempt) -> None:
+            call["attempts"].append(attempt.as_dict())
+            if attempt.kind == "call" and attempt.state == pending.PENDING:
+                self._event(
+                    state,
+                    "integration.pending",
+                    step,
+                    capability,
+                    "Managed request accepted; waiting for the platform",
+                    proposal_sha256=fingerprint,
+                    retry_after_seconds=attempt.retry_after_seconds,
+                    attempt=len(call["attempts"]),
+                )
+            self._save(state)
+
+        attempt, first, error = pending.request(send, clock=self.clock)
+        record(attempt)
+        if error is not None:
+            raise error
+        response = first or {}
+        if response.get("state") != pending.PENDING:
+            return self._confirm(state, call, response)
+        outcome, response = pending.poll(
+            response,
+            call=send,
+            cancel=(
+                (lambda: self.connector_cancel(request_id=fingerprint))
+                if self.connector_cancel is not None
+                else None
+            ),
+            deadline=self.deadline,
+            stop=self.run_cancelled,
+            record=record,
+            clock=self.clock,
+            sleep=self.sleep,
+        )
+        if outcome == pending.COMPLETED:
+            return self._confirm(state, call, response)
+        if outcome == pending.CANCELLED:
+            reason, result = "api", response
+        elif outcome == pending.RUN_CANCELLED:
+            reason = "run_cancelled"
+            result = {"ok": False, "status": 409, "output": {"error": "integration.cancelled"}}
+        else:
+            reason = "timeout"
+            result = {
+                "ok": False,
+                "error": "integration.timeout",
+                "timeout_seconds": self.timeout_seconds,
+            }
+        result["receipt"] = fingerprint
+        call.update(status="cancelled", receipt_state="cancelled", result=result)
+        self._event(
+            state,
+            "integration.cancelled",
+            step,
+            capability,
+            f"Managed request cancelled ({reason})",
+            proposal_sha256=fingerprint,
+            reason=reason,
+            level="warning",
+        )
+        self._save(state)
+        if reason == "timeout":
+            raise IntegrationError(
+                "integration.timeout",
+                f"{capability} did not complete within the step timeout",
+                category="timeout",
+            )
+        raise IntegrationError(
+            "integration.cancelled",
+            f"{capability} was cancelled ({reason})",
+            category="cancelled",
+        )
+
     def _reads_only(self, capability: str, request: Mapping[str, Any]) -> bool:
         integration_name, _, operation_name = capability.partition(".")
         operation = self.executor.compiled["workflow"]["spec"]["integrations"][integration_name][
@@ -464,6 +683,12 @@ class PolicyExecutor:
                     category="policy",
                 )
             request = dict(inputs)
+            managed = self._managed(integration)
+            resumed = self._pending_managed(state, step, capability, request) if managed else None
+            if resumed is not None:
+                # A crash mid-poll left the platform holding a receipt for this
+                # proposal; poll it rather than propose a second job.
+                return self._resume(state, resumed, step, capability, request)
             fingerprint = digest(
                 {
                     "revision": self.executor.compiled["workflow_revision"],
@@ -519,6 +744,7 @@ class PolicyExecutor:
                 "status": "reviewing",
                 "proposal_sha256": fingerprint,
                 "request": request,
+                **({"managed": True, "attempts": []} if managed else {}),
             }
             state["calls"][fingerprint] = call
             self._event(
@@ -629,6 +855,8 @@ class PolicyExecutor:
                     proposal_sha256=fingerprint,
                 )
                 self._save(state)
+                if managed:
+                    return self._managed_call(state, call, step, capability, request)
                 result = self.executor.execute(
                     capability,
                     request,
@@ -639,34 +867,10 @@ class PolicyExecutor:
                 granted_by = result.get("audit", {}).get("grant")
                 if granted_by is not None:
                     call["as"] = alternatives[granted_by][0]
-                result["receipt"] = fingerprint
-                call.update(status="confirmed", result=result)
-                provider = (
-                    result.get("output", {}).get("result", {})
-                    if isinstance(result.get("output"), dict)
-                    else {}
-                )
-                ok = bool(result.get("ok")) and not (
-                    isinstance(provider, dict) and provider.get("ok") is False
-                )
-                status = result.get("status")
-                self._event(
-                    state,
-                    "integration.completed" if ok else "integration.failed",
-                    step,
-                    capability,
-                    ("Integration request succeeded" if ok else "Integration request failed"),
-                    proposal_sha256=fingerprint,
-                    ok=ok,
-                    http_status=(
-                        status if isinstance(status, int) and 100 <= status <= 599 else None
-                    ),
-                    level="info" if ok else "error",
-                )
-                self._save(state)
-                return result
+                return self._confirm(state, call, result)
             except Exception as exc:
-                if call["status"] != "denied":
+                # A denied or cancelled call already holds its verdict.
+                if call["status"] not in {"denied", "cancelled"}:
                     if call["status"] == "reviewing":
                         self._event(
                             state,

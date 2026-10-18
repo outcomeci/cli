@@ -78,7 +78,9 @@ rejected. A profile inherits the default credential only when it uses the same
 provider. Omitted authentication retains local login discovery or cloud Vault
 selection.
 
-Tavily search supports a platform key in managed Cloud runs:
+Some providers are managed: their contract carries `managed: true` and the
+platform executes every call in a managed Cloud run. Tavily search is one, and
+supports a platform key:
 
 ```yaml
 apis:
@@ -88,11 +90,47 @@ apis:
 Set `auth: secrets.tavily` and declare `tavily: vault:tavily/key` under
 `secrets` to use your own key. Managed runs proxy both key sources through the
 API and record search credit usage without exposing keys to runners. Local
-runs require your own key. `search.search` accepts `query`, `max_results`,
-`topic`, `search_depth`, `include_domains` and `exclude_domains`; grant-fixed
-fields are filled in by the broker. Tavily grant constraints must be static
-values. A decision can select conditional search steps with different domain
-or topic grants; see [the Slack research example](tests/examples/slack-research/outcome.yml).
+runs require your own key, and fail with `integration.managed_unavailable`
+without one. `search.search` accepts `query`, `max_results`, `topic`,
+`search_depth`, `include_domains` and `exclude_domains`; grant-fixed fields are
+filled in by the broker. Grants on a managed api must be static values. A
+decision can select conditional search steps with different domain or topic
+grants; see [the Slack research example](tests/examples/slack-research/outcome.yml).
+
+The media processor is a managed provider that takes no `auth` and runs only
+in managed Cloud runs:
+
+```yaml
+trigger: email
+apis:
+  transcribe: {uses: media}
+steps:
+  - notes:
+      reason: Transcribe the recording and summarise it.
+      can: [{transcribe.process: {outputs: [transcript]}}]
+      timeout: 45m
+```
+
+`transcribe.process` takes `attachment` (an attachment identifier from the
+trigger payload), `outputs` (the output types to produce; a grant pins the
+exact list) and optional per-output `options`. The platform derives the media
+type from the stored attachment and returns `media_type`, `outputs` keyed by
+output type, `provider`, `model`, `duration_seconds` and `usage.minutes`. A
+trigger without attachments, such as `manual` or a cron, compiles with a
+validation warning that `oci validate` prints. A rejected call
+(`ok: false` with a `failure_category` and `output.error` such as
+`integration.attachment_not_found`) is returned to the agent as the tool
+result; only a step timeout or a cancelled run stops the step.
+
+Agent and model steps take an optional `timeout` (`45m`, `2h`) that bounds the
+step, including any managed call the platform is still processing. A step that
+grants a media capability defaults to `30m`.
+
+A managed call that the platform answers `pending` is polled at the interval it
+suggests (5 s to 60 s) until it completes, the step times out or the run is
+cancelled; a timeout or cancellation sends one cancel request. The run record
+keeps every request as `attempts` on the call in `calls.json`, and the run log
+carries `integration.pending` and `integration.cancelled` events.
 
 An API without a first-party connector binds with `custom`. The workflow
 names the origin, and a static Vault credential (a token, an api key, or

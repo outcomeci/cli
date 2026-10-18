@@ -21,6 +21,7 @@ from typing import Any
 
 import pyte
 
+from outcomeci.broker.executor import IntegrationError
 from outcomeci.cloud_runner.client import CoreClient, CoreError
 from outcomeci.cloud_runner.models import ContractError, Launch
 from outcomeci.cloud_runner.process import PTY_COLUMNS, PTY_ROWS, run
@@ -161,6 +162,10 @@ def workflow_failure_category(error: Exception) -> str:
     """Return an operator-safe category without emitting workflow or provider output."""
     if isinstance(error, PublicationValidationError):
         return error.category
+    if isinstance(error, IntegrationError) and error.code == "integration.cancelled":
+        return "agent_cancelled"
+    if isinstance(error, IntegrationError) and error.code == "integration.timeout":
+        return "workflow_execution_failed"
     if isinstance(error, ExecutionError):
         message = str(error).casefold()
         if "authentication" in message or "unauthorized" in message or "oauth" in message:
@@ -437,6 +442,10 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 policy_reviewer=policy_review,
                 model_client=model_turn,
                 connector_client=lambda **kwargs: client.workflow_connector_call(lease, **kwargs),
+                connector_cancel=lambda **kwargs: client.workflow_connector_cancel(lease, **kwargs),
+                # The api tells the runner a run is gone only by refusing a
+                # heartbeat; a step polling a managed call reads that here.
+                run_cancelled=lambda: bool(heartbeat_failure),
                 decision_client=lambda **kwargs: client.workflow_decision(lease, **kwargs),
                 dispatch_client=lambda **kwargs: client.workflow_dispatch(lease, **kwargs),
                 output_history_client=output_history_client,

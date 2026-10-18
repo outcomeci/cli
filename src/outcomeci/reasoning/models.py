@@ -417,13 +417,15 @@ def run(
     returns: Mapping[str, Any] | None = None,
     images: list[dict] | None = None,
     turns: list[dict[str, Any]] | None = None,
+    deadline: float | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     """Run one model step to its result: (the result or None, the model's last text).
 
     `call(capability, inputs)` executes a capability through the broker. A
     result that does not match `returns` goes back to the model with the
     reason, within the same budget of tool calls. Each turn is appended to
-    `turns` as it happens, so a transcript survives however the step ends."""
+    `turns` as it happens, so a transcript survives however the step ends.
+    No turn starts after `deadline` (a `time.monotonic()` instant)."""
     allowed = {tool_name(item["capability"]): item["capability"] for item in capabilities}
     offered = tools(capabilities, returns)
     messages: list[dict[str, Any]] = [
@@ -447,6 +449,8 @@ def run(
     shown = len(images or [])
     while True:
         started = time.monotonic()
+        if deadline is not None and started >= deadline:
+            raise ExecutionError(f"step {step}: the step timeout passed before the model finished")
         try:
             answer = client(step=step, profile=profile, messages=messages, tools=offered)
         except Exception as exc:

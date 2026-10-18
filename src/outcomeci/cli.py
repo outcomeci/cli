@@ -809,6 +809,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     "workflow_revision": result["workflow_revision"],
                     "model_capabilities": result["model_capabilities"],
                     "capability_warnings": result["capability_warnings"],
+                    "validation_warnings": result["validation_warnings"],
                 }
             )
         elif args.command == "integration" and args.integration_command in {
