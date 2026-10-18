@@ -1219,27 +1219,7 @@ def run_dispatcher_step(root, compiled, state, step, options) -> None:
     _save(target.parent / f"{kind}.json", result)
     if kind == "decision":
         provider = str(step_block["reasoning"]["model"]).split("/")[0]
-        usage = result.get("usage") or {}
-        if not isinstance(usage, dict):
-            raise ExecutionError("decision response has invalid usage")
-        details = usage.get("input_tokens_details") or {}
-        if not isinstance(details, dict) or any(
-            type(count) is not int or count < 0
-            for count in [
-                usage.get("input_tokens", 0),
-                usage.get("output_tokens", 0),
-                details.get("cached_tokens", 0),
-                details.get("cache_write_tokens", 0),
-            ]
-        ):
-            raise ExecutionError("decision response has invalid usage")
-        usage = models._usage(
-            {
-                **usage,
-                "cached_tokens": details.get("cached_tokens", 0),
-                "cache_write_tokens": details.get("cache_write_tokens", 0),
-            }
-        )
+        usage = decisions.response_usage(result)
         transcript = models.write_transcript(
             target.parent.parent,
             step,

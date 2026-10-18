@@ -34,10 +34,10 @@ The full guide is at <https://outcomeci.com/docs/outcomeci>.
   [`outcomeci-connectors`](https://github.com/outcomeci/connectors).
 - `reasoning`: the default agent (`codex`, `claude` or `opencode`), a fallback,
   and named profiles a step picks with `using: <name>`. A profile with a
-  `runner` is an agent; one with only a `model`, such as
+  `agent` (or the deprecated `runner` alias) is an agent; one with only a `model`, such as
   `light: {model: anthropic/claude-haiku-4-5}`, reasons with direct model calls
   and no workspace, its granted APIs offered as tools. `review` sets the policy
-  reviewer's model. A model profile's `key: secrets.<name>` selects your
+  reviewer's model. A model profile's `auth: secrets.<name>` (or legacy `key`) selects your
   provider key. Managed Cloud runs can use platform keys for OpenAI and
   Anthropic when `key` is omitted; other chat providers require an explicit
   key. Policy-review model profiles support OpenAI and Anthropic.
@@ -49,6 +49,34 @@ The full guide is at <https://outcomeci.com/docs/outcomeci>.
 
 `oci validate` compiles the workflow and prints its revision; `oci workflow
 compile` prints the compiled steps, grants, instructions and schemas.
+
+Agent profiles can select a named Vault credential as well:
+
+```yaml
+secrets:
+  coder: vault:agents/engineering-codex
+reasoning:
+  default:
+    agent: codex
+    auth: secrets.coder
+```
+
+The Vault entry has `credential_type: agent`, `configuration.provider: codex`,
+and `secrets.auth_json` containing the Codex login JSON. Claude uses
+`configuration.provider: claude` and `secrets.oauth_token`; OpenCode uses
+`configuration.provider: opencode` and `secrets.api_key`. Local runs resolve the
+same typed entry from the local Vault. Cloud runs lease the named identity and
+save rotated credentials back to that entry. Agent credentials are never supplied
+to model calls or the API capability broker.
+
+`agent` and `runner` cannot appear together. Model profiles, their fallbacks,
+and `training.labeler` accept `auth` or `key`, but not both. Each workflow can
+use one identity per agent provider; different providers can use different
+identities. Reusing the same identity is supported. Mixing different explicit
+credentials, or explicit and implicit credentials for the same provider, is
+rejected. A profile inherits the default credential only when it uses the same
+provider. Omitted authentication retains local login discovery or cloud Vault
+selection.
 
 Some providers are managed: their contract carries `managed: true` and the
 platform executes every call in a managed Cloud run. Tavily search is one, and
@@ -405,3 +433,68 @@ path. Renaming the configuration starts separate history; it does not silently
 combine databases. Source grants restrict query results, not access to artifacts
 already present in a trusted local workflow process or the same managed run.
 Managed runners query the API and never receive the raw history database.
+
+### Workflow objectives and training annotations
+
+V1 workflows can optionally declare an `objective` and a `training.labeler`:
+
+```yaml
+apiVersion: outcomeci.workflow/v1
+objective: Identify the root cause and propose a concrete fix.
+trigger: manual
+training:
+  labeler:
+    model: openai/gpt-4.1-mini
+    review_below: 0.6
+steps:
+  - investigate:
+      reason: Investigate the reported issue and propose a fix.
+```
+
+The objective gives the labeler the workflow's intended outcome. After a run
+completes, the labeler writes a separate training annotation; a labeler failure
+does not fail the completed run. Optional `review_below` routes annotations with
+lower confidence to human review and must be between 0 and 1. The labeler accepts
+the same model credentials as other model profiles. Both fields are optional.
+Use `apiVersion: outcomeci.workflow/v1`; v2 is no longer supported.
+
+To use a decision model for labeling, opt in with `mode: decision`:
+
+```yaml
+apiVersion: outcomeci.workflow/v1
+objective: Identify the root cause and propose a concrete fix.
+trigger: manual
+secrets:
+  judge: vault:models/typesafe
+training:
+  labeler:
+    mode: decision
+    model: typesafe/jev-latest
+    key: secrets.judge
+    review_below: 0.6
+steps:
+  - investigate:
+      reason: Investigate the reported issue and propose a fix.
+```
+
+Decision mode supports `typesafe/<model>` with your Vault key, or
+`openai/gpt-6-luna` with an optional Vault key. It uses the existing Decisions
+transport locally and in managed runs; local runs need `outcomeci-cli[models]`.
+Decision mode does not support model fallback. Omit `mode` (or use `mode: llm`)
+to keep the existing LLM labeler and its generated explanations and labels.
+
+Decision labelers use a fixed rubric: outcome (`success`, `partial`, `failure`)
+and primary failure category (`none`, `missing_output`, `incorrect_output`,
+`incomplete_execution`, `insufficient_evidence`, `other`). The annotation keeps
+both answers and their probability distributions under `decisions`. Its
+`confidence` is the lower of the two answer confidences, and `review_below`
+uses that value. This aggregation is a review rule, not a measured probability
+that the whole annotation is correct. Choose the model and threshold using your
+own evaluation data.
+
+Decision annotations have empty `explanation` and `evidence` fields because
+these models do not generate prose. `labels` contains the selected failure
+category, or is empty for success. The transcript retains the supplied run
+record, rubric, provider response, and token usage. Refusals, malformed answers,
+and contradictory outcome/category pairs fail only the annotation, leaving the
+completed run unchanged. No additional LLM is called to explain a decision.

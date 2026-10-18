@@ -13,12 +13,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from outcomeci.reasoning import models
+from outcomeci.reasoning import decisions, models
+from outcomeci.reasoning.labeling import RUBRIC_VERSION, decision_questions
 from outcomeci.runtime.events import event, safe_text
 from outcomeci.security import atomic_write_json
 from outcomeci.workflow import templates
 
-RUBRIC_VERSION = 1
 OUTPUT_LIMIT = 4000
 ANNOTATION = "training/annotation.json"
 
@@ -124,6 +124,35 @@ def _review(labeler: dict[str, Any], result: dict[str, Any]) -> dict[str, Any] |
     return {"required": required, "threshold": threshold, "confidence": confidence}
 
 
+def _decision_result(
+    client, payload: dict[str, Any], turns: list[dict[str, Any]]
+) -> dict[str, Any]:
+    questions = decision_questions()
+    turn: dict[str, Any] = {"input": payload, "questions": questions}
+    turns.append(turn)
+    response = client(step=models.LABELER_PROFILE, input=payload)
+    turn["response"] = response
+    if not isinstance(response, dict):
+        raise ValueError("training.labeler: invalid decision response")
+    turn["usage"] = decisions.response_usage(response)
+    answers = decisions.validate_answers(questions, response)
+    outcome = answers["outcome"]["choice"]
+    category = answers["failure_category"]["choice"]
+    if (outcome == "success") != (category == "none"):
+        raise ValueError("training.labeler: inconsistent outcome and failure category")
+    return {
+        "outcome": outcome,
+        "confidence": min(answer["confidence"] for answer in answers.values()),
+        "labels": [] if category == "none" else [category],
+        **({"failure_category": category} if category != "none" else {}),
+        # Decision models do not generate text. Keep these fields empty rather
+        # than inventing an explanation or citing evidence they did not select.
+        "explanation": "",
+        "evidence": [],
+        "decisions": answers,
+    }
+
+
 def label_run(root: Path, compiled: dict[str, Any], state: dict[str, Any], options) -> None:
     """Annotate a completed run when its workflow declares a labeler.
 
@@ -137,28 +166,39 @@ def label_run(root: Path, compiled: dict[str, Any], state: dict[str, Any], optio
     started = datetime.now(UTC).isoformat()
     model = str(labeler.get("model", ""))
     provider = model.split("/")[0] or "model"
-    client = options.model_client or models.local_client(compiled, options.credential_resolver)
     turns: list[dict[str, Any]] = []
-    entry: dict[str, Any] = {"model": model, "rubric_version": RUBRIC_VERSION}
+    metadata = {"model": model, "rubric_version": RUBRIC_VERSION}
+    if labeler.get("mode") == "decision":
+        metadata["mode"] = "decision"
+    entry: dict[str, Any] = dict(metadata)
     try:
         try:
-            result, _text = models.run(
-                client,
-                step=models.LABELER_PROFILE,
-                profile=models.LABELER_PROFILE,
-                turns=turns,
-                system=compiled["instructions"]["orchestrator"]["content"]
-                + "\n\n## Training labeler\n\nYou annotate finished runs of this workflow.",
-                user=templates.LABELER_TASK.format(
-                    result=models.RESULT,
-                    record_json=json.dumps(
-                        record(compiled, state, outcome_root), separators=(",", ":")
+            if labeler.get("mode") == "decision":
+                client = options.decision_client or decisions.local_client(
+                    compiled, options.credential_resolver
+                )
+                result = _decision_result(client, record(compiled, state, outcome_root), turns)
+            else:
+                client = options.model_client or models.local_client(
+                    compiled, options.credential_resolver
+                )
+                result, _text = models.run(
+                    client,
+                    step=models.LABELER_PROFILE,
+                    profile=models.LABELER_PROFILE,
+                    turns=turns,
+                    system=compiled["instructions"]["orchestrator"]["content"]
+                    + "\n\n## Training labeler\n\nYou annotate finished runs of this workflow.",
+                    user=templates.LABELER_TASK.format(
+                        result=models.RESULT,
+                        record_json=json.dumps(
+                            record(compiled, state, outcome_root), separators=(",", ":")
+                        ),
                     ),
-                ),
-                capabilities=[],
-                call=lambda capability, inputs: {"error": f"{capability} is not a tool here"},
-                returns=LABELS_SCHEMA,
-            )
+                    capabilities=[],
+                    call=lambda capability, inputs: {"error": f"{capability} is not a tool here"},
+                    returns=LABELS_SCHEMA,
+                )
         finally:
             transcript = models.write_transcript(
                 outcome_root, models.LABELER_PROFILE, provider, turns
@@ -169,9 +209,8 @@ def label_run(root: Path, compiled: dict[str, Any], state: dict[str, Any], optio
             "run_id": state["run_id"],
             "workflow_revision": compiled.get("workflow_revision"),
             "labeler": {
-                "model": model,
+                **metadata,
                 "profile": models.LABELER_PROFILE,
-                "rubric_version": RUBRIC_VERSION,
             },
             "created_at": datetime.now(UTC).isoformat(),
             "transcript": transcript["files"][0]["path"] if transcript["files"] else None,

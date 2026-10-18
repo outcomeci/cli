@@ -4,27 +4,36 @@ import yaml
 from outcomeci.workflow.compiler import ConfigError, compile_workflow
 
 
-def compile_document(tmp_path, **fields):
-    document = {
-        "apiVersion": "outcomeci.workflow/v2",
-        "trigger": "manual",
-        "steps": [{"work": {"reason": "Do the work."}}],
-        **fields,
-    }
-    path = tmp_path / "workflow.yaml"
-    path.write_text(yaml.safe_dump(document))
-    return compile_workflow(path)
+@pytest.fixture
+def api_version():
+    return "outcomeci.workflow/v1"
 
 
-def test_training_compiles_and_affects_revision(tmp_path):
+@pytest.fixture
+def compile_document(api_version):
+    def build(tmp_path, **fields):
+        document = {
+            "apiVersion": api_version,
+            "trigger": "manual",
+            "steps": [{"work": {"reason": "Do the work."}}],
+            **fields,
+        }
+        path = tmp_path / "workflow.yaml"
+        path.write_text(yaml.safe_dump(document))
+        return compile_workflow(path)
+
+    return build
+
+
+def test_training_compiles_and_affects_revision(tmp_path, compile_document, api_version):
     first = compile_document(tmp_path, training={"labeler": {"model": "openai/test"}})
-    assert first["api_version"] == "outcomeci.workflow/v2"
+    assert first["api_version"] == api_version
     assert first["training"] == {"labeler": {"model": "openai/test"}}
     second = compile_document(tmp_path, training={"labeler": {"model": "anthropic/test"}})
     assert first["workflow_revision"] != second["workflow_revision"]
 
 
-def test_training_key_resolves_like_reasoning(tmp_path):
+def test_training_key_resolves_like_reasoning(tmp_path, compile_document):
     result = compile_document(
         tmp_path,
         secrets={"key": "vault:models/key"},
@@ -50,22 +59,16 @@ def test_training_key_resolves_like_reasoning(tmp_path):
         {"labeler": {"model": "openai/test", "key": "secrets.missing"}},
     ],
 )
-def test_invalid_training(tmp_path, training):
+def test_invalid_training(tmp_path, training, compile_document):
     with pytest.raises(ConfigError, match="training"):
         compile_document(tmp_path, training=training)
 
 
-def test_training_is_opt_in(tmp_path):
+def test_training_is_opt_in(tmp_path, compile_document):
     assert "training" not in compile_document(tmp_path)
-    with pytest.raises(ConfigError, match="training"):
-        compile_document(
-            tmp_path,
-            apiVersion="outcomeci.workflow/v1",
-            training={"labeler": {"model": "openai/test"}},
-        )
 
 
-def test_review_below_compiles_as_a_routing_threshold(tmp_path):
+def test_review_below_compiles_as_a_routing_threshold(tmp_path, compile_document):
     result = compile_document(
         tmp_path, training={"labeler": {"model": "openai/test", "review_below": 0.6}}
     )
@@ -76,14 +79,14 @@ def test_review_below_compiles_as_a_routing_threshold(tmp_path):
 
 
 @pytest.mark.parametrize("value", [-0.1, 1.5, "0.5", True, None, [0.5]])
-def test_review_below_must_be_a_number_from_zero_to_one(tmp_path, value):
+def test_review_below_must_be_a_number_from_zero_to_one(tmp_path, value, compile_document):
     with pytest.raises(ConfigError, match="review_below"):
         compile_document(
             tmp_path, training={"labeler": {"model": "openai/test", "review_below": value}}
         )
 
 
-def test_a_workflow_objective_compiles_and_affects_revision(tmp_path):
+def test_a_workflow_objective_compiles_and_affects_revision(tmp_path, compile_document):
     result = compile_document(tmp_path, objective="  Reduce recurring production errors. ")
     assert result["objective"] == "Reduce recurring production errors."
     assert "objective" not in compile_document(tmp_path)
@@ -91,11 +94,73 @@ def test_a_workflow_objective_compiles_and_affects_revision(tmp_path):
 
 
 @pytest.mark.parametrize("value", ["", "   ", None, 3, ["x"]])
-def test_an_objective_must_be_a_non_empty_string(tmp_path, value):
+def test_an_objective_must_be_a_non_empty_string(tmp_path, value, compile_document):
     with pytest.raises(ConfigError, match="objective"):
         compile_document(tmp_path, objective=value)
 
 
-def test_a_v1_workflow_has_no_objective(tmp_path):
-    with pytest.raises(ConfigError, match="objective"):
-        compile_document(tmp_path, apiVersion="outcomeci.workflow/v1", objective="Fix it.")
+def test_v2_is_no_longer_supported(tmp_path, compile_document):
+    with pytest.raises(ConfigError, match="unsupported apiVersion.*use outcomeci.workflow/v1"):
+        compile_document(
+            tmp_path,
+            apiVersion="outcomeci.workflow/v2",
+            objective="Fix it.",
+            training={"labeler": {"model": "openai/test"}},
+        )
+
+
+@pytest.mark.parametrize("model", ["openai/gpt-6-luna", "typesafe/jev-latest"])
+def test_decision_labeler_compiles_with_credentials(tmp_path, compile_document, model):
+    result = compile_document(
+        tmp_path,
+        secrets={"judge": "vault:models/judge"},
+        training={
+            "labeler": {
+                "mode": "decision",
+                "model": model,
+                "key": "secrets.judge",
+                "review_below": 0.7,
+            }
+        },
+    )
+    assert result["training"]["labeler"] == {
+        "mode": "decision",
+        "model": model,
+        "key": "judge",
+        "credential": "vault:models/judge",
+        "review_below": 0.7,
+    }
+
+
+def test_explicit_llm_mode_keeps_model_profile(tmp_path, compile_document):
+    result = compile_document(
+        tmp_path, training={"labeler": {"mode": "llm", "model": "openai/test"}}
+    )
+    assert result["training"]["labeler"]["mode"] == "llm"
+
+
+@pytest.mark.parametrize(
+    "labeler",
+    [
+        {"mode": "other", "model": "openai/test"},
+        {"mode": None, "model": "openai/test"},
+        {"mode": {}, "model": "openai/test"},
+        {"mode": "decision", "model": "openai/test"},
+        {"mode": "decision", "model": "anthropic/test"},
+        {"mode": "decision", "model": "typesafe/jev-latest"},
+        {"mode": "decision", "model": "typesafe/unsafe/path", "key": "secrets.judge"},
+        {"mode": "decision", "model": "openai/gpt-6-luna", "fallback": {"model": "openai/test"}},
+        {"mode": "decision", "model": "openai/gpt-6-luna", "key": "secrets.missing"},
+        {"model": "openai/gpt-6-luna"},
+        {"model": "typesafe/jev-latest", "key": "secrets.judge"},
+        {
+            "model": "openai/test",
+            "fallback": {"model": "typesafe/jev-latest", "key": "secrets.judge"},
+        },
+    ],
+)
+def test_labeler_mode_and_model_must_agree(tmp_path, compile_document, labeler):
+    with pytest.raises(ConfigError, match="training.labeler"):
+        compile_document(
+            tmp_path, secrets={"judge": "vault:models/judge"}, training={"labeler": labeler}
+        )
