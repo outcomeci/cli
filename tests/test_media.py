@@ -192,7 +192,7 @@ def test_stale_contract_is_a_compile_error(tmp_path, monkeypatch):
         operations=MEDIA.operations,
     )
     monkeypatch.setattr(language, "providers", lambda: {"media": stale})
-    with pytest.raises(ConfigError, match="outcomeci-connectors>=0.15.0"):
+    with pytest.raises(ConfigError, match="outcomeci-connectors>=0.16.0"):
         compiled(tmp_path)
 
 

@@ -657,7 +657,7 @@ def _apis(document: dict[str, Any]) -> tuple[dict[str, Any], list[dict], dict[st
             if not isinstance(registry, dict) or not registry:
                 raise ConfigError(
                     f"{field}: {found.name} contract carries no media registry; "
-                    "install outcomeci-connectors>=0.15.0"
+                    "install outcomeci-connectors>=0.16.0"
                 )
         accepts = contract["auth"]["accepts"]
         keyless = [item["kind"] for item in accepts] == ["none"]
