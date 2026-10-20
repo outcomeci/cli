@@ -41,6 +41,9 @@ class ExecutionOptions:
 
     agent: str | None = None
     model: str | None = None
+    # The runner for steps whose workflow names none: the agent the claim
+    # leased (cloud) or the login this machine resolved (local).
+    default_agent: str | None = None
     credential_resolver: CredentialResolver | None = None
     event_sink: Callable[[dict[str, Any]], None] | None = None
     policy_reviewer: Callable[[dict[str, Any]], dict[str, Any]] | None = None
@@ -76,11 +79,19 @@ def _id(intent: str) -> str:
 
 
 def _policy(
-    compiled: dict[str, Any], step: str, agent: str | None, model: str | None
+    compiled: dict[str, Any],
+    step: str,
+    agent: str | None,
+    model: str | None,
+    default_agent: str | None = None,
 ) -> tuple[str, str | None]:
     selected = compiled["instructions"]["steps"].get(step, {}).get("policy", {})
-    runner = agent or selected.get("runner")
+    runner = agent or selected.get("runner") or default_agent
     chosen_model = model or selected.get("model")
+    if runner is None:
+        raise ExecutionError(
+            f"no agent selected for {step}: set reasoning.default.runner, or pass --agent"
+        )
     if runner not in {"codex", "claude", "opencode"}:
         raise ExecutionError(f"no supported agent configured for {step}")
     if runner == "opencode" and (
@@ -413,7 +424,7 @@ def _execute(
         raise ExecutionError(f"step {step} is not an outcomeci.workflow/v1 step")
     if step_block["kind"] != "agent":
         raise ExecutionError(f"step {step} is driven by the runtime, not an agent")
-    runner, chosen_model = _policy(compiled, step, agent, model)
+    runner, chosen_model = _policy(compiled, step, agent, model, options.default_agent)
     outcome_root = root / ".outcomeci" / "outcomes" / state["run_id"]
     writable_artifacts = _prepare_writable_artifacts(compiled, outcome_root, step)
     connection_secrets = _connection_secrets(compiled)

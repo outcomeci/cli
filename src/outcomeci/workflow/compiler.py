@@ -121,7 +121,9 @@ def _effective_agent_policy(policy: dict[str, Any], default: dict[str, Any]) -> 
         "model": policy.get("model", default.get("model")),
     }
     credential = policy.get("credential")
-    if not credential and (result["runner"] or "codex") == (default.get("runner") or "codex"):
+    # A step on the default runner (named, or left to the workspace) shares
+    # the default's credential.
+    if not credential and result["runner"] == default.get("runner"):
         credential = default.get("credential")
     if credential:
         result["credential"] = credential
@@ -714,7 +716,7 @@ def validate_lowered(root: dict[str, Any], path: Path) -> dict[str, Any]:
         fallback = _agent_policy(default_raw["fallback"], "spec.agents.default.fallback")
         if not fallback.get("runner"):
             raise ConfigError("spec.agents.default.fallback.runner is required")
-        if fallback["runner"] == default.get("runner", "codex"):
+        if fallback["runner"] == default.get("runner"):
             raise ConfigError(
                 "spec.agents.default.fallback.runner must differ from the default runner"
             )
@@ -943,11 +945,13 @@ def _compile(document: dict[str, Any], root: Path) -> dict[str, Any]:
     if policies and default.get("fallback"):
         policies.append(default["fallback"])
     for policy in policies:
-        agent = policy.get("runner") or "codex"
+        # None is the default runner when the document leaves it unnamed.
+        agent = policy.get("runner")
         credential = policy.get("credential")
         if agent in identities and identities[agent] != credential:
+            named = agent or "the default runner"
             raise ConfigError(
-                f"one workflow must use one credential for {agent}; do not mix different auth references or explicit and implicit authentication"
+                f"one workflow must use one credential for {named}; do not mix different auth references or explicit and implicit authentication"
             )
         identities[agent] = credential
     normalized = json.loads(json.dumps(document, sort_keys=True, separators=(",", ":")))

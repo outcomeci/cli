@@ -106,10 +106,72 @@ def _synthesize_payload(trigger_name: str, definition: dict[str, Any]) -> dict[s
     )
 
 
-def _default_agent(compiled: dict[str, Any]) -> str:
-    """The provider a cloud claim would lease for this workflow."""
+def _default_agent(compiled: dict[str, Any]) -> str | None:
+    """The default runner the workflow names, if it names one."""
     agents = (compiled.get("workflow") or {}).get("spec", {}).get("agents") or {}
-    return (agents.get("default") or {}).get("runner") or "codex"
+    return (agents.get("default") or {}).get("runner")
+
+
+def _needs_default_agent(compiled: dict[str, Any]) -> bool:
+    """Whether an agent step runs on a default the workflow leaves unnamed."""
+    if _default_agent(compiled):
+        return False
+    return any(
+        not (step.get("policy") or {}).get("runner") for step in _agent_steps(compiled).values()
+    )
+
+
+def _granted_default_agent(workspace_id: str, workflow_id: str) -> str:
+    """The one agent the workspace granted this workflow, for a cloud run of a
+    workflow that names no default runner: what its cloud claim would lease."""
+    from outcomeci.cloud import vault_request
+
+    listing = vault_request(workspace_id, "list")
+    entries = listing.get("entries", []) if isinstance(listing, dict) else []
+    providers = sorted(
+        {
+            str(entry["provider"])
+            for entry in entries
+            if entry.get("status") == "active"
+            and (entry.get("metadata") or {}).get("credential_type") == "agent"
+            and entry.get("path") == f"agents/{entry.get('provider')}"
+            and workflow_id in [str(item) for item in entry.get("workflow_ids", [])]
+        }
+    )
+    if len(providers) == 1:
+        return providers[0]
+    if not providers:
+        raise ExecutionError(
+            "no agent is connected and granted to this workflow: grant agents/<provider> "
+            "in the workspace Vault, set reasoning.default.runner, or pass --agent"
+        )
+    raise ExecutionError(
+        f"several agents are granted to this workflow ({', '.join(providers)}): "
+        "set reasoning.default.runner, or pass --agent"
+    )
+
+
+def _machine_default_agent(root: Path) -> str:
+    """The one agent this machine is logged in to, for a local run of a
+    workflow that names no default runner."""
+    available = []
+    for provider in ("codex", "claude", "opencode"):
+        try:
+            _local_login(root, provider)
+        except ExecutionError:
+            continue
+        available.append(provider)
+    if len(available) == 1:
+        return available[0]
+    if not available:
+        raise ExecutionError(
+            "no agent login on this machine: run `codex login`, set an agent's "
+            "environment variable, set reasoning.default.runner, or pass --agent"
+        )
+    raise ExecutionError(
+        f"this machine is logged in to several agents ({', '.join(sorted(available))}): "
+        "set reasoning.default.runner, or pass --agent"
+    )
 
 
 def _check_agent(agent: str | None, model: str | None) -> None:
@@ -132,7 +194,7 @@ def _agent_steps(compiled: dict[str, Any]) -> dict[str, dict[str, Any]]:
     }
 
 
-def _runners(compiled: dict[str, Any], agent: str | None) -> list[str]:
+def _runners(compiled: dict[str, Any], agent: str | None, default: str | None = None) -> list[str]:
     """Every agent provider the run needs a login for: the default first, then any
     runner a step selects for itself, or only `agent` when it overrides them all.
 
@@ -144,12 +206,14 @@ def _runners(compiled: dict[str, Any], agent: str | None) -> list[str]:
         return []
     if agent:
         return [agent]
+    default = _default_agent(compiled) or default
     found = []
     for step in steps.values():
-        runner = (step.get("policy") or {}).get("runner") or _default_agent(compiled)
+        runner = (step.get("policy") or {}).get("runner") or default
+        if runner is None:
+            raise ExecutionError("no agent selected: set reasoning.default.runner, or pass --agent")
         if runner not in found:
             found.append(runner)
-    default = _default_agent(compiled)
     return ([default] if default in found else []) + [
         runner for runner in found if runner != default
     ]
@@ -212,7 +276,12 @@ def run_cloud(
     image = image or default_image()
     engine = discover_engine(runtime)
     _check_image(image, engine=engine)
-    runners = _runners(compiled, agent)
+    default_agent = (
+        _granted_default_agent(workspace_id, workflow_id)
+        if not agent and _needs_default_agent(compiled)
+        else None
+    )
+    runners = _runners(compiled, agent, default_agent)
     _check_network(image, network, _run_hosts(compiled, runners), engine=engine)
     _flush_pending_releases()
     _flush_pending_rotations()
@@ -223,7 +292,9 @@ def run_cloud(
         name, payload = _resolve_trigger(
             compiled, trigger_name or _default_trigger(compiled), payload_path
         )
-    leases = _issue_leases(workspace_id, workflow_id, runners, _agent_credentials(compiled))
+    leases = _issue_leases(
+        workspace_id, workflow_id, runners, _agent_credentials(compiled, default_agent)
+    )
     lease = leases[0]
 
     with ExitStack() as held:
@@ -248,6 +319,7 @@ def run_cloud(
                 payload=payload,
                 agent=agent,
                 model=model,
+                default_agent=default_agent,
                 auto_continue=auto_continue,
                 network=network,
                 retry_run=retry_run,
@@ -708,6 +780,7 @@ def _run_in_image(
     agent: str | None,
     model: str | None,
     auto_continue: bool,
+    default_agent: str | None = None,
     network: str | None = None,
     retry_run: str | None = None,
     engine: ContainerEngine = DEFAULT_ENGINE,
@@ -729,6 +802,7 @@ def _run_in_image(
         "retry": retry_run,
         "agent": agent,
         "model": model,
+        "default_agent": default_agent,
         "auto_continue": auto_continue,
         "values": lease["values"],
         "expires_at": lease["expires_at"],
@@ -861,7 +935,9 @@ def _default_trigger(compiled: dict[str, Any]) -> str:
     raise ExecutionError(f"pass --trigger; the workflow declares {', '.join(sorted(triggers))}")
 
 
-def _agent_credentials(compiled: dict[str, Any]) -> dict[str, str]:
+def _agent_credentials(
+    compiled: dict[str, Any], default_agent: str | None = None
+) -> dict[str, str]:
     """Named credentials for the provider identities used by this run."""
     default = compiled["workflow"]["spec"].get("agents", {}).get("default", {})
     policies = [step.get("policy", {}) for step in _agent_steps(compiled).values()]
@@ -869,7 +945,7 @@ def _agent_credentials(compiled: dict[str, Any]) -> dict[str, str]:
         policies.append(default["fallback"])
     found: dict[str, str] = {}
     for policy in policies:
-        provider = policy.get("runner") or default.get("runner") or "codex"
+        provider = policy.get("runner") or default.get("runner") or default_agent
         credential = policy.get("credential")
         if credential:
             if provider in found and found[provider] != credential:
@@ -1013,8 +1089,11 @@ def run_local(
             compiled, trigger_name or _default_trigger(compiled), payload_path
         )
     values = _local_values(root, compiled)
-    runners = _runners(compiled, agent)
-    credentials = _agent_credentials(compiled)
+    default_agent = (
+        _machine_default_agent(root) if not agent and _needs_default_agent(compiled) else None
+    )
+    runners = _runners(compiled, agent, default_agent)
+    credentials = _agent_credentials(compiled, default_agent)
     logins = [_local_login(root, provider, credentials.get(provider)) for provider in runners]
     engine = discover_engine(runtime)
     _check_image(image, engine=engine)
@@ -1038,6 +1117,7 @@ def run_local(
                 payload=payload,
                 agent=agent,
                 model=model,
+                default_agent=default_agent,
                 auto_continue=auto_continue,
                 network=network,
                 retry_run=retry_run,
