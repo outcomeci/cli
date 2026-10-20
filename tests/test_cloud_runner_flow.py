@@ -1461,6 +1461,7 @@ class MultiRunnerTests(unittest.TestCase):
                 options["on_created"]("run-1")
                 seen["claude"] = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
                 seen["codex_home"] = os.environ.get("CODEX_HOME")
+                seen["default_agent"] = options["options"].default_agent
                 (root / ".codex" / "auth.json").write_text('{"tokens": {"refresh_token": "rt-2"}}')
                 outcome = root / ".outcomeci" / "outcomes" / "run-1"
                 outcome.mkdir(parents=True)
@@ -1486,6 +1487,8 @@ class MultiRunnerTests(unittest.TestCase):
 
         self.assertEqual(seen["claude"], "claude-token")
         self.assertEqual(seen["codex_home"], str(root / ".codex"))
+        # The workflow names no runner: the first leased login is its default.
+        self.assertEqual(seen["default_agent"], "claude")
         status, values = client.completed[-1]
         self.assertEqual(status, "completed")
         self.assertEqual(values["expected_credential_version"], 5)

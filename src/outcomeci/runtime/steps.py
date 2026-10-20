@@ -782,7 +782,9 @@ def run_converse(
                 consultation["outbox"].append(_decided_by(deciders))
         _save(path, consultation)
     consultation.setdefault("votes", {})
-    runner, model = local._policy(compiled, step, options.agent, options.model)
+    runner, model = local._policy(
+        compiled, step, options.agent, options.model, options.default_agent
+    )
     thread = _thread(message, spec)
     if options.durable_waits:
         consultation.setdefault("expires_at", time.time() + spec["timeout_seconds"])

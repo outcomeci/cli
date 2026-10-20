@@ -449,7 +449,9 @@ def _reasoning(
         )
     if "agent" in profiles.get("review", {}):
         raise ConfigError("reasoning.review is a model: {model, key?}, not an agent")
-    default = _agent(reasoning.get("default", {"agent": "codex"}), "reasoning.default", secrets)
+    # Without a runner, the default is the agent the workspace granted the
+    # workflow (cloud) or the one this machine is logged in to (local).
+    default = _agent(reasoning.get("default", {}), "reasoning.default", secrets)
     fallback = reasoning.get("fallback")
     if fallback is None:
         return default, None, profiles

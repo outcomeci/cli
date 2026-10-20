@@ -126,6 +126,7 @@ def test_source_decision_controls_search_and_one_cited_slack_reply(
         "dispatcher",
         payload,
         engine.ExecutionOptions(
+            default_agent="codex",
             decision_client=decide,
             connector_client=search,
             model_client=model,

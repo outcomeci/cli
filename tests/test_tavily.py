@@ -276,6 +276,7 @@ def test_ordinary_decision_routes_exactly_one_scoped_search(tmp_path, choice):
         "manual",
         {"question": "help"},
         options=engine.ExecutionOptions(
+            default_agent="codex",
             credential_resolver=lambda _: pytest.fail("resolved key"),
             decision_client=decide,
             model_client=model,

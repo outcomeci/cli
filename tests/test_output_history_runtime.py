@@ -123,7 +123,8 @@ def test_engine_queries_history_into_explicit_step_context(tmp_path, monkeypatch
         return "done"
 
     monkeypatch.setattr(engine, "invoke", agent)
-    options = ExecutionOptions(credential_resolver=lambda ref: "unused")
+    # The workflow names no runner; a runner supplies the default it leased.
+    options = ExecutionOptions(credential_resolver=lambda ref: "unused", default_agent="codex")
     first = engine.trigger(tmp_path, config, "manual", {"subject": "first"}, options=options)
     second = engine.trigger(tmp_path, config, "manual", {"subject": "second"}, options=options)
     assert first["status"] == second["status"] == "completed"

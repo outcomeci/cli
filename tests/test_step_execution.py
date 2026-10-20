@@ -34,7 +34,8 @@ def _resolver(reference: str) -> str:
     raise AssertionError(f"no credential should be resolved, asked for {reference}")
 
 
-OPTIONS = local.ExecutionOptions(credential_resolver=_resolver)
+# The test workflows name no runner; a runner supplies the default it leased.
+OPTIONS = local.ExecutionOptions(credential_resolver=_resolver, default_agent="codex")
 
 
 @pytest.fixture
@@ -98,7 +99,9 @@ def test_an_invalid_result_is_repaired_once_without_capabilities(tmp_path, workf
         workflow,
         "email",
         email_payload(),
-        options=local.ExecutionOptions(credential_resolver=_resolver, event_sink=events.append),
+        options=local.ExecutionOptions(
+            credential_resolver=_resolver, event_sink=events.append, default_agent="codex"
+        ),
     )
 
     assert state["status"] == "completed"

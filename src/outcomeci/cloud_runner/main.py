@@ -364,6 +364,11 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
                 f"allow_private_network from apis: {', '.join(private)}"
             )
         fallback_spec = compiled_spec["agents"]["default"].get("fallback")
+        # The claim leases the run's default agent first: the one the
+        # workflow names, else the one the workspace granted it.
+        default_agent = compiled_spec["agents"]["default"].get("runner") or (
+            str(logins[0]["provider"]) if logins else None
+        )
         fallback_used = False
         active_agent: str | None = None
         active_model: str | None = None
@@ -437,6 +442,7 @@ def execute_workflow(launch: Launch, client: CoreClient) -> int:
             return local.ExecutionOptions(
                 agent=agent_override,
                 model=model_override,
+                default_agent=default_agent,
                 credential_resolver=resolver,
                 event_sink=policy_event,
                 policy_reviewer=policy_review,
